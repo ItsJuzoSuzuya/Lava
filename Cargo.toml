@@ -1,0 +1,9 @@
+[package]
+name = "Letter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+inkwell = { version = "0.9.0", features = ["llvm22-1"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
