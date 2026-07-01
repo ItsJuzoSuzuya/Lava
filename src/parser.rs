@@ -1,6 +1,6 @@
 use std::mem::discriminant;
 
-use crate::{declaration::Declaration, expression::Expr, lexer::Lexer, statement::Stmt, token::Token, r#type::Type};
+use crate::{declaration::Declaration, expression::Expr, lexer::{self, Lexer}, statement::Stmt, token::Token};
 
 pub struct Parser {
     lexer: Lexer
@@ -21,9 +21,12 @@ impl Parser {
         let stmt = match cur {
             Token::Func                 => self.parse_function_declaration(),
             Token::Let                  => self.parse_instantiation(),
-            other                       => Stmt::Expression(self.parse_expression(other))
+            other                       => { 
+                let expr = Stmt::Expression(self.parse_expression(other));
+                self.lexer.expect(Token::Semicolon);
+                return Some(expr);
+            }
         };
-        self.lexer.expect(Token::Semicolon);
         Some(stmt)
     }
 
@@ -31,7 +34,14 @@ impl Parser {
         match cur {
             Token::Print            => self.parse_print(),
             Token::Int32(value)     => Expr::Int32(value),
-            Token::Identifier(name) => Expr::Identifier(name),
+            Token::Identifier(name) => {
+                if discriminant(&self.lexer.peek().unwrap()) == discriminant(&Token::LParen) {
+                    self.lexer.get_next_token();
+                    self.lexer.get_next_token();
+                    return Expr::FunctionCall(name)
+                }
+                Expr::Identifier(name)
+            }
             _ => panic!("Unknown token: {}", cur)
         }
     }
@@ -49,7 +59,6 @@ impl Parser {
     }
 
     fn parse_function_declaration(&mut self) -> Stmt {
-
         let name = self.lexer.expect(Token::Identifier(String::new()));
         let params: Vec<Expr> = self.parse_params();
         let body = self.parse_body();
@@ -59,7 +68,7 @@ impl Parser {
             name: name.to_string(), 
             params: params, 
             body: body, 
-            return_type: None 
+            return_type: None,
         })
     }
 
@@ -70,6 +79,7 @@ impl Parser {
         let typename = self.lexer.expect(Token::Identifier(String::new()));
         self.lexer.expect(Token::Equal);
         let value = self.next_expression();
+        self.lexer.expect(Token::Semicolon);
 
         return Stmt::Instantiation { 
             name: name.to_string(),

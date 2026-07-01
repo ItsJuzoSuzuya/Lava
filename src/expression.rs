@@ -17,6 +17,7 @@ pub enum Expr {
         typename: String,
         default_value: Option<Box<Expr>>
     },
+    FunctionCall(String),
     Identifier(String),
 
 }
@@ -27,13 +28,14 @@ impl Display for Expr {
             Expr::Print(expr) => write!(f, "Print({})", expr),
             Expr::Int32(value) => write!(f, "Int32({})", value),
             Expr::Identifier(name) => write!(f, "Identifier({})", name), 
+            Expr::FunctionCall(name) => write!(f, "FunctionCall({})", name), 
             Expr::Param { name, typename, default_value: _}  => write!(f, "Param(name: {}, type: {})", name, typename)
         }
     }
 }
 
 impl Codegen for Expr {
-    fn codegen<'ctx>(&self, ctx: &CodegenContext<'ctx>) -> Option<Box<BasicValueEnum<'ctx>>> {
+    fn codegen<'ctx, 'a>(&self, ctx: &'a mut CodegenContext<'ctx>) -> Option<Box<BasicValueEnum<'ctx>>> {
         match self {
             Expr::Print(expr) => {
                 let expr_value = expr.codegen(ctx).unwrap();
@@ -49,6 +51,18 @@ impl Codegen for Expr {
             },
             Expr::Int32(value) => {
                 Some(Box::new(ctx.module.get_context().i32_type().const_int(*value as u64, false).into()))
+            }
+            Expr::FunctionCall(name) => {
+                let function = ctx.module.get_function(name).unwrap();
+                ctx.builder.build_call(function, &[], "fn")
+                    .unwrap_or_else(|_| panic!("Requested function'{}' not found!", name));
+                return None;
+                
+            }
+            Expr::Identifier(name) => {
+                let value = ctx.load_var(name)
+                    .unwrap_or_else(|| panic!("Requested variable '{}' not found in this scope!", name));
+                return Some(Box::new(value));
             }
             _ => None
         }

@@ -1,6 +1,12 @@
 use std::{collections::HashMap, path::Path};
 
-use inkwell::{builder::Builder, context::Context, module::Module, targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine}, values::PointerValue};
+use inkwell::{builder::Builder, context::Context, module::Module, targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine}, types::BasicTypeEnum, values::{BasicValueEnum, PointerValue}};
+
+pub struct Symbol<'ctx> {
+  pub ty: BasicTypeEnum<'ctx>,
+  pub ptr: PointerValue<'ctx>,
+  pub mutable: bool,
+}
 
 pub struct CodegenContext<'ctx>  {
     pub context: &'ctx Context,
@@ -8,7 +14,8 @@ pub struct CodegenContext<'ctx>  {
     pub builder: Builder<'ctx>,
     pub machine: TargetMachine,
 
-    pub scope: HashMap<String, PointerValue<'ctx>>
+    pub scope: HashMap<String, Symbol<'ctx>>,
+    pub functions: Vec<String>
 }
 
 impl<'ctx> CodegenContext<'ctx> {
@@ -31,7 +38,8 @@ impl<'ctx> CodegenContext<'ctx> {
             module: context.create_module("mod"),
             builder: context.create_builder(),
             machine: machine,
-            scope: HashMap::new()
+            scope: HashMap::new(),
+            functions: Vec::new()
         }
     }
 
@@ -44,6 +52,22 @@ impl<'ctx> CodegenContext<'ctx> {
         // Insert Basic Block
         let entry_block = self.context.append_basic_block(main_fn, "entry_block");
         self.builder.position_at_end(entry_block);
+    }
+
+    pub fn push_var(&mut self, name: String, ty: BasicTypeEnum<'ctx>, ptr: PointerValue<'ctx>){
+        let symbol = Symbol{ ty:ty, ptr:ptr, mutable:true};
+        self.scope.insert(name, symbol);
+    }
+
+    pub fn push_func(&mut self, name: String){
+        self.functions.push(name);
+    }
+
+    pub fn load_var(&mut self, name: &str) -> Option<BasicValueEnum<'ctx>> {
+        let symbol = self.scope.get(name)?;
+        let ty = symbol.ty;
+        let ptr = symbol.ptr;
+        Some(self.builder.build_load(ty, ptr, name).unwrap())
     }
 
     pub fn compile(&self) {

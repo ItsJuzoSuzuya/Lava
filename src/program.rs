@@ -21,9 +21,8 @@ impl<'ctx> Program<'ctx> {
         self.context.build_entry();
 
         while let Some(stmt) = self.parser.parse_statement() {
-            println!("{}", stmt);
-            stmt.codegen(&self.context);
-        }
+            stmt.codegen(&mut self.context);
+        } 
 
         self.context.compile();
         

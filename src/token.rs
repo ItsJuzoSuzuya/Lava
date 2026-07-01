@@ -41,7 +41,7 @@ impl Display for Token {
             Token::Semicolon    => write!(f, "{}", "Semicolon"),
 
             Token::Int32(value)    => write!(f, "Int32({})", value),
-            Token::Identifier(name) => write!(f, "Identifier({})", name)
+            Token::Identifier(name) => write!(f, "{}", name)
         }
     }
 }
@@ -50,7 +50,33 @@ impl Token {
     pub fn to_type(&self) -> Type {
         match self {
             Token::Int32(_) => Type::Int32,
+            Token::Identifier(s) => match s.as_str() {
+              "int32" => Type::Int32,
+              _ => panic!("Unknown type: {}", s)
+            },
             _ => panic!("No type for Token: {}", self)
+        }
+    }
+
+    pub fn from_char(c: char) -> Option<Token> {
+        match c {
+            '(' => { return Some(Token::LParen); }
+            ')' => { return Some(Token::RParen); }
+            ';' => { return Some(Token::Semicolon); }
+            ':' => { return Some(Token::Colon); }
+            '=' => { return Some(Token::Equal); }
+            '{' => { return Some(Token::LBrace); }
+            '}' => { return Some(Token::RBrace); }
+            _ => None
+        }
+    }
+
+    pub fn from_string(token: &str) -> Token {
+        match token {
+            "func"  => Token::Func,
+            "print" => Token::Print,
+            "let"   => Token::Let,
+            _       => Token::Identifier(token.to_string())
         }
     }
 }

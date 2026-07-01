@@ -1,5 +1,7 @@
 use std::fmt::{Display};
 
+use inkwell::llvm_sys::LLVMType;
+
 use crate::{expression::Expr, statement::Stmt};
 
 pub enum Declaration {
@@ -7,7 +9,7 @@ pub enum Declaration {
         name: String,
         params: Vec<Expr>,
         body: Vec<Stmt>,
-        return_type: Option<Expr>,
+        return_type: Option<LLVMType>,
     }
 }
 

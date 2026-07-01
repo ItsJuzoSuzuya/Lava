@@ -14,6 +14,6 @@ mod program;
 
 fn main() {
     let context = Context::create();
-    let mut program = Program::new(&context, "let x: int32 = 20;".to_string());
+    let mut program = Program::new(&context, "func foo() { print(22); } foo();".to_string());
     program.run();
 }

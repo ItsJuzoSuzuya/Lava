@@ -14,76 +14,69 @@ impl Lexer {
     }
 
     pub fn peek(&mut self) -> Option<Token> {
-        if self.pos >= self.source.len() {
+        let mut cache_pos = self.pos;
+        if cache_pos >= self.source.len() {
              return None;
         }
 
-        let cache_pos = self.pos;
-
         // skip whitespace
-        while self.source.chars().nth(self.pos).unwrap() == ' ' {
-            self.pos += 1;
+        while self.source.chars().nth(cache_pos).unwrap() == ' ' {
+            if cache_pos >= self.source.len() {
+                 return None;
+            }
+            cache_pos += 1;
         }
 
         let mut token = String::from("");
-        let mut c = self.source.chars().nth(self.pos).unwrap();
+        let mut c = self.source.chars().nth(cache_pos).unwrap();
+
+        if let Some(t) = Token::from_char(c) {
+            return Some(t);
+        }
 
         // Number
         if c.is_digit(10) {
             while c.is_digit(10){
                 token += &c.to_string();
-                self.pos += 1;
-                c = self.source.chars().nth(self.pos).unwrap_or(' ')
+                cache_pos += 1;
+                c = self.source.chars().nth(cache_pos).unwrap_or(' ')
             }
 
-            self.pos = cache_pos;
             return Some(Token::Int32(token.parse::<i32>().unwrap()));
         }
 
-        // Single-character punctuation
-        match c {
-            '(' => { self.pos = cache_pos; return Some(Token::LParen); }
-            ')' => { self.pos = cache_pos; return Some(Token::RParen); }
-            ';' => { self.pos = cache_pos; return Some(Token::Semicolon); }
-            ':' => { self.pos += 1; return Some(Token::Colon); }
-            '=' => { self.pos += 1; return Some(Token::Equal); }
-            _ => {}
-        }
-
-        while c.is_ascii() {
+        while c.is_alphanumeric() {
             token += &c.to_string();
-            self.pos += 1;
-            c = self.source.chars().nth(self.pos).unwrap_or(' ');
+            cache_pos += 1;
+            c = self.source.chars().nth(cache_pos).unwrap_or(' ');
         }
 
-        if token.is_empty() {
-            panic!("[Lexer] Error: Unexpected character '{}'", c);
-        }
-
-        let token = match token.as_str() {
-            "print" => Token::Print,
-            "let"   => Token::Let,
-            _       => Token::Identifier(token)
-        };
-        self.pos = cache_pos;
+        let token = Token::from_string(&token);
         Some(token)
     }
 
     pub fn get_next_token(&mut self) -> Option<Token> {
-        // EOF check
         if self.pos >= self.source.len() {
-             return None;
+            return None;
         }
 
         // skip whitespace
         while self.source.chars().nth(self.pos).unwrap() == ' ' {
+            if self.pos >= self.source.len() {
+                return None;
+            }
             self.pos += 1;
         }
 
-        let mut token = String::from("");
         let mut c = self.source.chars().nth(self.pos).unwrap();
 
         // Number
+        if let Some(t) = Token::from_char(c) {
+            self.pos += 1;
+            return Some(t);
+        }
+
+        let mut token = String::from("");
         if c.is_digit(10) {
             while c.is_digit(10){
                 token += &c.to_string();
@@ -93,32 +86,16 @@ impl Lexer {
             return Some(Token::Int32(token.parse::<i32>().unwrap()));
         }
 
-        // Single-character punctuation
-        match c {
-            '(' => { self.pos += 1; return Some(Token::LParen); }
-            ')' => { self.pos += 1; return Some(Token::RParen); }
-            ';' => { self.pos += 1; return Some(Token::Semicolon); }
-            ':' => { self.pos += 1; return Some(Token::Colon); }
-            '=' => { self.pos += 1; return Some(Token::Equal); }
-            _ => {}
-        }
-
-        while c.is_ascii() {
+        while c.is_alphanumeric() {
             token += &c.to_string();
             self.pos += 1;
             c = self.source.chars().nth(self.pos).unwrap_or(' ');
         }
 
-        if token.is_empty() {
-            panic!("[Lexer] Error: Unexpected character '{}'", c);
-        }
-
-        let token = match token.as_str() {
-            "print" => Token::Print,
-            "let"   => Token::Let,
-            _       => Token::Identifier(token)
-        };
+        let token = Token::from_string(&token);
         Some(token)
+
+
     }
 
     pub fn expect(&mut self, expected_token: Token) -> Token {
