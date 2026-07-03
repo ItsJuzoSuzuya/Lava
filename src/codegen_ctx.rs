@@ -2,6 +2,8 @@ use std::{collections::HashMap, path::Path};
 
 use inkwell::{builder::Builder, context::Context, module::Module, targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine}, types::BasicTypeEnum, values::{BasicValueEnum, PointerValue}};
 
+use crate::{statement::Param};
+
 pub struct Symbol<'ctx> {
   pub ty: BasicTypeEnum<'ctx>,
   pub ptr: PointerValue<'ctx>,
@@ -15,7 +17,7 @@ pub struct CodegenContext<'ctx>  {
     pub machine: TargetMachine,
 
     pub scope: HashMap<String, Symbol<'ctx>>,
-    pub functions: Vec<String>
+    pub functions: HashMap<String, Vec<Param>>
 }
 
 impl<'ctx> CodegenContext<'ctx> {
@@ -39,7 +41,7 @@ impl<'ctx> CodegenContext<'ctx> {
             builder: context.create_builder(),
             machine: machine,
             scope: HashMap::new(),
-            functions: Vec::new()
+            functions: HashMap::new()
         }
     }
 
@@ -59,8 +61,12 @@ impl<'ctx> CodegenContext<'ctx> {
         self.scope.insert(name, symbol);
     }
 
-    pub fn push_func(&mut self, name: String){
-        self.functions.push(name);
+    pub fn push_func(&mut self, name: String, params: Vec<Param>){
+        self.functions.insert(name, params);
+    }
+
+    pub fn load_func_params(&mut self, name: &str) -> Option<&Vec<Param>> {
+        self.functions.get(name)
     }
 
     pub fn load_var(&mut self, name: &str) -> Option<BasicValueEnum<'ctx>> {
@@ -69,6 +75,7 @@ impl<'ctx> CodegenContext<'ctx> {
         let ptr = symbol.ptr;
         Some(self.builder.build_load(ty, ptr, name).unwrap())
     }
+
 
     pub fn compile(&self) {
         let exit_code = self.context.i32_type().const_int(0, false);

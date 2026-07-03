@@ -1,9 +1,16 @@
 use std::fmt::Display;
 
-use inkwell::{module::Linkage, types::VoidType, values::BasicValueEnum};
+use inkwell::{module::Linkage, types::BasicMetadataTypeEnum, values::BasicValueEnum};
+use serde::Serialize;
 
 use crate::{codegen_ctx::CodegenContext, declaration::Declaration, expression::Expr, traits::codegen::Codegen, r#type::Type};
 
+#[derive(Serialize, Debug, Clone)]
+pub struct Param {
+    pub name: String,
+    pub ty: Type,
+    pub value: Option<Box<Expr>>
+}
 
 pub enum Stmt {
     Expression(Expr),
@@ -36,14 +43,23 @@ impl Codegen for Stmt {
             },
             Stmt::Declaration(decl) => {
                 match decl {
-                    Declaration::Function { name, params: _, body, return_type: _} => {
+                    Declaration::Function { name, params, body, return_type: _} => {
                         let prev_block = ctx.builder.get_insert_block()?;
-                        let void_ty = ctx.context.void_type();
-                        let llvm_ty = void_ty.fn_type(&[], false);
+                        let return_type = ctx.context.void_type();
+                        let param_types: Vec<BasicMetadataTypeEnum> = params.iter().map(|p| p.ty.to_llvm(ctx).into()).collect();
+                        let llvm_ty = return_type.fn_type(&param_types, false);
                         let function = ctx.module.add_function(name, llvm_ty, Some(Linkage::Common));
-                        ctx.push_func(name.to_string());
+                        ctx.push_func(name.to_string(), params.to_vec());
                         let bb = ctx.context.append_basic_block(function, "tmp_fn");
                         ctx.builder.position_at_end(bb);
+
+                        for (i, param) in params.iter().enumerate() {
+                            let ty = param.ty.to_llvm(ctx);
+                            let value = function.get_nth_param(i as u32)?;
+                            let ptr = ctx.builder.build_alloca(ty, &param.name).unwrap();
+                            ctx.builder.build_store(ptr, value).unwrap();
+                            ctx.push_var(param.name.to_string(), ty, ptr);
+                        }
 
                         for stmt in body {
                             stmt.codegen(ctx);

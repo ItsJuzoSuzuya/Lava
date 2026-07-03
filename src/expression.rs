@@ -2,24 +2,21 @@ use std::fmt::{Display};
 
 use inkwell::AddressSpace;
 use inkwell::module::Linkage;
-use inkwell::values::{BasicValueEnum, FunctionValue};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue};
 use serde::{Serialize};
 
 use crate::traits::codegen::Codegen;
 use crate::{codegen_ctx::CodegenContext};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub enum Expr {
     Print(Box<Expr>),
     Int32(i32),
-    Param {
+    FunctionCall {
         name: String,
-        typename: String,
-        default_value: Option<Box<Expr>>
+        params: Vec<Expr>
     },
-    FunctionCall(String),
     Identifier(String),
-
 }
 
 impl Display for Expr {
@@ -27,9 +24,8 @@ impl Display for Expr {
         match self {
             Expr::Print(expr) => write!(f, "Print({})", expr),
             Expr::Int32(value) => write!(f, "Int32({})", value),
-            Expr::Identifier(name) => write!(f, "Identifier({})", name), 
-            Expr::FunctionCall(name) => write!(f, "FunctionCall({})", name), 
-            Expr::Param { name, typename, default_value: _}  => write!(f, "Param(name: {}, type: {})", name, typename)
+            Expr::Identifier(name) => write!(f, "{}", name), 
+            Expr::FunctionCall{ name, params: _ } => write!(f, "FunctionCall({})", name), 
         }
     }
 }
@@ -52,19 +48,52 @@ impl Codegen for Expr {
             Expr::Int32(value) => {
                 Some(Box::new(ctx.module.get_context().i32_type().const_int(*value as u64, false).into()))
             }
-            Expr::FunctionCall(name) => {
+            Expr::FunctionCall{ name, params } => {
+                // Clone the declared parameter defaults out of ctx up front, so we
+                // aren't holding an immutable borrow of ctx while codegen'ing the
+                // default expressions (which borrow ctx mutably).
+                let defaults: Option<Vec<Option<Expr>>> = ctx
+                    .load_func_params(name)
+                    .map(|ps| ps.iter().map(|p| p.value.as_deref().cloned()).collect());
+
+                let mut llvm_params: Vec<BasicMetadataValueEnum> = Vec::new();
+
+                match defaults {
+                    // Known function: walk the declared arity, using the caller's
+                    // argument where given and falling back to the default otherwise.
+                    Some(defaults) => {
+                        for (i, default) in defaults.iter().enumerate() {
+                            let value = match params.get(i) {
+                                Some(passed) => *passed.codegen(ctx).unwrap(),
+                                None => {
+                                    let default_expr = default.as_ref().unwrap_or_else(|| {
+                                        panic!("missing argument {} for function '{}' and it has no default", i, name)
+                                    });
+                                    *default_expr.codegen(ctx).unwrap()
+                                }
+                            };
+                            llvm_params.push(value.into());
+                        }
+                    }
+                    // Unknown/extern function: pass exactly what the caller gave.
+                    None => {
+                        for param in params {
+                            llvm_params.push((*param.codegen(ctx).unwrap()).into());
+                        }
+                    }
+                }
+
                 let function = ctx.module.get_function(name).unwrap();
-                ctx.builder.build_call(function, &[], "fn")
+                ctx.builder.build_call(function, &llvm_params, "fn")
                     .unwrap_or_else(|_| panic!("Requested function'{}' not found!", name));
                 return None;
-                
+
             }
             Expr::Identifier(name) => {
                 let value = ctx.load_var(name)
                     .unwrap_or_else(|| panic!("Requested variable '{}' not found in this scope!", name));
                 return Some(Box::new(value));
             }
-            _ => None
         }
     }
 }

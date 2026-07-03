@@ -1,6 +1,6 @@
 use std::mem::discriminant;
 
-use crate::{declaration::Declaration, expression::Expr, lexer::{self, Lexer}, statement::Stmt, token::Token};
+use crate::{declaration::Declaration, expression::Expr, lexer::{self, Lexer}, statement::{Param, Stmt}, token::Token, r#type::Type};
 
 pub struct Parser {
     lexer: Lexer
@@ -37,8 +37,16 @@ impl Parser {
             Token::Identifier(name) => {
                 if discriminant(&self.lexer.peek().unwrap()) == discriminant(&Token::LParen) {
                     self.lexer.get_next_token();
+                    let mut params: Vec<Expr> = Vec::new();
+                    while discriminant(&self.lexer.peek().unwrap()) != discriminant(&Token::RParen) {
+                        let cur = self.lexer.get_next_token().unwrap();
+                        params.push(self.parse_expression(cur));
+                        if discriminant(&self.lexer.peek().unwrap()) != discriminant(&Token::RParen) {
+                            self.lexer.expect(Token::Comma);
+                        }
+                    }
                     self.lexer.get_next_token();
-                    return Expr::FunctionCall(name)
+                    return Expr::FunctionCall{ name, params }
                 }
                 Expr::Identifier(name)
             }
@@ -60,7 +68,7 @@ impl Parser {
 
     fn parse_function_declaration(&mut self) -> Stmt {
         let name = self.lexer.expect(Token::Identifier(String::new()));
-        let params: Vec<Expr> = self.parse_params();
+        let params: Vec<Param> = self.parse_params();
         let body = self.parse_body();
 
         return
@@ -88,35 +96,35 @@ impl Parser {
         }
     }
 
-    fn parse_params(&mut self) -> Vec<Expr> {
+    fn parse_params(&mut self) -> Vec<Param> {
         self.lexer.expect(Token::LParen);
-        let mut params: Vec<Expr> = Vec::new();
+        let mut params: Vec<Param> = Vec::new();
         while discriminant(&self.lexer.peek().unwrap()) != discriminant(&Token::RParen) {
             let param = self.parse_param();
             params.push(param);
-            self.lexer.expect(Token::Comma);
+            if discriminant(&self.lexer.peek().unwrap()) != discriminant(&Token::RParen) {
+                self.lexer.expect(Token::Comma);
+            }
         }
         self.lexer.expect(Token::RParen);
         return params;
     }
 
-    fn parse_param(&mut self) -> Expr {
+    fn parse_param(&mut self) -> Param {
         let mut token =  self.lexer.get_next_token().unwrap();
         let name = self.parse_expression(token);
         self.lexer.expect(Token::Colon);
-        token =  self.lexer.get_next_token().unwrap();
-        let typename = self.parse_expression(token);
+        let typename = self.next_expression();
 
         let mut default_value = None;
         if discriminant(&self.lexer.peek().unwrap()) == discriminant(&Token::Equal) {
             // Consume Token::Equal
             self.lexer.get_next_token().unwrap();
 
-            token =  self.lexer.get_next_token().unwrap();
-            default_value = Some(Box::new(self.parse_expression(token)));
+            default_value = Some(Box::new(self.next_expression()));
         }
 
-        Expr::Param { name: name.to_string(), typename: typename.to_string(), default_value: default_value}
+        Param { name: name.to_string(), ty: Type::from(typename), value: default_value}
     }
 
     fn parse_body(&mut self) -> Vec<Stmt> {

@@ -63,6 +63,7 @@ impl Token {
             '(' => { return Some(Token::LParen); }
             ')' => { return Some(Token::RParen); }
             ';' => { return Some(Token::Semicolon); }
+            ',' => { return Some(Token::Comma); }
             ':' => { return Some(Token::Colon); }
             '=' => { return Some(Token::Equal); }
             '{' => { return Some(Token::LBrace); }
