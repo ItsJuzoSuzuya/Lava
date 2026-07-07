@@ -30,6 +30,10 @@ impl Lexer {
         let mut token = String::from("");
         let mut c = self.source.chars().nth(cache_pos).unwrap();
 
+        if c == '-' && self.source.chars().nth(cache_pos + 1) == Some('>') {
+            return Some(Token::Arrow);
+        }
+
         if let Some(t) = Token::from_char(c) {
             return Some(t);
         }
@@ -69,6 +73,11 @@ impl Lexer {
         }
 
         let mut c = self.source.chars().nth(self.pos).unwrap();
+
+        if c == '-' && self.source.chars().nth(self.pos + 1) == Some('>') {
+            self.pos += 2;
+            return Some(Token::Arrow);
+        }
 
         // Number
         if let Some(t) = Token::from_char(c) {

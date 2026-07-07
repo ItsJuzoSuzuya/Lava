@@ -1,15 +1,13 @@
 use std::fmt::{Display};
 
-use inkwell::llvm_sys::LLVMType;
-
-use crate::{expression::Expr, statement::{Param, Stmt}};
+use crate::{statement::{Param, Stmt}, r#type::Type};
 
 pub enum Declaration {
     Function {
         name: String,
         params: Vec<Param>,
         body: Vec<Stmt>,
-        return_type: Option<LLVMType>,
+        return_type: Option<Type>,
     }
 }
 

@@ -1,6 +1,6 @@
 use std::mem::discriminant;
 
-use crate::{declaration::Declaration, expression::Expr, lexer::{self, Lexer}, statement::{Param, Stmt}, token::Token, r#type::Type};
+use crate::{declaration::Declaration, expression::Expr, lexer::Lexer, statement::{Param, Stmt}, token::Token, r#type::Type};
 
 pub struct Parser {
     lexer: Lexer
@@ -69,6 +69,7 @@ impl Parser {
     fn parse_function_declaration(&mut self) -> Stmt {
         let name = self.lexer.expect(Token::Identifier(String::new()));
         let params: Vec<Param> = self.parse_params();
+        let return_type: Option<Type> = self.parse_return_type().map(Type::from);
         let body = self.parse_body();
 
         return
@@ -76,7 +77,7 @@ impl Parser {
             name: name.to_string(), 
             params: params, 
             body: body, 
-            return_type: None,
+            return_type: return_type,
         })
     }
 
@@ -125,6 +126,16 @@ impl Parser {
         }
 
         Param { name: name.to_string(), ty: Type::from(typename), value: default_value}
+    }
+
+    fn parse_return_type(&mut self) -> Option<Expr> {
+        if discriminant(&self.lexer.peek().unwrap()) != discriminant(&Token::Arrow) {
+            return None;
+        }
+
+        self.lexer.get_next_token();
+        let rt = self.next_expression();
+        return Some(rt);
     }
 
     fn parse_body(&mut self) -> Vec<Stmt> {

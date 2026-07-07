@@ -11,6 +11,8 @@ pub enum Token {
   Func,
   Let,
 
+  Arrow,
+
   LParen,
   RParen,
   LBrace,
@@ -30,6 +32,8 @@ impl Display for Token {
             Token::Print        => write!(f, "{}", "Print"),
             Token::Func         => write!(f, "{}", "Func"),
             Token::Let          => write!(f, "{}", "Let"),
+
+            Token::Arrow        => write!(f, "{}", "Arrow"),
 
             Token::LParen       => write!(f, "{}", "LParen"),
             Token::RParen       => write!(f, "{}", "RParen"),
@@ -77,6 +81,7 @@ impl Token {
             "func"  => Token::Func,
             "print" => Token::Print,
             "let"   => Token::Let,
+            "->"    => Token::Arrow,
             _       => Token::Identifier(token.to_string())
         }
     }
