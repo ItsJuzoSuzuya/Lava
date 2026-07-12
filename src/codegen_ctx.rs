@@ -17,7 +17,8 @@ pub struct CodegenContext<'ctx>  {
     pub machine: TargetMachine,
 
     pub scope: HashMap<String, Symbol<'ctx>>,
-    pub functions: HashMap<String, Vec<Param>>
+    pub functions: HashMap<String, Vec<Param>>,
+    pub classes: HashMap<String, Vec<BasicTypeEnum<'ctx>>>
 }
 
 impl<'ctx> CodegenContext<'ctx> {
@@ -41,7 +42,8 @@ impl<'ctx> CodegenContext<'ctx> {
             builder: context.create_builder(),
             machine: machine,
             scope: HashMap::new(),
-            functions: HashMap::new()
+            functions: HashMap::new(),
+            classes: HashMap::new()
         }
     }
 
@@ -65,6 +67,10 @@ impl<'ctx> CodegenContext<'ctx> {
         self.functions.insert(name, params);
     }
 
+    pub fn push_class(&mut self, name: String, fields: Vec<BasicTypeEnum<'ctx>>){
+        self.classes.insert(name, fields);
+    }
+
     pub fn load_func_params(&mut self, name: &str) -> Option<&Vec<Param>> {
         self.functions.get(name)
     }
@@ -75,7 +81,6 @@ impl<'ctx> CodegenContext<'ctx> {
         let ptr = symbol.ptr;
         Some(self.builder.build_load(ty, ptr, name).unwrap())
     }
-
 
     pub fn compile(&self) {
         let exit_code = self.context.i32_type().const_int(0, false);

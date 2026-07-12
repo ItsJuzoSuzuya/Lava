@@ -5,6 +5,7 @@ use inkwell::module::Linkage;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue};
 use serde::{Serialize};
 
+use crate::token::Token;
 use crate::traits::codegen::Codegen;
 use crate::{codegen_ctx::CodegenContext};
 
@@ -12,9 +13,18 @@ use crate::{codegen_ctx::CodegenContext};
 pub enum Expr {
     Print(Box<Expr>),
     Int32(i32),
+    BinaryExpr {
+        lhs: Box<Expr>,
+        op: Token,
+        rhs: Box<Expr>
+    },
     FunctionCall {
         name: String,
         params: Vec<Expr>
+    },
+    FieldAccess {
+        name: String,
+        field: Box<Expr>
     },
     Identifier(String),
 }
@@ -24,8 +34,10 @@ impl Display for Expr {
         match self {
             Expr::Print(expr) => write!(f, "Print({})", expr),
             Expr::Int32(value) => write!(f, "Int32({})", value),
-            Expr::Identifier(name) => write!(f, "{}", name), 
+            Expr::BinaryExpr { lhs: _, op, rhs: _} => write!(f, "BinaryExpr({})", op),
             Expr::FunctionCall{ name, params: _ } => write!(f, "FunctionCall({})", name), 
+            Expr::FieldAccess { name, field: _ } => write!(f, "{}", name), 
+            Expr::Identifier(name) => write!(f, "{}", name), 
         }
     }
 }
@@ -48,10 +60,18 @@ impl Codegen for Expr {
             Expr::Int32(value) => {
                 Some(Box::new(ctx.module.get_context().i32_type().const_int(*value as u64, false).into()))
             }
+            Expr::BinaryExpr { lhs, op, rhs } => {
+                match op {
+                    Token::Plus => {
+                        let lhs_value = lhs.codegen(ctx).unwrap().into_int_value();
+                        let rhs_value = rhs.codegen(ctx).unwrap().into_int_value();
+                        let sum = ctx.builder.build_int_add(lhs_value, rhs_value, "tmpadd").unwrap();
+                        return Some(Box::new(sum.into()));
+                    }
+                    _ => panic!("unsupported binary operator: {:?}", op),
+                }
+            }
             Expr::FunctionCall{ name, params } => {
-                // Clone the declared parameter defaults out of ctx up front, so we
-                // aren't holding an immutable borrow of ctx while codegen'ing the
-                // default expressions (which borrow ctx mutably).
                 let defaults: Option<Vec<Option<Expr>>> = ctx
                     .load_func_params(name)
                     .map(|ps| ps.iter().map(|p| p.value.as_deref().cloned()).collect());
@@ -59,8 +79,6 @@ impl Codegen for Expr {
                 let mut llvm_params: Vec<BasicMetadataValueEnum> = Vec::new();
 
                 match defaults {
-                    // Known function: walk the declared arity, using the caller's
-                    // argument where given and falling back to the default otherwise.
                     Some(defaults) => {
                         for (i, default) in defaults.iter().enumerate() {
                             let value = match params.get(i) {
@@ -75,7 +93,6 @@ impl Codegen for Expr {
                             llvm_params.push(value.into());
                         }
                     }
-                    // Unknown/extern function: pass exactly what the caller gave.
                     None => {
                         for param in params {
                             llvm_params.push((*param.codegen(ctx).unwrap()).into());
@@ -83,12 +100,29 @@ impl Codegen for Expr {
                     }
                 }
 
-                let function = ctx.module.get_function(name).unwrap();
-                ctx.builder.build_call(function, &llvm_params, "fn")
-                    .unwrap_or_else(|_| panic!("Requested function'{}' not found!", name));
-                return None;
+                println!("Getting Function: {}", name);
+                let function = ctx.module.get_function(name)
+                    .unwrap_or_else(|| panic!("Requested function'{}' not found!", name));
+                let return_val = ctx.builder.build_call(function, &llvm_params, "fn")
+                    .unwrap_or_else(|_| panic!("Requested function'{}' could not be called!", name));
+                return Some(Box::new(return_val.try_as_basic_value().basic()?));
 
             }
+            Expr::FieldAccess { name, field } => {
+                let (field_index, field_param) = ctx.classes[name].iter()
+                    .enumerate()
+                    .find(|(_, _)| *name == *field.to_string())
+                    .unwrap();
+
+                let ptr = ctx.scope[name].ptr;
+
+                let field_ptr = ctx.builder.build_struct_gep(
+                    *field_param, ptr, field_index as u32, name).unwrap();
+
+                let field_val = ctx.builder.build_load(*field_param, field_ptr, "tmpfield").unwrap();
+
+                return Some(Box::new(field_val));
+            },
             Expr::Identifier(name) => {
                 let value = ctx.load_var(name)
                     .unwrap_or_else(|| panic!("Requested variable '{}' not found in this scope!", name));

@@ -10,6 +10,9 @@ pub enum Token {
   Print,
   Func,
   Let,
+  Return,
+  Class,
+  Constructor,
 
   Arrow,
 
@@ -21,8 +24,13 @@ pub enum Token {
   Colon,
   Comma,
   Semicolon,
+  Plus,
+  Minus,
+  Multiply,
+  Divide,
+  Dot,
 
-  Int32(i32),
+  Numeral(i32),
   Identifier(String),
 }
 
@@ -32,6 +40,9 @@ impl Display for Token {
             Token::Print        => write!(f, "{}", "Print"),
             Token::Func         => write!(f, "{}", "Func"),
             Token::Let          => write!(f, "{}", "Let"),
+            Token::Return       => write!(f, "{}", "Return"),
+            Token::Class        => write!(f, "{}", "Class"),
+            Token::Constructor  => write!(f, "{}", "Constructor"),
 
             Token::Arrow        => write!(f, "{}", "Arrow"),
 
@@ -43,8 +54,13 @@ impl Display for Token {
             Token::Colon        => write!(f, "{}", "Colon"),
             Token::Comma        => write!(f, "{}", "Comma"),
             Token::Semicolon    => write!(f, "{}", "Semicolon"),
+            Token::Plus         => write!(f, "{}", "Plus"),
+            Token::Minus        => write!(f, "{}", "Minus"),
+            Token::Multiply     => write!(f, "{}", "Multiply"),
+            Token::Divide       => write!(f, "{}", "Divide"),
+            Token::Dot          => write!(f, "{}", "Dot"),
 
-            Token::Int32(value)    => write!(f, "Int32({})", value),
+            Token::Numeral(value)   => write!(f, "Int32({})", value),
             Token::Identifier(name) => write!(f, "{}", name)
         }
     }
@@ -53,10 +69,11 @@ impl Display for Token {
 impl Token {
     pub fn to_type(&self) -> Type {
         match self {
-            Token::Int32(_) => Type::Int32,
+            Token::Numeral(_) => Type::Int32,
             Token::Identifier(s) => match s.as_str() {
               "int32" => Type::Int32,
-              _ => panic!("Unknown type: {}", s)
+              "String" => Type::String,
+              x => Type::Object(x.to_string())
             },
             _ => panic!("No type for Token: {}", self)
         }
@@ -64,25 +81,33 @@ impl Token {
 
     pub fn from_char(c: char) -> Option<Token> {
         match c {
-            '(' => { return Some(Token::LParen); }
-            ')' => { return Some(Token::RParen); }
-            ';' => { return Some(Token::Semicolon); }
-            ',' => { return Some(Token::Comma); }
-            ':' => { return Some(Token::Colon); }
-            '=' => { return Some(Token::Equal); }
-            '{' => { return Some(Token::LBrace); }
-            '}' => { return Some(Token::RBrace); }
+            '(' => { Some(Token::LParen) }
+            ')' => { Some(Token::RParen) }
+            ';' => { Some(Token::Semicolon) }
+            ',' => { Some(Token::Comma) }
+            ':' => { Some(Token::Colon) }
+            '=' => { Some(Token::Equal) }
+            '{' => { Some(Token::LBrace) }
+            '}' => { Some(Token::RBrace) }
+            '+' => { Some(Token::Plus) }
+            '-' => { Some(Token::Minus) }
+            '*' => { Some(Token::Multiply) }
+            '/' => { Some(Token::Divide) }
+            '.' => { Some(Token::Dot) }
             _ => None
         }
     }
 
     pub fn from_string(token: &str) -> Token {
         match token {
-            "func"  => Token::Func,
-            "print" => Token::Print,
-            "let"   => Token::Let,
-            "->"    => Token::Arrow,
-            _       => Token::Identifier(token.to_string())
+            "class"         => Token::Class,
+            "Constructor"   => Token::Constructor,
+            "func"          => Token::Func,
+            "print"         => Token::Print,
+            "let"           => Token::Let,
+            "return"        => Token::Return,
+            "->"            => Token::Arrow,
+            _               => Token::Identifier(token.to_string())
         }
     }
 }

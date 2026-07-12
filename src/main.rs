@@ -14,6 +14,22 @@ mod program;
 
 fn main() {
     let context = Context::create();
-    let mut program = Program::new(&context, "func foo(x: int32, y: int32 = 2) { print(y); } foo(22, 0);".to_string());
+    let mut program = Program::new(&context, "
+    class Foo {
+        x: int32 = a;
+        name: String = b;
+
+        Constructor(a: int32, b: String) {
+            printIT();
+        }
+
+        func printIT() {
+            print(self.name);
+        }
+    }
+
+
+    let foo: Foo = Foo(22, 23);"
+    .to_string());
     program.run();
 }

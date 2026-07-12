@@ -20,10 +20,7 @@ impl Lexer {
         }
 
         // skip whitespace
-        while self.source.chars().nth(cache_pos).unwrap() == ' ' {
-            if cache_pos >= self.source.len() {
-                 return None;
-            }
+        while cache_pos < self.source.len() && self.source.chars().nth(cache_pos).unwrap().is_whitespace() {
             cache_pos += 1;
         }
 
@@ -46,7 +43,7 @@ impl Lexer {
                 c = self.source.chars().nth(cache_pos).unwrap_or(' ')
             }
 
-            return Some(Token::Int32(token.parse::<i32>().unwrap()));
+            return Some(Token::Numeral(token.parse::<i32>().unwrap()));
         }
 
         while c.is_alphanumeric() {
@@ -65,10 +62,7 @@ impl Lexer {
         }
 
         // skip whitespace
-        while self.source.chars().nth(self.pos).unwrap() == ' ' {
-            if self.pos >= self.source.len() {
-                return None;
-            }
+        while self.pos < self.source.len() && self.source.chars().nth(self.pos).unwrap().is_whitespace() {
             self.pos += 1;
         }
 
@@ -76,12 +70,14 @@ impl Lexer {
 
         if c == '-' && self.source.chars().nth(self.pos + 1) == Some('>') {
             self.pos += 2;
+            println!("{}", Token::Arrow);
             return Some(Token::Arrow);
         }
 
         // Number
         if let Some(t) = Token::from_char(c) {
             self.pos += 1;
+            println!("{}", t);
             return Some(t);
         }
 
@@ -92,7 +88,8 @@ impl Lexer {
                 self.pos += 1;
                 c = self.source.chars().nth(self.pos).unwrap_or(' ')
             }
-            return Some(Token::Int32(token.parse::<i32>().unwrap()));
+            println!("{}", token);
+            return Some(Token::Numeral(token.parse::<i32>().unwrap()));
         }
 
         while c.is_alphanumeric() {
@@ -102,9 +99,8 @@ impl Lexer {
         }
 
         let token = Token::from_string(&token);
+        println!("{}", token);
         Some(token)
-
-
     }
 
     pub fn expect(&mut self, expected_token: Token) -> Token {
