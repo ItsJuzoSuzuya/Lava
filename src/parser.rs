@@ -18,7 +18,7 @@ impl Parser {
             None => return None,
         };
 
-        let token = match cur {
+        let token = match cur.token {
             Token::Func                 => self.parse_function_declaration(),
             Token::Class                => self.parse_class_declaration(),
             Token::Let                  => self.parse_instantiation(),
@@ -37,7 +37,7 @@ impl Parser {
 
         return
         Stmt::Declaration(Declaration::Function { 
-            name: name.to_string(), 
+            name: name.token.to_string(), 
             params: params, 
             body: body, 
             return_type: return_type,
@@ -48,7 +48,7 @@ impl Parser {
         self.lexer.expect(Token::LBrace);
 
         let mut body: Vec<Stmt> = Vec::new();
-        while discriminant(&self.lexer.peek().unwrap()) != discriminant(&Token::RBrace) {
+        while discriminant(&self.lexer.peek().unwrap().token) != discriminant(&Token::RBrace) {
             let stmt = match self.parse_statement() {
                 Some(s) => s,
                 None => panic!("File ended unexpectedly while parsing body")
@@ -69,11 +69,11 @@ impl Parser {
     // Class Parsing
     fn parse_class_declaration(&mut self) -> Stmt {
         let name = self.lexer.expect(Token::Identifier(String::new()));
-        let (fields, methods) = self.parse_class_body(name.to_string());
+        let (fields, methods) = self.parse_class_body(name.token.to_string());
 
         return
         Stmt::Declaration(Declaration::Class{ 
-            name: name.to_string(), 
+            name: name.token.to_string(), 
             fields: fields, 
             methods: methods, 
         })
@@ -84,9 +84,9 @@ impl Parser {
 
         let mut fields: Vec<Param> = Vec::new();
         let mut methods: Vec<Stmt> = Vec::new();
-        while discriminant(&self.lexer.peek().unwrap()) != discriminant(&Token::RBrace) {
-            let token = self.lexer.peek().unwrap();
-            match token {
+        while discriminant(&self.lexer.peek().unwrap().token) != discriminant(&Token::RBrace) {
+            let next = self.lexer.peek().unwrap();
+            match next.token {
                 Token::Identifier(_) => {
                     fields.push(self.parse_param());
                     self.lexer.expect(Token::Semicolon);
@@ -140,7 +140,7 @@ impl Parser {
 
     fn parse_instantiation(&mut self) -> Stmt {
         let name = self.lexer.expect(Token::Identifier(String::new()));
-        println!("{}", name);
+        println!("{}", name.token);
         self.lexer.expect(Token::Colon);
         let typename = self.lexer.expect(Token::Identifier(String::new()));
         self.lexer.expect(Token::Equal);
@@ -148,8 +148,8 @@ impl Parser {
         self.lexer.expect(Token::Semicolon);
 
         return Stmt::Instantiation { 
-            name: name.to_string(),
-            typedef: typename.to_type(),
+            name: name.token.to_string(),
+            typedef: typename.token.to_type(),
             value: value
         }
     }
@@ -170,9 +170,9 @@ impl Parser {
             _ => panic!("Not a valid expression token: {}", cur)
         };
 
-        match self.lexer.peek() {
-            Some(Token::Plus | Token::Minus | Token::Multiply | Token::Divide) => {
-                let op = self.lexer.get_next_token().unwrap();
+        match self.lexer.peek().unwrap().token {
+            Token::Plus | Token::Minus | Token::Multiply | Token::Divide => {
+                let op = self.lexer.get_next_token().unwrap().token;
                 let rhs = self.next_expression();
                 Expr::BinaryExpr { lhs: Box::new(lhs), op: op, rhs: Box::new(rhs)}
             }
@@ -182,7 +182,7 @@ impl Parser {
 
     fn next_expression(&mut self) -> Expr {
         let cur = self.lexer.get_next_token().expect("Expected expression, found nothing");
-        self.parse_expression(cur)
+        self.parse_expression(cur.token)
     }
 
     // Print Parsing
@@ -200,7 +200,7 @@ impl Parser {
             None => return Expr::Identifier(name)
         };
 
-        match peek {
+        match peek.token {
             Token::LParen => self.parse_function_call(name),
             Token::Dot => self.parse_field_access(name),
             _ => return Expr::Identifier(name),
@@ -210,10 +210,10 @@ impl Parser {
     fn parse_function_call(&mut self, name: String) -> Expr {
             self.lexer.get_next_token();
             let mut params: Vec<Expr> = Vec::new();
-            while discriminant(&self.lexer.peek().unwrap()) != discriminant(&Token::RParen) {
+            while discriminant(&self.lexer.peek().unwrap().token) != discriminant(&Token::RParen) {
                 let cur = self.lexer.get_next_token().unwrap();
-                params.push(self.parse_expression(cur));
-                if discriminant(&self.lexer.peek().unwrap()) != discriminant(&Token::RParen) {
+                params.push(self.parse_expression(cur.token));
+                if discriminant(&self.lexer.peek().unwrap().token) != discriminant(&Token::RParen) {
                     self.lexer.expect(Token::Comma);
                 }
             }
@@ -231,10 +231,10 @@ impl Parser {
     fn parse_params(&mut self) -> Vec<Param> {
         self.lexer.expect(Token::LParen);
         let mut params: Vec<Param> = Vec::new();
-        while discriminant(&self.lexer.peek().unwrap()) != discriminant(&Token::RParen) {
+        while discriminant(&self.lexer.peek().unwrap().token) != discriminant(&Token::RParen) {
             let param = self.parse_param();
             params.push(param);
-            if discriminant(&self.lexer.peek().unwrap()) != discriminant(&Token::RParen) {
+            if discriminant(&self.lexer.peek().unwrap().token) != discriminant(&Token::RParen) {
                 self.lexer.expect(Token::Comma);
             }
         }
@@ -248,7 +248,7 @@ impl Parser {
         let typename = self.next_expression();
 
         let mut default_value = None;
-        if discriminant(&self.lexer.peek().unwrap()) == discriminant(&Token::Equal) {
+        if discriminant(&self.lexer.peek().unwrap().token) == discriminant(&Token::Equal) {
             // Consume Token::Equal
             self.lexer.get_next_token().unwrap();
 
@@ -259,7 +259,7 @@ impl Parser {
     }
 
     fn parse_return_type(&mut self) -> Option<Expr> {
-        if discriminant(&self.lexer.peek().unwrap()) != discriminant(&Token::Arrow) {
+        if discriminant(&self.lexer.peek().unwrap().token) != discriminant(&Token::Arrow) {
             return None;
         }
 

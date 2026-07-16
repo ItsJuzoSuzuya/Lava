@@ -1,7 +1,9 @@
-use crate::token::{Token};
+use crate::{span::Span, token::{Token, TokenWithSpan}};
 
 pub struct Lexer {
     pos: usize,
+    line: usize,
+    col: usize,
     source: String
 }
 
@@ -9,11 +11,13 @@ impl Lexer {
     pub fn new(string: String) -> Self {
         Self {
             pos: 0,
+            line: 0,
+            col: 0,
             source: string,
         }
     }
 
-    pub fn peek(&mut self) -> Option<Token> {
+    pub fn peek(&mut self) -> Option<TokenWithSpan> {
         let mut cache_pos = self.pos;
         if cache_pos >= self.source.len() {
              return None;
@@ -28,11 +32,13 @@ impl Lexer {
         let mut c = self.source.chars().nth(cache_pos).unwrap();
 
         if c == '-' && self.source.chars().nth(cache_pos + 1) == Some('>') {
-            return Some(Token::Arrow);
+            let span = Span { line: self.line, col: self.col, len: Token::Arrow.len() };
+            return Some(TokenWithSpan { token: Token::Arrow, span: span  });
         }
 
         if let Some(t) = Token::from_char(c) {
-            return Some(t);
+            let span = Span { line: self.line, col: self.col, len: t.len() };
+            return Some(TokenWithSpan { token: t, span: span  });
         }
 
         // Number
@@ -43,7 +49,9 @@ impl Lexer {
                 c = self.source.chars().nth(cache_pos).unwrap_or(' ')
             }
 
-            return Some(Token::Numeral(token.parse::<i32>().unwrap()));
+            let t = Token::Numeral(token.parse::<i32>().unwrap());
+            let span = Span { line: self.line, col: self.col, len: t.len() };
+            return Some(TokenWithSpan{ token: t, span: span });
         }
 
         while c.is_alphanumeric() {
@@ -53,10 +61,11 @@ impl Lexer {
         }
 
         let token = Token::from_string(&token);
-        Some(token)
+        let span = Span { line: self.line, col: self.col, len: token.len() };
+        Some(TokenWithSpan { token, span })
     }
 
-    pub fn get_next_token(&mut self) -> Option<Token> {
+    pub fn get_next_token(&mut self) -> Option<TokenWithSpan> {
         if self.pos >= self.source.len() {
             return None;
         }
@@ -70,15 +79,15 @@ impl Lexer {
 
         if c == '-' && self.source.chars().nth(self.pos + 1) == Some('>') {
             self.pos += 2;
-            println!("{}", Token::Arrow);
-            return Some(Token::Arrow);
+            let span = Span { line: self.line, col: self.col, len: Token::Arrow.len() };
+            return Some(TokenWithSpan { token: Token::Arrow, span: span  });
         }
 
         // Number
         if let Some(t) = Token::from_char(c) {
             self.pos += 1;
-            println!("{}", t);
-            return Some(t);
+            let span = Span { line: self.line, col: self.col, len: t.len() };
+            return Some(TokenWithSpan { token: t, span: span  });
         }
 
         let mut token = String::from("");
@@ -88,8 +97,10 @@ impl Lexer {
                 self.pos += 1;
                 c = self.source.chars().nth(self.pos).unwrap_or(' ')
             }
-            println!("{}", token);
-            return Some(Token::Numeral(token.parse::<i32>().unwrap()));
+
+            let t = Token::Numeral(token.parse::<i32>().unwrap());
+            let span = Span { line: self.line, col: self.col, len: t.len() };
+            return Some(TokenWithSpan{ token: t, span: span });
         }
 
         while c.is_alphanumeric() {
@@ -99,14 +110,14 @@ impl Lexer {
         }
 
         let token = Token::from_string(&token);
-        println!("{}", token);
-        Some(token)
+        let span = Span { line: self.line, col: self.col, len: token.len() };
+        Some(TokenWithSpan { token, span })
     }
 
-    pub fn expect(&mut self, expected_token: Token) -> Token {
-        let next_token: Token = self.get_next_token().expect(&format!("[Lexer] Error: Expected {}, found nothing", expected_token).to_string());
-        if std::mem::discriminant(&next_token) != std::mem::discriminant(&expected_token) {
-            panic!("[Lexer] Error: Expected {}, found {}", expected_token, next_token);
+    pub fn expect(&mut self, expected_token: Token) -> TokenWithSpan {
+        let next_token: TokenWithSpan = self.get_next_token().expect(&format!("[Lexer] Error: Expected {}, found nothing", expected_token).to_string());
+        if std::mem::discriminant(&next_token.token) != std::mem::discriminant(&expected_token) {
+            panic!("[Lexer] Error: Expected {}, found {}", expected_token, next_token.token);
         }
 
         return next_token;

@@ -2,6 +2,7 @@ use inkwell::context::Context;
 use crate::program::Program;
 
 mod traits;
+mod span;
 mod r#type;
 mod token;
 mod declaration;

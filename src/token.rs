@@ -2,7 +2,7 @@ use std::fmt::{Display};
 
 use serde::Serialize;
 
-use crate::{r#type::Type};
+use crate::{span::Span, r#type::Type};
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type", content = "value")]
@@ -110,6 +110,15 @@ impl Token {
             _               => Token::Identifier(token.to_string())
         }
     }
+
+    pub fn len(&self) -> usize {
+        self.to_string().len()
+    }
+}
+
+pub struct TokenWithSpan {
+    pub token: Token,
+    pub span: Span,
 }
 
 
