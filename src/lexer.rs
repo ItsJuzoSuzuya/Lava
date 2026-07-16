@@ -1,18 +1,18 @@
 use crate::{span::Span, token::{Token, TokenWithSpan}};
 
 pub struct Lexer {
-    pos: usize,
     line: usize,
     col: usize,
+    pos: usize,
     source: String
 }
 
 impl Lexer {
     pub fn new(string: String) -> Self {
         Self {
-            pos: 0,
             line: 0,
             col: 0,
+            pos: 0,
             source: string,
         }
     }
@@ -24,7 +24,7 @@ impl Lexer {
         }
 
         // skip whitespace
-        while cache_pos < self.source.len() && self.source.chars().nth(cache_pos).unwrap().is_whitespace() {
+        while self.source.chars().nth(cache_pos).unwrap().is_whitespace() {
             cache_pos += 1;
         }
 
@@ -67,12 +67,18 @@ impl Lexer {
 
     pub fn get_next_token(&mut self) -> Option<TokenWithSpan> {
         if self.pos >= self.source.len() {
-            return None;
+             return None;
         }
 
         // skip whitespace
-        while self.pos < self.source.len() && self.source.chars().nth(self.pos).unwrap().is_whitespace() {
+        while self.source.chars().nth(self.pos).unwrap().is_whitespace() {
             self.pos += 1;
+            self.col += 1;
+        }
+
+        if self.source.chars().nth(self.pos).unwrap() == '\n' {
+            self.line += 1;
+            self.col = 0;
         }
 
         let mut c = self.source.chars().nth(self.pos).unwrap();

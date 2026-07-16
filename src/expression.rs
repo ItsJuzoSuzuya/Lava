@@ -68,7 +68,7 @@ impl Codegen for Expr {
                         let sum = ctx.builder.build_int_add(lhs_value, rhs_value, "tmpadd").unwrap();
                         return Some(Box::new(sum.into()));
                     }
-                    _ => panic!("unsupported binary operator: {:?}", op),
+                    _ => panic!("Unsupported binary operator: {:?}", op),
                 }
             }
             Expr::FunctionCall{ name, params } => {
