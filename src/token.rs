@@ -1,67 +1,100 @@
-use std::{fmt::Display, mem::discriminant};
+use std::fmt::Display;
 
 use serde::Serialize;
 
-use crate::{span::Span, r#type::Type};
+use crate::r#type::Type;
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, PartialEq)]
 #[serde(tag = "type", content = "value")]
 pub enum Token {
-  Print,
-  Func,
-  Let,
-  Return,
+  BoolTy,
+  Int32Ty,
+  StringTy,
+
   Class,
   Constructor,
+  Enum,
+  False,
+  Func,
+  Let,
+  Match,
+  Mut,
+  Print,
+  Pub, 
+  Return,
+  SelfRef,
+  True,
 
   Arrow,
+  ColonColon,
+  ThickArrow,
 
-  LParen,
-  RParen,
-  LBrace,
-  RBrace,
-  Equal, 
+  Assign, 
+  BAnd,
   Colon,
   Comma,
-  Semicolon,
-  Plus,
-  Minus,
-  Multiply,
   Divide,
   Dot,
+  LBrace,
+  LParen,
+  Minus,
+  Multiply,
+  Plus,
+  RBrace,
+  RParen,
+  Semicolon,
 
-  Numeral(i32),
   Identifier(String),
+  Numeral(i32),
+  StringLiteral(String),
+
+  EOF
 }
 
 impl Display for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Token::Print        => write!(f, "{}", "Print"),
-            Token::Func         => write!(f, "{}", "Func"),
-            Token::Let          => write!(f, "{}", "Let"),
-            Token::Return       => write!(f, "{}", "Return"),
-            Token::Class        => write!(f, "{}", "Class"),
-            Token::Constructor  => write!(f, "{}", "Constructor"),
+            Token::BoolTy   => write!(f, "bool"),
+            Token::Int32Ty  => write!(f, "int32"),
+            Token::StringTy => write!(f, "String"),
 
-            Token::Arrow        => write!(f, "{}", "Arrow"),
+            Token::Print        => write!(f, "print"),
+            Token::Func         => write!(f, "func"),
+            Token::False        => write!(f, "false"),
+            Token::Let          => write!(f, "let"),
+            Token::Return       => write!(f, "return"),
+            Token::Class        => write!(f, "class"),
+            Token::Constructor  => write!(f, "Constructor"),
+            Token::SelfRef      => write!(f, "self"),
+            Token::Match        => write!(f, "match"),
+            Token::Mut          => write!(f, "mut"),
+            Token::Pub          => write!(f, "pub"),
+            Token::Enum         => write!(f, "enum"),
+            Token::True         => write!(f, "true"),
 
-            Token::LParen       => write!(f, "{}", "LParen"),
-            Token::RParen       => write!(f, "{}", "RParen"),
-            Token::LBrace       => write!(f, "{}", "LBrace"),
-            Token::RBrace       => write!(f, "{}", "RBrace"),
-            Token::Equal        => write!(f, "{}", "Equal"),
-            Token::Colon        => write!(f, "{}", "Colon"),
-            Token::Comma        => write!(f, "{}", "Comma"),
-            Token::Semicolon    => write!(f, "{}", "Semicolon"),
-            Token::Plus         => write!(f, "{}", "Plus"),
-            Token::Minus        => write!(f, "{}", "Minus"),
-            Token::Multiply     => write!(f, "{}", "Multiply"),
-            Token::Divide       => write!(f, "{}", "Divide"),
-            Token::Dot          => write!(f, "{}", "Dot"),
+            Token::Arrow        => write!(f, "->"),
+            Token::ColonColon   => write!(f, "::"),
+            Token::ThickArrow   => write!(f, "=>"),
 
-            Token::Numeral(value)   => write!(f, "Int32({})", value),
-            Token::Identifier(name) => write!(f, "{}", name)
+            Token::LParen       => write!(f, "("),
+            Token::RParen       => write!(f, ")"),
+            Token::LBrace       => write!(f, "{{"),
+            Token::RBrace       => write!(f, "}}"),
+            Token::Assign       => write!(f, "="),
+            Token::Colon        => write!(f, ":"),
+            Token::Comma        => write!(f, ","),
+            Token::Semicolon    => write!(f, ";"),
+            Token::Plus         => write!(f, "+"),
+            Token::Minus        => write!(f, "-"),
+            Token::Multiply     => write!(f, "*"),
+            Token::Divide       => write!(f, "/"),
+            Token::Dot          => write!(f, "."),
+            Token::BAnd         => write!(f, "&"),
+
+            Token::Numeral(value)           => write!(f, "{}", value),
+            Token::StringLiteral(literal)   => write!(f, "\"{}\"", literal),
+            Token::Identifier(name)         => write!(f, "{}", name),
+            Token::EOF                      => write!(f, "end of file"),
         }
     }
 }
@@ -69,13 +102,22 @@ impl Display for Token {
 impl Token {
     pub fn to_type(&self) -> Type {
         match self {
+            Token::BoolTy => Type::Bool(false),
+            Token::Int32Ty => Type::Int32,
+            Token::StringTy => Type::String,
+
             Token::Numeral(_) => Type::Int32,
-            Token::Identifier(s) => match s.as_str() {
-              "int32" => Type::Int32,
-              "String" => Type::String,
-              x => Type::Object(x.to_string())
-            },
+            Token::Identifier(s) => Type::Class(s.to_string()),
             _ => panic!("No type for Token: {}", self)
+        }
+    }
+
+    pub fn from_two_chars(c1: char, c2: char) -> Option<Token> {
+        match (c1, c2) {
+            ('-', '>') => Some(Token::Arrow),
+            (':', ':') => Some(Token::ColonColon),
+            ('=', '>') => Some(Token::ThickArrow),
+            _ => None,
         }
     }
 
@@ -86,7 +128,7 @@ impl Token {
             ';' => { Some(Token::Semicolon) }
             ',' => { Some(Token::Comma) }
             ':' => { Some(Token::Colon) }
-            '=' => { Some(Token::Equal) }
+            '=' => { Some(Token::Assign) }
             '{' => { Some(Token::LBrace) }
             '}' => { Some(Token::RBrace) }
             '+' => { Some(Token::Plus) }
@@ -94,19 +136,30 @@ impl Token {
             '*' => { Some(Token::Multiply) }
             '/' => { Some(Token::Divide) }
             '.' => { Some(Token::Dot) }
+            '&' => { Some(Token::BAnd) }
             _ => None
         }
     }
 
     pub fn from_string(token: &str) -> Token {
         match token {
+            "bool"          => Token::BoolTy,
+            "int32"         => Token::Int32Ty,
+            "String"        => Token::StringTy,
+
             "class"         => Token::Class,
             "Constructor"   => Token::Constructor,
             "func"          => Token::Func,
+            "false"         => Token::False,
             "print"         => Token::Print,
             "let"           => Token::Let,
             "return"        => Token::Return,
-            "->"            => Token::Arrow,
+            "self"          => Token::SelfRef,
+            "true"          => Token::True,
+            "mut"           => Token::Mut,
+            "match"         => Token::Match,
+            "pub"           => Token::Pub,
+            "enum"          => Token::Enum,
             _               => Token::Identifier(token.to_string())
         }
     }
@@ -115,10 +168,3 @@ impl Token {
         self.to_string().len()
     }
 }
-
-pub struct TokenWithSpan {
-    pub token: Token,
-    pub span: Span,
-}
-
-

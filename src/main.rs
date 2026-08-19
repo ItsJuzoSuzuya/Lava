@@ -1,5 +1,7 @@
+use std::{fs::{self}};
+
 use inkwell::context::Context;
-use crate::program::Program;
+use crate::{program::Program};
 
 mod traits;
 mod span;
@@ -12,25 +14,20 @@ mod parser;
 mod expression;
 mod statement;
 mod program;
+mod sema;
+mod sym;
+mod param;
+mod field;
 
 fn main() {
     let context = Context::create();
-    let mut program = Program::new(&context, "
-    class Foo {
-        x: int32 = a;
-        name: String = b;
-
-        Constructor(a: int32, b: String) {
-            printIT();
-        }
-
-        func printIT() {
-            print(self.name);
-        }
-    }
-
-
-    let foo: Foo = Foo(22, 23);"
-    .to_string());
+    let mut program = Program::new(&context, load_file("main.lv"));
     program.run();
+}
+
+fn load_file(src: &str) -> String {
+    match fs::read_to_string(src) {
+        Ok(f) => f,
+        Err(e) => panic!("Failed to load: {} \n {}", src, e)
+    }
 }
