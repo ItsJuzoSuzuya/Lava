@@ -18,6 +18,7 @@ mod sema;
 mod sym;
 mod param;
 mod field;
+mod module;
 
 fn main() {
     let context = Context::create();
@@ -25,9 +26,4 @@ fn main() {
     program.run();
 }
 
-fn load_file(src: &str) -> String {
-    match fs::read_to_string(src) {
-        Ok(f) => f,
-        Err(e) => panic!("Failed to load: {} \n {}", src, e)
-    }
-}
+

@@ -46,6 +46,7 @@ pub enum StmtKind {
     Declaration(Declaration),
     Expression(Expr),
     Return(Expr),
+    Import(Expr),
 
     Instantiation {
         name: String,
@@ -65,6 +66,7 @@ impl Display for StmtKind {
             StmtKind::Declaration(decl)                 => write!(f, "DeclarationStmt({})", decl.kind),
             StmtKind::Expression(expr)                  => write!(f, "ExpressionStmt({})", expr.kind),
             StmtKind::Return(expr)                      => write!(f, "Return({})", expr.kind),
+            StmtKind::Import(expr)                      => write!(f, "Import({})", expr.kind),
 
             StmtKind::Instantiation { name, typedef, value, ..}    =>
                 write!(f, "Instantiation({}, {}, {})", name, typedef.clone().unwrap_or_else(|| Type::from(value.kind.clone())) , value.kind),
@@ -83,6 +85,7 @@ impl Codegen for Stmt {
                 ctx.builder.build_return(Some(&*expr_val)).unwrap();
                 None
             }
+            StmtKind::Import(_) => None,
 
             StmtKind::Instantiation { name, typedef, value, .. } => {
                 let ty = typedef.clone().unwrap_or_else(|| Type::from(value.kind.clone()));

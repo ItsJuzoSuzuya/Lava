@@ -2,7 +2,7 @@ use std::process::Command;
 
 use inkwell::context::Context;
 
-use crate::{codegen_ctx::CodegenContext, parser::Parser, sema::Sema, statement::{Stmt, StmtKind}, traits::codegen::{Codegen, Declare}};
+use crate::{codegen_ctx::CodegenContext, expression::{Expr, ExprKind}, parser::Parser, sema::Sema, statement::{Stmt, StmtKind}, traits::codegen::{Codegen, Declare}};
 
 pub struct Program<'ctx> {
     pub context: CodegenContext<'ctx>,
@@ -12,24 +12,28 @@ pub struct Program<'ctx> {
 }
 
 impl<'ctx> Program<'ctx> {
-    pub fn new(context: &'ctx Context, source: String) -> Self {
+    pub fn new(context: &'ctx Context, root: &'static str) -> Self {
         Self {
-            context: CodegenContext::new(context, source.clone()),
-            parser: Parser::new(&source),
-            sema: Sema::new(source),
+            context: CodegenContext::new(context, root.to_string().clone()),
+            parser: Parser::new(&root),
+            sema: Sema::new(root.to_string()),
             ast: Vec::new(),
-        }
-    }
-
-    pub fn parse_all(&mut self) {
-        while let Some(stmt) = self.parser.parse_statement(){
-            self.ast.push(stmt);
         }
     }
 
     pub fn run(&mut self) {
         self.context.build_entry();
-        self.parse_all();
+
+        let stmts = self.parser.parse_file();
+        for stmt in stmts {
+            if let StmtKind::Import(expr) = stmt.kind {
+                if let ExprKind::ModuleImport { module, objects } = expr.kind {
+                    let module_path = get_path_from_module(module);
+                    Parser::new(module_path).parse_file();
+                }
+            }
+        }
+
         self.sema.check(&mut self.ast);
 
         for stmt in &self.ast {
@@ -47,4 +51,13 @@ impl<'ctx> Program<'ctx> {
         Command::new("cc").arg("main.o").status().unwrap();
         Command::new("./a.out").status().unwrap();
     }
+}
+
+fn get_path_from_module(module: Vec<Expr>) -> String {
+    let mut path = String::new();
+    path += "./";
+    for expr in module {
+        path += &expr.kind.to_string();
+    }
+    path
 }

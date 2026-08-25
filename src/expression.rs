@@ -6,7 +6,6 @@ use inkwell::module::Linkage;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use serde::Serialize;
-use serde::de::value;
 
 use crate::codegen_ctx::{CodegenError, CodegenContext};
 use crate::span::Span;
@@ -59,6 +58,10 @@ pub enum ExprKind {
         parent_name: Option<String>,
         mangled: Option<String>,
     },
+    ModuleImport {
+        module: Vec<Expr>,
+        objects: Option<Vec<Expr>>
+    },
 
     EnumInit { 
         name: String, 
@@ -86,7 +89,9 @@ impl Display for ExprKind {
             ExprKind::ColonAccess { name, tag }        => write!(f, "{}::{}", name, tag),
             ExprKind::FieldAccess { name, field }      => write!(f, "{}.{}", name, field.kind),
             ExprKind::FunctionCall { name, .. }        => write!(f, "{}()", name),
-            ExprKind::EnumInit { name, .. }             => write!(f, "{}(..)", name),
+            ExprKind::ModuleImport { .. }              => write!(f, "ModuleImport"),
+
+            ExprKind::EnumInit { name, .. }            => write!(f, "{}(..)", name),
             ExprKind::StructInit { class, .. }         => write!(f, "{} {{ .. }}", class),
         }
     }
@@ -383,6 +388,7 @@ impl Codegen for Expr {
                     .unwrap_or_else(|_| panic!("function '{}' could not be called", mangled));
                 Some(Box::new(return_val.try_as_basic_value().basic()?))
             }
+            ExprKind::ModuleImport { .. } => None,
             ExprKind::EnumInit { .. } => {
                 unreachable!("EnumInit must be lowered to FunctionCall by sema before codegen")
             }

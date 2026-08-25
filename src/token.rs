@@ -24,6 +24,7 @@ pub enum Token {
   Return,
   SelfRef,
   True,
+  Import,
 
   Arrow,
   ColonColon,
@@ -71,6 +72,7 @@ impl Display for Token {
             Token::Pub          => write!(f, "pub"),
             Token::Enum         => write!(f, "enum"),
             Token::True         => write!(f, "true"),
+            Token::Import       => write!(f, "import"),
 
             Token::Arrow        => write!(f, "->"),
             Token::ColonColon   => write!(f, "::"),
@@ -160,6 +162,7 @@ impl Token {
             "match"         => Token::Match,
             "pub"           => Token::Pub,
             "enum"          => Token::Enum,
+            "import"        => Token::Import,
             _               => Token::Identifier(token.to_string())
         }
     }

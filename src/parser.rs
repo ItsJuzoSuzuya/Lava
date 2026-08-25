@@ -40,8 +40,16 @@ pub struct Parser {
 }
 
 impl Parser {
-    pub fn new(string: &String) -> Self {
+    pub fn new(string: &'static str) -> Self {
         Self { lexer: Lexer::new(string.to_string()), allow_brace_init: true }
+    }
+
+    pub fn parse_file(&mut self) -> Vec<Stmt> {
+        let mut ast = vec![];
+        while let Some(stmt) = self.parse_statement(){
+            ast.push(stmt);
+        }
+        ast
     }
 
     fn expect(&mut self, token: Token, context: &'static str) -> (Token, Span) {
@@ -108,6 +116,7 @@ impl Parser {
             Token::Match  => self.parse_match(),
             Token::Let    => self.parse_variable(false),
             Token::Return => self.parse_return(),
+            Token::Import => self.parse_import(),
             other         => self.parse_expr_stmt(other, span.clone()),
         };
         Some(Stmt::new(kind, span, Type::Unknown))
@@ -248,6 +257,68 @@ impl Parser {
         let expr = self.next_expression();
         self.expect(Token::Semicolon, "after return value");
         StmtKind::Return(expr)
+    }
+
+    fn parse_import(&mut self) -> StmtKind {
+        let module = self.parse_module_import();
+        self.expect(Token::Semicolon, "after import");
+        StmtKind::Import(module)
+    }
+
+    fn parse_module_import(&mut self) -> Expr {
+        let (first_tok, first_span) = self.expect(
+            Token::Identifier(String::new()),
+            "at start of module path",
+        );
+        let first_name = match first_tok {
+            Token::Identifier(n) => n,
+            _ => unreachable!(),
+        };
+
+        let mut module_path: Vec<Expr> =
+            vec![Expr::new(ExprKind::Identifier(first_name), first_span.clone())];
+        let mut objects: Option<Vec<Expr>> = None;
+
+        while matches!(self.lexer.peek(), Ok((Token::ColonColon, _))) {
+            self.lexer.consume(); // '::'
+
+            if matches!(self.peek_or_eof("after '::' in module path"), (Token::LBrace, _)) {
+                self.lexer.consume(); // '{'
+                let mut list: Vec<Expr> = Vec::new();
+                while !matches!(self.peek_or_eof("in import list"), (Token::RBrace, _)) {
+                    let (tok, span) = self.expect(
+                        Token::Identifier(String::new()),
+                        "in import list",
+                    );
+                    let name = match tok {
+                        Token::Identifier(n) => n,
+                        _ => unreachable!(),
+                    };
+                    list.push(Expr::new(ExprKind::Identifier(name), span));
+                    if !matches!(self.peek_or_eof("in import list"), (Token::RBrace, _)) {
+                        self.expect(Token::Comma, "between imported items");
+                    }
+                }
+                self.expect(Token::RBrace, "at end of import list");
+                objects = Some(list);
+                break;
+            }
+
+            let (tok, span) = self.expect(
+                Token::Identifier(String::new()),
+                "after '::' in module path",
+            );
+            let name = match tok {
+                Token::Identifier(n) => n,
+                _ => unreachable!(),
+            };
+            module_path.push(Expr::new(ExprKind::Identifier(name), span));
+        }
+
+        Expr::new(
+            ExprKind::ModuleImport { module: module_path, objects },
+            first_span,
+        )
     }
 
     // Class Parsing
