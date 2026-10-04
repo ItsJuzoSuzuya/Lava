@@ -10,3 +10,10 @@ pub struct Param {
     pub value: Option<Box<Expr>>,
     pub mutable: bool,
 }
+
+impl Param {
+    /// Creates a parameter of a built-in function, which has no position in any source file.
+    pub fn builtin(name: &str, ty: Type) -> Self {
+        Self { name: name.to_string(), ty, ty_span: Span { line: 0, col: 0, len: 0 }, value: None, mutable: false }
+    }
+}

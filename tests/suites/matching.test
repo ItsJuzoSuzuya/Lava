@@ -1,0 +1,147 @@
+=== match an int literal
+let x = 3;
+match x {
+  1 => print("one"),
+  3 => print("three"),
+  _ => print("other"),
+}
+--- output
+three
+
+=== match falls through to wildcard
+let x = 9;
+match x {
+  1 => print("one"),
+  3 => print("three"),
+  _ => print("other"),
+}
+--- output
+other
+
+=== match without matching arm does nothing
+let x = 9;
+match x {
+  1 => print("one"),
+}
+print("after");
+--- output
+after
+
+=== match on uint8
+let x: uint8 = 200;
+match x {
+  200 => print("big"),
+  _ => print("small"),
+}
+--- output
+big
+
+=== match on int64
+let x: int64 = 5000000000;
+match x {
+  5000000000 => print("huge"),
+  _ => print("no"),
+}
+--- output
+huge
+
+=== match negative literal
+let x = -2;
+match x {
+  -2 => print("minus two"),
+  _ => print("no"),
+}
+--- output
+minus two
+
+=== pattern literal out of range for the scrutinee
+let x: uint8 = 1;
+match x {
+  300 => print("no"),
+  _ => print("ok"),
+}
+--- error
+literal '300' doesn't fit into 'uint8'
+
+=== match a bool
+let b = true;
+match b {
+  true => print("yes"),
+  false => print("no"),
+}
+--- output
+yes
+
+=== match a false bool
+let b = false;
+match b {
+  true => print("yes"),
+  false => print("no"),
+}
+--- output
+no
+
+=== match arm with block
+let x = 2;
+match x {
+  2 => {
+    print("two");
+    print("still two");
+  }
+  _ => print("other"),
+}
+--- output
+two
+still two
+
+=== match on a function result
+func pick() -> int32 {
+  return 1;
+}
+match pick() {
+  1 => print("picked one"),
+  _ => print("other"),
+}
+--- output
+picked one
+
+=== match inside a function
+func describe(x: int32) {
+  match x {
+    0 => print("zero"),
+    _ => print("not zero"),
+  }
+}
+describe(0);
+describe(5);
+--- output
+zero
+not zero
+
+=== code after match runs
+let x = 1;
+match x {
+  1 => print("one"),
+  _ => print("other"),
+}
+print("done");
+--- output
+one
+done
+
+=== pattern of wrong type
+let x = 1;
+match x {
+  "one" => print("one"),
+  _ => print("other"),
+}
+--- error
+match arm pattern
+
+=== invalid pattern
+let x = 1;
+match x {
+  + => print("no"),
+}
+--- error
+is not a valid pattern

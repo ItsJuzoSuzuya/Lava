@@ -1,0 +1,66 @@
+=== class passed by reference
+class Box {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+func show(b: &Box) {
+  print(b.v);
+}
+let b = Box { v: 3 };
+show(&b);
+--- output
+3
+
+=== class auto referenced
+class Box {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+func show(b: &Box) {
+  print(b.v);
+}
+let b = Box { v: 4 };
+show(b);
+--- output
+4
+
+=== reference parameter in a method
+class Person {
+  pub age: int32 = age;
+
+  Constructor(age: int32);
+
+  pub func older(&self, other: &Person) -> int32 {
+    return other.age;
+  }
+}
+let a = Person { age: 30 };
+let b = Person { age: 40 };
+print(a.older(&b));
+--- output
+40
+
+=== int auto referenced
+func f(x: &int32) -> int32 {
+  return 1;
+}
+let a: int32 = 5;
+print(f(a));
+--- output
+1
+
+=== reference to a reference type is checked
+func f(x: &int32) -> int32 {
+  return 1;
+}
+let a: int64 = 5;
+print(f(&a));
+--- error
+type 'Ref(int64)' does not match 'Ref(int32)' in function argument
+
+=== reference of a literal is an error
+let r = &5;
+--- error
+'&' operand must be a place expression

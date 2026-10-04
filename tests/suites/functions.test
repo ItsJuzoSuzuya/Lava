@@ -1,0 +1,221 @@
+=== call a function without arguments
+func hello() {
+  print("hello");
+}
+hello();
+--- output
+hello
+
+=== call a function twice
+func hello() {
+  print("hi");
+}
+hello();
+hello();
+--- output
+hi
+hi
+
+=== function with a parameter
+func show(x: int32) {
+  print(x);
+}
+show(5);
+--- output
+5
+
+=== function with several parameters
+func show(a: int32, b: int32, c: int32) {
+  print(a);
+  print(b);
+  print(c);
+}
+show(1, 2, 3);
+--- output
+1
+2
+3
+
+=== function with a return value
+func add(x: int32, y: int32) -> int32 {
+  return x + y;
+}
+print(add(2, 16));
+--- output
+18
+
+=== return value stored in variable
+func double(x: int32) -> int32 {
+  return x * 2;
+}
+let y = double(21);
+print(y);
+--- output
+42
+
+=== nested calls
+func inc(x: int32) -> int32 {
+  return x + 1;
+}
+print(inc(inc(inc(0))));
+--- output
+3
+
+=== function calling another function
+func square(x: int32) -> int32 {
+  return x * x;
+}
+func sum_of_squares(a: int32, b: int32) -> int32 {
+  return square(a) + square(b);
+}
+print(sum_of_squares(3, 4));
+--- output
+25
+
+=== function declared after its use
+print(later());
+func later() -> int32 {
+  return 99;
+}
+--- output
+99
+
+=== function returning a string
+func name() -> String {
+  return "lava";
+}
+print(name());
+--- output
+lava
+
+=== function returning a bool
+func yes() -> bool {
+  return true;
+}
+print(yes());
+--- output
+true
+
+=== function returning a float
+func pi() -> float64 {
+  return 3.5;
+}
+print(pi());
+--- output
+3.500000
+
+=== string parameter
+func greet(name: String) {
+  print(name);
+}
+greet("world");
+--- output
+world
+
+=== bool parameter
+func show(b: bool) {
+  print(b);
+}
+show(true);
+show(false);
+--- output
+true
+false
+
+=== local variables inside a function
+func calc() -> int32 {
+  let a = 4;
+  let b = 5;
+  return a * b;
+}
+print(calc());
+--- output
+20
+
+=== parameters shadow nothing outside
+let x = 1;
+func show(x: int32) {
+  print(x);
+}
+show(2);
+print(x);
+--- output
+2
+1
+
+=== default parameter used
+func scale(x: int32, factor: int32 = 3) -> int32 {
+  return x * factor;
+}
+print(scale(4));
+--- output
+12
+
+=== default parameter overridden
+func scale(x: int32, factor: int32 = 3) -> int32 {
+  return x * factor;
+}
+print(scale(4, 10));
+--- output
+40
+
+=== default parameter adapts to its type
+func big(x: int64 = 5000000000) -> int64 {
+  return x;
+}
+print(big());
+--- output
+5000000000
+
+=== default parameter with wrong type
+func f(x: int32 = 2.5) -> int32 {
+  return x;
+}
+print(f());
+--- error
+type 'float64' does not match 'int32' in default value
+
+=== missing argument
+func add(x: int32, y: int32) -> int32 {
+  return x + y;
+}
+print(add(1));
+--- error
+missing argument 1 for 'add'
+
+=== wrong argument type
+func show(x: int32) {
+  print(x);
+}
+show("text");
+--- error
+type 'String' does not match 'int32' in function argument
+
+=== wrong return type
+func f() -> int32 {
+  return "text";
+}
+f();
+--- error
+type 'String' does not match 'int32' in function return type
+
+=== unknown function
+nothing();
+--- error
+unknown function 'nothing'
+
+=== function without parameters and return type
+func zero() -> int32 {
+  return 0;
+}
+print(zero());
+--- output
+0
+
+=== too many arguments is an error
+func one(x: int32) -> int32 {
+  return x;
+}
+print(one(1, 2));
+--- error
+argument

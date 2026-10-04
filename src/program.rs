@@ -2,48 +2,56 @@ use std::process::Command;
 
 use inkwell::context::Context;
 
-use crate::{codegen_ctx::CodegenContext, expression::{Expr, ExprKind}, parser::Parser, sema::Sema, statement::{Stmt, StmtKind}, traits::codegen::{Codegen, Declare}};
+use crate::{codegen_ctx::CodegenContext, module::ModuleGraph, parser::Parser, 
+    sema::Sema, statement::{Stmt, StmtKind}, traits::codegen::{Codegen, Declare}};
 
+/// Parses, checks semantics and runs the code.
+///
+/// Built by [`Program::new`] from a [`ModuleGraph`].
 pub struct Program<'ctx> {
     pub context: CodegenContext<'ctx>,
-    parser: Parser,
-    sema: Sema,
+    module_graph: &'ctx mut ModuleGraph,
     ast: Vec<Stmt>,
 }
 
 impl<'ctx> Program<'ctx> {
-    pub fn new(context: &'ctx Context, root: &'static str) -> Self {
+    pub fn new(context: &'ctx Context, module_graph: &'ctx mut ModuleGraph) -> Self {
         Self {
-            context: CodegenContext::new(context, root.to_string().clone()),
-            parser: Parser::new(&root),
-            sema: Sema::new(root.to_string()),
+            context: CodegenContext::new(context),
+            module_graph: module_graph,
             ast: Vec::new(),
         }
     }
 
+    // Generates and runs the code from each module by parsing, semantic checking and then
+    // generating the llvm code.
     pub fn run(&mut self) {
         self.context.build_entry();
 
-        let stmts = self.parser.parse_file();
-        for stmt in stmts {
-            if let StmtKind::Import(expr) = stmt.kind {
-                if let ExprKind::ModuleImport { module, objects } = expr.kind {
-                    let module_path = get_path_from_module(module);
-                    Parser::new(module_path).parse_file();
+        // Shared across modules, so declarations of imported modules stay known.
+        let mut sema = Sema::new();
+
+        for module in &self.module_graph.modules {
+            let mut parser = Parser::new(module.source.clone());
+            sema.enter_module(module.name.clone(), module.source.clone());
+
+            self.context.source = module.source.clone();
+
+            // Only check and generate this module's statements, earlier modules are already done.
+            let mut stmts = parser.parse_file();
+            sema.check(&mut stmts);
+
+            for stmt in &stmts {
+                if let StmtKind::Declaration(decl) = &stmt.kind {
+                    decl.declare(&mut self.context);
                 }
             }
-        }
 
-        self.sema.check(&mut self.ast);
-
-        for stmt in &self.ast {
-            if let StmtKind::Declaration(decl) = &stmt.kind {
-                decl.declare(&mut self.context);
+            for stmt in &stmts {
+                stmt.codegen(&mut self.context);
             }
-        }
 
-        for stmt in &self.ast {
-            stmt.codegen(&mut self.context);
+            self.ast.extend(stmts);
         }
 
         self.context.compile();
@@ -51,13 +59,4 @@ impl<'ctx> Program<'ctx> {
         Command::new("cc").arg("main.o").status().unwrap();
         Command::new("./a.out").status().unwrap();
     }
-}
-
-fn get_path_from_module(module: Vec<Expr>) -> String {
-    let mut path = String::new();
-    path += "./";
-    for expr in module {
-        path += &expr.kind.to_string();
-    }
-    path
 }

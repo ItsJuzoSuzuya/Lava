@@ -1,0 +1,123 @@
+=== unexpected character
+let x = 5 @ 3;
+--- error
+unexpected character '@'
+
+=== unexpected character dollar
+let $x = 5;
+--- error
+unexpected character '$'
+
+=== unterminated string
+print("hello);
+--- error
+unterminated string literal
+
+=== number too big for any integer type
+let x = 99999999999999999999;
+--- error
+doesn't fit into int64
+
+=== missing semicolon after let
+let x = 5
+print(x);
+--- error
+expected ';'
+
+=== missing semicolon after expression
+print(1)
+print(2);
+--- error
+expected ';'
+
+=== missing closing brace of function
+func f() {
+  print(1);
+--- error
+unexpected end of file
+
+=== missing closing paren of call
+func f(x: int32) {
+  print(x);
+}
+f(1;
+--- error
+expected ','
+
+=== missing function name
+func (x: int32) {
+  print(x);
+}
+--- error
+in function declaration
+
+=== missing parameter type
+func f(x) {
+  print(x);
+}
+--- error
+after parameter name
+
+=== pub without declaration
+pub let x = 5;
+--- error
+expected declaration after pub
+
+=== let without name
+let = 5;
+--- error
+in variable declaration
+
+=== let without value
+let x;
+--- error
+after type in variable declaration
+
+=== invalid expression start
+let x = ;
+--- error
+is not a valid expression
+
+=== missing class body
+class Box;
+--- error
+at start of class body
+
+=== missing enum arrow
+enum E {
+  A int32
+}
+--- error
+expected '=>'
+
+=== unknown type
+let x: Nothing = 5;
+--- error
+unknown type 'Nothing'
+
+=== unknown parameter type
+func f(x: Nothing) {
+  print(1);
+}
+--- error
+unknown type 'Nothing'
+
+=== return outside of a function value mismatch
+func f() -> bool {
+  return 1;
+}
+f();
+--- error
+does not match 'bool' in function return type
+
+=== error shows the offending line
+let a = 1;
+let b = c;
+--- error
+let b = c;
+
+=== error shows line and column
+let a = 1;
+let b = c;
+--- error
+--> 2:9

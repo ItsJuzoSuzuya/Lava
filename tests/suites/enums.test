@@ -1,0 +1,234 @@
+=== create an enum value and match it
+enum Shape {
+  Circle => int32,
+  Square => int32
+}
+let s = Shape::Circle(5);
+match s {
+  Shape::Circle(r) => print(r),
+  Shape::Square(a) => print(a),
+}
+--- output
+5
+
+=== second variant matches
+enum Shape {
+  Circle => int32,
+  Square => int32
+}
+let s = Shape::Square(7);
+match s {
+  Shape::Circle(r) => print(r),
+  Shape::Square(a) => print(a),
+}
+--- output
+7
+
+=== variants with different payload types
+enum Value {
+  Number => int32,
+  Text => String
+}
+let a = Value::Number(42);
+let b = Value::Text("hi");
+match a {
+  Value::Number(n) => print(n),
+  Value::Text(t) => print(t),
+}
+match b {
+  Value::Number(n) => print(n),
+  Value::Text(t) => print(t),
+}
+--- output
+42
+hi
+
+=== match arm without binding
+enum Light {
+  Red => int32,
+  Green => int32
+}
+let l = Light::Green(0);
+match l {
+  Light::Red => print("stop"),
+  Light::Green => print("go"),
+}
+--- output
+go
+
+=== wildcard arm
+enum Light {
+  Red => int32,
+  Yellow => int32,
+  Green => int32
+}
+let l = Light::Yellow(0);
+match l {
+  Light::Red => print("stop"),
+  _ => print("other"),
+}
+--- output
+other
+
+=== block arm body
+enum Num {
+  Int => int32,
+  Big => int64
+}
+let n = Num::Int(4);
+match n {
+  Num::Int(v) => {
+    let doubled = v * 2;
+    print(doubled);
+  }
+  Num::Big(v) => print(v),
+}
+--- output
+8
+
+=== payload used in arithmetic
+enum Num {
+  Int => int32,
+  Big => int64
+}
+let n = Num::Int(20);
+match n {
+  Num::Int(v) => print(v + 1),
+  Num::Big(v) => print(v),
+}
+--- output
+21
+
+=== print an enum value prints its payload
+enum Value {
+  Number => int32,
+  Text => String
+}
+let a = Value::Number(42);
+print(a);
+--- output
+42
+
+=== print a string payload
+enum Value {
+  Number => int32,
+  Text => String
+}
+let b = Value::Text("hello");
+print(b);
+--- output
+hello
+
+=== tag of a variant
+enum Light {
+  Red => int32,
+  Yellow => int32,
+  Green => int32
+}
+let l = Light::Green(0);
+print(l.tag);
+--- output
+2
+
+=== literal adapts to the payload type
+enum Num {
+  Small => uint8,
+  Big => int64
+}
+let a = Num::Small(200);
+let b = Num::Big(5000000000);
+match b {
+  Num::Small(v) => print(v),
+  Num::Big(v) => print(v),
+}
+--- output
+5000000000
+
+=== payload literal out of range
+enum Num {
+  Small => uint8,
+  Big => int64
+}
+let a = Num::Small(300);
+--- error
+literal '300' doesn't fit into 'uint8'
+
+=== class payload with brace init
+class Point {
+  pub x: int32 = x;
+  pub y: int32 = y;
+
+  Constructor(x: int32, y: int32);
+}
+enum Shape {
+  Dot => Point,
+  Size => int32
+}
+let s = Shape::Dot { x: 3, y: 4 };
+match s {
+  Shape::Dot(p) => print(p.x + p.y),
+  Shape::Size(n) => print(n),
+}
+--- output
+7
+
+=== wrong payload type
+enum Value {
+  Number => int32,
+  Text => String
+}
+let a = Value::Number("no");
+--- error
+type 'String' does not match 'int32' in enum variant payload
+
+=== unknown variant
+enum Value {
+  Number => int32,
+  Text => String
+}
+let a = Value::Other(1);
+--- error
+enum 'Value' has no variant 'Other'
+
+=== unknown enum
+let a = Nope::Thing(1);
+--- error
+unknown enum 'Nope'
+
+=== match pattern of another enum
+enum A {
+  X => int32
+}
+enum B {
+  Y => int32
+}
+let a = A::X(1);
+match a {
+  B::Y(v) => print(v),
+}
+--- error
+match arm pattern
+
+=== enum methods are an error
+enum Value {
+  Number => int32
+}
+let a = Value::Number(1);
+a.go();
+--- error
+has no methods (enum)
+
+=== enum passed to a function
+enum Value {
+  Number => int32,
+  Text => String
+}
+func show(v: Value) {
+  match v {
+    Value::Number(n) => print(n),
+    Value::Text(t) => print(t),
+  }
+}
+show(Value::Text("passed"));
+--- output
+passed

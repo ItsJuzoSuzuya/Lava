@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 
-use crate::{declaration::{Declaration, DeclarationKind}, expression::{Expr, ExprKind}, field::Field, param::Param, span::Span, statement::{MatchArm, Pattern, Stmt, StmtKind}, r#type::Type};
+use crate::{declaration::{Declaration, DeclarationKind, Visibility}, expression::{Expr, ExprKind}, field::Field, param::Param, span::Span, statement::{MatchArm, Pattern, Stmt, StmtKind}, r#type::Type};
 
 enum SemanticError {
     AssignOnUnmutable { var: String, span: Span },
+    CannotNegate { ty: Type, span: Span },
     InvalidReceiver { recv_ty: Type, span: Span, context: &'static str },
+    LiteralOutOfRange { value: i64, ty: Type, span: Span },
     MissingArgument { function: String, index: usize, span: Span },
     PrivateFieldAccess { field_name: String, span: Span },
     PrivateFunctionCall { func_name: String, parent: String, span: Span },
+    TooManyArguments { func_name: String, parent: String, span: Span },
     TypeMismatch { lhs: Type, rhs: Type, span: Span, context: &'static str },
     UnknownEnum { name: String, span: Span },
     UnknownField { class: String, field: String, span: Span },
@@ -22,14 +25,20 @@ impl SemanticError {
         let (line, col, msg) = match self {
             SemanticError::AssignOnUnmutable{ var, span } =>
                 (span.line, span.col, format!("Tried reassigning a value to the unmutable Variable '{}'", var)),
+            SemanticError::CannotNegate { ty, span } =>
+                (span.line, span.col, format!("cannot negate a value of type '{}'", ty)),
             SemanticError::InvalidReceiver { recv_ty, span, context } =>
                 (span.line, span.col, format!("'{}' {}", recv_ty, context)),
+            SemanticError::LiteralOutOfRange { value, ty, span } =>
+                (span.line, span.col, format!("literal '{}' doesn't fit into '{}'", value, ty)),
             SemanticError::MissingArgument { function, index, span } =>
                 (span.line, span.col, format!("missing argument {} for '{}'", index, function)),
             SemanticError::PrivateFieldAccess { field_name, span } =>
                 (span.line, span.col, format!("Tried accessing a private field '{}'", field_name)),
             SemanticError::PrivateFunctionCall { func_name, parent,  span } =>
                 (span.line, span.col, format!("Tried calling a private function '{}' in '{}'", func_name, parent)),
+            SemanticError::TooManyArguments {  func_name, parent,  span } =>
+                (span.line, span.col, format!("Too many arguments provided for function '{}' in '{}'", func_name, parent)),
             SemanticError::TypeMismatch { lhs, rhs, span, context } =>
                 (span.line, span.col, format!("type '{}' does not match '{}' in {}", lhs, rhs, context)),
             SemanticError::UnknownEnum { name, span } =>
@@ -54,17 +63,37 @@ impl SemanticError {
 
 pub struct Sema {
     scope: HashMap<String, (Type, bool)>,
-    functions: HashMap<String, (Vec<Param>, Type, bool)>,
+    /// Params, return type, visibility and the name of the module the function is declared in.
+    functions: HashMap<String, (Vec<Param>, Type, Visibility, String)>,
     classes: HashMap<String, Vec<Field>>,
     enums: HashMap<String, Vec<(String, u32, Type)>>,
     current_class: Option<String>,
     current_return_type: Option<Type>,
+    /// Int literals too big for their default type `int32` that haven't gotten
+    /// another type from their context yet, by their position.
+    oversized_literals: HashMap<(usize, usize), (i64, Span)>,
+    /// Name of the module currently being checked.
+    module: String,
     source: String
 }
 
 impl Sema {
-    pub fn new(source: String) -> Self {
-        Self { scope: HashMap::new(), functions: HashMap::new(), classes: HashMap::new(), enums: HashMap::new(), current_class: None, source, current_return_type: None }
+    /// Creates a sema with the built-in functions already declared.
+    ///
+    /// Codegen defines the same functions in `CodegenContext::define_builtins`.
+    pub fn new() -> Self {
+        let mut sema = Self { scope: HashMap::new(), functions: HashMap::new(), classes: HashMap::new(), enums: HashMap::new(), current_class: None, source: String::new(), module: String::new(), current_return_type: None, oversized_literals: HashMap::new() };
+        sema.push_func("sqrt".to_string(), vec![Param::builtin("x", Type::Float { bits: 32 })], Type::Float { bits: 32 }, Visibility::Public);
+        sema
+    }
+
+    /// Switches to checking the module `module` with the source code `source`.
+    ///
+    /// Declarations of previously checked modules stay known, local variables are dropped.
+    pub fn enter_module(&mut self, module: String, source: String) {
+        self.module = module;
+        self.source = source;
+        self.scope.clear();
     }
 
     pub fn push_class(&mut self, name: String, fields: Vec<Field>) {
@@ -75,20 +104,39 @@ impl Sema {
         self.enums.insert(name, fields);
     }
 
-    pub fn push_func(&mut self, name: String, params: Vec<Param>, return_type: Type, public: bool) {
-        self.functions.insert(name, (params, return_type, public));
+    pub fn push_func(&mut self, name: String, params: Vec<Param>, return_type: Type, visibility: Visibility) {
+        self.functions.insert(name, (params, return_type, visibility, self.module.clone()));
     }
 
 
+    /// Checks the statements of a whole module.
+    ///
+    /// # Panics
+    ///
+    /// Panics on the first semantic error.
     pub fn check(&mut self, ast: &mut Vec<Stmt>) {
+        self.check_stmts(ast);
+
+        // Literals that never got a type from their context stay int32
+        let first = self.oversized_literals.drain()
+            .map(|(_, literal)| literal)
+            .min_by_key(|(_, span)| (span.line, span.col));
+        if let Some((value, span)) = first {
+            SemanticError::LiteralOutOfRange { value, ty: Type::INT32, span }.throw(&self.source);
+        }
+    }
+
+    fn check_stmts(&mut self, ast: &mut Vec<Stmt>) {
+        // Types are resolved before declaring, so the declared signatures use the final types
+        self.declare_type_names(ast);
         for stmt in ast.iter_mut() {
             if let StmtKind::Declaration(decl) = &mut stmt.kind {
-                self.declare_decl(decl);
+                self.canonicalize_decl(decl);
             }
         }
         for stmt in ast.iter_mut() {
             if let StmtKind::Declaration(decl) = &mut stmt.kind {
-                self.canonicalize_decl(decl);
+                self.declare_decl(decl);
             }
         }
         for stmt in ast.iter_mut() {
@@ -101,9 +149,26 @@ impl Sema {
         }
     }
 
+    /// Registers the names of all classes and enums declared in `ast`, so types
+    /// referring to them can be resolved before the declarations are processed.
+    ///
+    /// [`Sema::declare_decl`] fills in their fields and variants later.
+    fn declare_type_names(&mut self, ast: &[Stmt]) {
+        for stmt in ast {
+            if let StmtKind::Declaration(decl) = &stmt.kind {
+                match &decl.kind {
+                    DeclarationKind::Class { name, .. } => { self.classes.entry(name.clone()).or_default(); }
+                    DeclarationKind::Enum { name, .. } => { self.enums.entry(name.clone()).or_default(); }
+                    DeclarationKind::Function { .. } => {}
+                }
+            }
+        }
+    }
+
     fn canonicalize_type(&self, ty: &Type, span: &Span) -> Type {
         match ty {
-            Type::Object(name) => {
+            // The parser can't tell classes and enums apart, both come in as `Class`
+            Type::Object(name) | Type::Class(name) => {
                 if self.enums.contains_key(name) {
                     Type::Enum(name.clone())
                 } else if self.classes.contains_key(name) {
@@ -221,7 +286,7 @@ impl Sema {
                     .collect();
                 self.push_enum(name.clone(), stripped);
             },
-            DeclarationKind::Function { name, params, return_type, mangled, public, .. } => {
+            DeclarationKind::Function { name, params, return_type, mangled, visibility, .. } => {
                 let is_ctor = matches!(&self.current_class, Some(cls) if cls == name);
                 if is_ctor {
                     *return_type = Some(Type::Class(name.clone()));
@@ -231,7 +296,7 @@ impl Sema {
                     Some(cls) if cls != name => format!("{}_{}", cls, name),
                     _ => name.clone(),
                 };
-                self.push_func(m.clone(), params.clone(), ret, *public);
+                self.push_func(m.clone(), params.clone(), ret, visibility.clone());
                 *mangled = Some(m);
             }
         }
@@ -242,7 +307,9 @@ impl Sema {
         let ty = match &mut stmt.kind {
             StmtKind::Return(expr) => {
                 let cur = self.current_return_type.clone().unwrap();
-                let ret = self.check_expr(expr);
+                self.check_expr(expr);
+                self.coerce(expr, &cur);
+                let ret = expr.ty.clone();
                 if ret != cur {
                     SemanticError::TypeMismatch { lhs: ret, rhs: cur , span: expr.span.clone(), context: "function return type" }.throw(&self.source);
                 }
@@ -252,7 +319,20 @@ impl Sema {
             StmtKind::Instantiation { name, typedef, value, mutable } => {
                 let value_ty = self.check_expr(value);
                 let ty = match typedef {
-                    Some(td) => self.canonicalize_type(td, &stmt_span),
+                    Some(td) => {
+                        let ty = self.canonicalize_type(td, &stmt_span);
+                        self.check_type(&ty, &stmt_span);
+                        self.coerce(value, &ty);
+                        if (ty.is_number() || value.ty.is_number()) && value.ty != ty {
+                            SemanticError::TypeMismatch {
+                                lhs: value.ty.clone(),
+                                rhs: ty,
+                                span: value.span.clone(),
+                                context: "variable declaration",
+                            }.throw(&self.source);
+                        }
+                        ty
+                    }
                     None => value_ty,
                 };
                 self.check_type(&ty, &stmt_span);
@@ -260,6 +340,7 @@ impl Sema {
                 *typedef = Some(ty.clone());
                 ty
             }
+            StmtKind::Import(expr) => self.check_expr(expr),
             StmtKind::Expression(expr) => self.check_expr(expr),
             StmtKind::Match { scrutinee, arms } => {
                 let scrutinee_ty = self.check_expr(scrutinee);
@@ -274,7 +355,7 @@ impl Sema {
     fn check_match_arms(&mut self, scrutinee_ty: &Type, arms: &mut Vec<MatchArm>, span: &Span) {
         for arm in arms.iter_mut() {
             let prev_scope = self.scope.clone();
-            match &arm.pattern {
+            match &mut arm.pattern {
                 Pattern::EnumVariant { enum_name, variant, binding } => {
                     let scrut_enum = match scrutinee_ty {
                         Type::Enum(n) => n.clone(),
@@ -309,7 +390,7 @@ impl Sema {
                     }
                 }
                 Pattern::Literal(expr) if matches!(expr.kind, ExprKind::Identifier(_)) => {
-                    self.scope.insert(arm.pattern.to_string(), (scrutinee_ty.clone(), false));
+                    self.scope.insert(expr.kind.to_string(), (scrutinee_ty.clone(), false));
                     let mut expr = expr.clone();
                     let lit_ty = self.check_expr(&mut expr);
                     if &lit_ty != scrutinee_ty {
@@ -322,8 +403,9 @@ impl Sema {
                     }
                 }
                 Pattern::Literal(expr) => {
-                    let mut expr = expr.clone();
-                    let lit_ty = self.check_expr(&mut expr);
+                    self.check_expr(expr);
+                    self.coerce_literal(expr, scrutinee_ty);
+                    let lit_ty = expr.ty.clone();
                     if &lit_ty != scrutinee_ty {
                         SemanticError::TypeMismatch {
                             lhs: lit_ty,
@@ -347,14 +429,22 @@ impl Sema {
         let span = expr.span.clone();
 
         let ty = match &mut expr.kind {
-            ExprKind::Boolean(val) => Type::Bool(*val),
-            ExprKind::Int32(_) => Type::Int32,
+            ExprKind::Boolean(_) => Type::Bool,
+            ExprKind::IntLiteral(value) => {
+                // Reported at the end of the module unless the context gives it a bigger type
+                if !int_fits(*value, 32, true) {
+                    self.oversized_literals.insert((span.line, span.col), (*value, span.clone()));
+                }
+                Type::INT32
+            }
+            ExprKind::FloatLiteral(_) => Type::FLOAT64,
             ExprKind::StringLiteral(_) => Type::String,
             ExprKind::Identifier(name) => self.scope.get(name).cloned()
                 .unwrap_or_else(|| SemanticError::UnknownIdentifier {
                     identifier: name.clone(),
                     span: span.clone(),
                 }.throw(&self.source)).0,
+            ExprKind::ModuleImport { .. } => Type::Void,
             ExprKind::FieldAccess { name, field } => {
                 let recv_ty = self.scope.get(name).cloned()
                     .unwrap_or_else(|| SemanticError::UnknownIdentifier {
@@ -374,9 +464,9 @@ impl Sema {
 
                 if let Type::Enum(enum_name) = &peeled {
                     if field_name == "tag" {
-                        field.ty = Type::Int32;
-                        expr.ty = Type::Int32;
-                        return Type::Int32;
+                        field.ty = Type::INT32;
+                        expr.ty = Type::INT32;
+                        return Type::INT32;
                     }
                     
                     SemanticError::UnknownField {
@@ -395,27 +485,25 @@ impl Sema {
                     }.throw(&self.source),
                 };
 
-                let is_public = self.classes.get(&class_name).unwrap()
-                    .iter().find(|field| *field.name == field_name).unwrap().public;
-                let inside_self = match self.current_class.clone() {
-                    Some(name) => {
-                        class_name == name 
-                    }
-                    None => false,
-                };
-                
-                if !is_public && !inside_self {
-                    SemanticError::PrivateFieldAccess{ field_name, span  }.throw(&self.source);
-                }
-
-                let field_ty = self.classes.get(&class_name)
+                let (field_ty, visibility) = self.classes.get(&class_name)
                     .and_then(|fields| fields.iter().find(|p| p.name == field_name))
-                    .map(|p| p.ty.clone())
+                    .map(|p| (p.ty.clone(), p.visibility.clone()))
                     .unwrap_or_else(|| SemanticError::UnknownField {
                         class: class_name.clone(),
                         field: field_name.clone(),
                         span: span.clone(),
                     }.throw(&self.source));
+
+                let inside_self = match self.current_class.clone() {
+                    Some(name) => {
+                        class_name == name
+                    }
+                    None => false,
+                };
+
+                if matches!(visibility, Visibility::Private) && !inside_self {
+                    SemanticError::PrivateFieldAccess{ field_name, span  }.throw(&self.source);
+                }
 
                 field.ty = field_ty.clone();
                 field_ty
@@ -450,7 +538,9 @@ impl Sema {
                 }
 
                 let lhs_ty = self.check_expr(lhs);
-                let rhs_ty = self.check_expr(rhs);
+                self.check_expr(rhs);
+                self.coerce(rhs, &lhs_ty);
+                let rhs_ty = rhs.ty.clone();
                 if lhs_ty != rhs_ty {
                     SemanticError::TypeMismatch {
                         lhs: lhs_ty,
@@ -462,6 +552,17 @@ impl Sema {
 
                 rhs_ty
             },
+            ExprKind::Convert(inner) => {
+                self.check_expr(inner);
+                expr.ty.clone()
+            }
+            ExprKind::Negation(inner) => {
+                let inner_ty = self.check_expr(inner);
+                if !matches!(inner_ty, Type::Int { signed: true, .. } | Type::Float { .. }) {
+                    SemanticError::CannotNegate { ty: inner_ty, span: span.clone() }.throw(&self.source);
+                }
+                inner_ty
+            }
             ExprKind::Ref(inner) => {
                 if !matches!(inner.kind, ExprKind::Identifier(_) | ExprKind::FieldAccess { .. }) {
                     panic!("'&' operand must be a place expression, got '{}'", inner.kind);
@@ -470,8 +571,26 @@ impl Sema {
                 Type::Ref(Box::new(inner_ty))
             },
             ExprKind::BinaryExpr { lhs, rhs, op: _} => {
-                let lhs_ty = self.check_expr(lhs);
-                let rhs_ty = self.check_expr(rhs);
+                self.check_expr(lhs);
+                self.check_expr(rhs);
+
+                // A literal takes the type of the other side, like `1` in `x + 1` with `x: uint8`
+                if is_number_literal(lhs) && !is_number_literal(rhs) {
+                    self.coerce_literal(lhs, &rhs.ty);
+                } else if is_number_literal(rhs) && !is_number_literal(lhs) {
+                    self.coerce_literal(rhs, &lhs.ty);
+                }
+
+                // The narrower side widens to the other, like `int32 + int64` to `int64`
+                if lhs.ty.widens_to(&rhs.ty) {
+                    let target = rhs.ty.clone();
+                    self.coerce(lhs, &target);
+                } else if rhs.ty.widens_to(&lhs.ty) {
+                    let target = lhs.ty.clone();
+                    self.coerce(rhs, &target);
+                }
+
+                let (lhs_ty, rhs_ty) = (lhs.ty.clone(), rhs.ty.clone());
                 if lhs_ty != rhs_ty {
                     SemanticError::TypeMismatch {
                         lhs: lhs_ty,
@@ -500,48 +619,31 @@ impl Sema {
                 }
             }
             ExprKind::FunctionCall { name, params, parent_name, mangled } => {
-                let mut is_self = false;
-                let m = match parent_name {
-                    Some(recv) => {
-                        let (recv_ty, _is_mut) = self.scope.get(recv).cloned()
-                            .unwrap_or_else(|| SemanticError::UnknownIdentifier {
-                                identifier: recv.clone(),
-                                span: span.clone(),
-                            }.throw(&self.source));
-                        if let Some(class) = self.current_class.clone() {
-                            if recv_ty == Type::Class(class) {
-                                is_self = true;
-                            }
-                        }
-                        match recv_ty {
-                            Type::Class(cls) => format!("{}_{}", cls, name),
-                            other @ Type::Enum(_) => SemanticError::InvalidReceiver {
-                                recv_ty: other,
-                                span: span.clone(),
-                                context: "has no methods (enum)",
-                            }.throw(&self.source),
-                            other => SemanticError::InvalidReceiver {
-                                recv_ty: other,
-                                span: span.clone(),
-                                context: "is not an object",
-                            }.throw(&self.source),
-                        }
-                    }
-                    None => match &self.current_class {
-                        Some(cls) if cls != name => format!("{}_{}", cls, name),
-                        _ => name.clone(),
-                    }
-                };
+                let (m, recv_class) = self.resolve_call(name, parent_name, &span);
 
-                let (defs, ret, public) = self.functions.get(&m).cloned()
+                let (defs, ret, visibility, module) = self.functions.get(&m).cloned()
                     .unwrap_or_else(|| SemanticError::UnknownFunction {
                         fn_name: name.clone(),
                         span: span.clone(),
                     }.throw(&self.source));
 
-                if !public && !is_self {
-                    let class_name = self.scope.get(&parent_name.clone().unwrap()).unwrap().0.clone();
-                    SemanticError::PrivateFunctionCall { func_name: name.to_string(), parent: class_name.to_string(), span: span }.throw(&self.source);
+                if params.len() > defs.len(){
+                    SemanticError::TooManyArguments{ func_name: name.clone(), parent: module, span: span.clone() }
+                        .throw(&self.source);
+                }
+
+                // Free functions from other modules need to be public.
+                if recv_class.is_none() && matches!(visibility, Visibility::Private) && module != self.module {
+                    SemanticError::PrivateFunctionCall { func_name: name.clone(), parent: module, span: span.clone() }
+                        .throw(&self.source);
+                }
+
+                // Private methods can only be called from inside their own class.
+                if let Some(cls) = recv_class {
+                    if matches!(visibility, Visibility::Private) && self.current_class.as_ref() != Some(&cls) {
+                        SemanticError::PrivateFunctionCall { func_name: name.clone(), parent: cls, span: span.clone() }
+                            .throw(&self.source);
+                    }
                 }
 
                 *mangled = Some(m.clone());
@@ -550,7 +652,9 @@ impl Sema {
                 for (i, def) in arg_defs.iter().enumerate() {
                     match params.get_mut(i) {
                         Some(arg) => {
-                            let arg_ty = self.check_expr(arg);
+                            self.check_expr(arg);
+                            self.coerce(arg, &def.ty);
+                            let arg_ty = arg.ty.clone();
                             let matches_ty = arg_ty == def.ty
                                 || matches!(&def.ty, Type::Ref(inner) if **inner == arg_ty);
                             if !matches_ty {
@@ -587,6 +691,106 @@ impl Sema {
         ty
     }
 
+    /// Makes `expr` have the type `target` where that's possible without losing
+    /// information.
+    ///
+    /// Number literals take the type directly (see [`Sema::coerce_literal`]),
+    /// other values get wrapped in an [`ExprKind::Convert`] if their type
+    /// [widens](Type::widens_to) to `target`. Anything else is left unchanged,
+    /// so the caller's type check reports the mismatch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an integer literal doesn't fit into `target`.
+    fn coerce(&mut self, expr: &mut Expr, target: &Type) {
+        self.coerce_literal(expr, target);
+        if !expr.ty.widens_to(target) {
+            return;
+        }
+
+        let span = expr.span.clone();
+        let inner = std::mem::replace(expr, Expr::new(ExprKind::IntLiteral(0), span.clone()));
+        *expr = Expr { kind: ExprKind::Convert(Box::new(inner)), span, ty: target.clone() };
+    }
+
+    /// Gives a number literal the type `target`, if it can take it.
+    ///
+    /// Without context, integer literals are `int32` and float literals `float64`.
+    /// Where the context expects another number type, like in `let x: uint8 = 5;`,
+    /// the literal takes that type instead. This also works for expressions made
+    /// only of literals, like `2 + 3`. Anything else is left unchanged, so the
+    /// caller's type check reports the mismatch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an integer literal doesn't fit into `target`.
+    fn coerce_literal(&mut self, expr: &mut Expr, target: &Type) {
+        // Also runs when the type already matches, so the range still gets checked
+        if !is_number_literal(expr) {
+            return;
+        }
+
+        match (&mut expr.kind, target) {
+            (ExprKind::IntLiteral(value), Type::Int { bits, signed }) => {
+                if !int_fits(*value, *bits, *signed) {
+                    SemanticError::LiteralOutOfRange {
+                        value: *value,
+                        ty: target.clone(),
+                        span: expr.span.clone(),
+                    }.throw(&self.source);
+                }
+                self.oversized_literals.remove(&(expr.span.line, expr.span.col));
+            }
+            (ExprKind::FloatLiteral(_), Type::Float { .. }) => {}
+            (ExprKind::BinaryExpr { lhs, rhs, .. }, _) => {
+                self.coerce_literal(lhs, target);
+                self.coerce_literal(rhs, target);
+                if lhs.ty != *target || rhs.ty != *target {
+                    return;
+                }
+            }
+            _ => return,
+        }
+
+        expr.ty = target.clone();
+    }
+
+    /// Resolves which function a call refers to.
+    ///
+    /// Returns the mangled name and, for method calls like `obj.method()`, the
+    /// class of the receiver.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the receiver is unknown or isn't a class instance.
+    fn resolve_call(&self, name: &str, parent_name: &Option<String>, span: &Span) -> (String, Option<String>) {
+        let Some(recv) = parent_name else {
+            // Without a receiver, a call inside a class refers to one of its methods.
+            let mangled = match &self.current_class {
+                Some(cls) if cls != name => format!("{}_{}", cls, name),
+                _ => name.to_string(),
+            };
+            return (mangled, None);
+        };
+
+        let (recv_ty, _) = self.scope.get(recv).cloned()
+            .unwrap_or_else(|| SemanticError::UnknownIdentifier {
+                identifier: recv.clone(),
+                span: span.clone(),
+            }.throw(&self.source));
+
+        match recv_ty {
+            Type::Class(cls) => (format!("{}_{}", cls, name), Some(cls)),
+            other => {
+                let context = match other {
+                    Type::Enum(_) => "has no methods (enum)",
+                    _             => "is not an object",
+                };
+                SemanticError::InvalidReceiver { recv_ty: other, span: span.clone(), context }.throw(&self.source)
+            }
+        }
+    }
+
     fn check_struct_init(&mut self, expr: &mut Expr) -> Type {
         let span = expr.span.clone();
         let is_enum = matches!(expr.kind, ExprKind::EnumInit { .. });
@@ -615,7 +819,9 @@ impl Sema {
                 }
             }
 
-            let value_ty = self.check_expr(value);
+            self.check_expr(value);
+            self.coerce(value, &payload_ty);
+            let value_ty = value.ty.clone();
             if value_ty != payload_ty {
                 SemanticError::TypeMismatch {
                     lhs: value_ty,
@@ -632,7 +838,7 @@ impl Sema {
                 (name.to_string(), vec![*value.clone()], constructor)
             }
             ExprKind::StructInit { class, fields } => {
-                let (defs, _ret, _public) = self.functions.get(class).cloned()
+                let (defs, _ret, _visibility, _module) = self.functions.get(class).cloned()
                     .unwrap_or_else(|| SemanticError::UnknownFunction {
                         fn_name: class.to_string(),
                         span: span.clone(),
@@ -664,8 +870,10 @@ impl Sema {
                             }.throw(&self.source),
                         },
                     };
-                    let arg_ty = self.check_expr(&mut arg);
                     let def_ty = &arg_defs[i].ty;
+                    self.check_expr(&mut arg);
+                    self.coerce(&mut arg, def_ty);
+                    let arg_ty = arg.ty.clone();
                     let matches_ty = &arg_ty == def_ty
                         || matches!(def_ty, Type::Ref(inner) if **inner == arg_ty);
                     if !matches_ty {
@@ -700,7 +908,25 @@ impl Sema {
 
     fn check_decl(&mut self, decl: &mut Declaration) -> Type {
         let ty = match &mut decl.kind {
-            DeclarationKind::Class { name, methods, .. } => {
+            DeclarationKind::Class { name, fields, methods } => {
+                // Field defaults are evaluated in the constructor, so they can use its parameters
+                let prev_scope = self.scope.clone();
+                for method in methods.iter() {
+                    if let DeclarationKind::Function { name: fn_name, params, .. } = &method.kind {
+                        if fn_name == name {
+                            for p in params {
+                                self.scope.insert(p.name.clone(), (p.ty.clone(), false));
+                            }
+                        }
+                    }
+                }
+                for field in fields.iter_mut() {
+                    if let Some(default) = &mut field.value {
+                        self.check_default(default, &field.ty);
+                    }
+                }
+                self.scope = prev_scope;
+
                 let prev_class = self.current_class.take();
                 self.current_class = Some(name.clone());
                 for method in methods.iter_mut() {
@@ -713,6 +939,12 @@ impl Sema {
                 Type::Enum(name.clone())
             }
             DeclarationKind::Function { params, body, return_type, .. } => {
+                for p in params.iter_mut() {
+                    if let Some(default) = &mut p.value {
+                        self.check_default(default, &p.ty);
+                    }
+                }
+
                 let ret = return_type.clone().unwrap_or(Type::Void);
                 self.current_return_type = Some(ret.clone());
 
@@ -724,7 +956,7 @@ impl Sema {
                     self.scope.insert(p.name.clone(), (p.ty.clone(), false));
                 }
                 if let Some(stmts) = body {
-                    self.check(stmts);
+                    self.check_stmts(stmts);
                 }
                 self.scope = prev_scope;
                 self.current_return_type = None;
@@ -733,7 +965,44 @@ impl Sema {
             }
         };
 
-        decl.ty = ty.clone();
         ty
+    }
+
+    /// Checks the default value of a parameter or field against its type `ty`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value doesn't have the type `ty`.
+    fn check_default(&mut self, default: &mut Expr, ty: &Type) {
+        self.check_expr(default);
+        self.coerce(default, ty);
+        if default.ty != *ty {
+            SemanticError::TypeMismatch {
+                lhs: default.ty.clone(),
+                rhs: ty.clone(),
+                span: default.span.clone(),
+                context: "default value",
+            }.throw(&self.source);
+        }
+    }
+}
+
+/// Whether `expr` is a number literal or an expression made only of number literals.
+fn is_number_literal(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::IntLiteral(_) | ExprKind::FloatLiteral(_) => true,
+        ExprKind::BinaryExpr { lhs, rhs, .. } => is_number_literal(lhs) && is_number_literal(rhs),
+        _ => false,
+    }
+}
+
+/// Whether `value` fits into an integer type with `bits` bits.
+fn int_fits(value: i64, bits: u32, signed: bool) -> bool {
+    let value = value as i128;
+    if signed {
+        let max = (1i128 << (bits - 1)) - 1;
+        (-max - 1..=max).contains(&value)
+    } else {
+        (0..=(1i128 << bits) - 1).contains(&value)
     }
 }

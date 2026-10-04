@@ -1,4 +1,5 @@
 use std::fmt::Display;
+use std::ops::Neg;
 
 use inkwell::AddressSpace;
 use inkwell::basic_block::BasicBlock;
@@ -26,11 +27,36 @@ impl Expr {
     }
 }
 
+impl Neg for Expr {
+    type Output = Expr;
+
+    /// Negates the expression.
+    ///
+    /// Number literals are negated right away, so `-5` becomes the literal `-5`.
+    /// Anything else gets wrapped in an [`ExprKind::Negation`] that is negated at runtime.
+    fn neg(self) -> Expr {
+        let span = self.span.clone();
+        match self.kind {
+            ExprKind::IntLiteral(value)   => Expr::new(ExprKind::IntLiteral(-value), span),
+            ExprKind::FloatLiteral(value) => Expr::new(ExprKind::FloatLiteral(-value), span),
+            _ => Expr::new(ExprKind::Negation(Box::new(self)), span),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub enum ExprKind {
     Boolean(bool),
+    /// Lossless conversion of the inner expression to this expression's type.
+    /// Only inserted by sema, see [`Type::widens_to`].
+    Convert(Box<Expr>),
+    /// Float literal, its exact float type is decided by sema from context.
+    FloatLiteral(f64),
     Identifier(String),
-    Int32(i32),
+    /// Integer literal, its exact integer type is decided by sema from context.
+    IntLiteral(i64),
+    /// `-expr` on anything that isn't a number literal.
+    Negation(Box<Expr>),
     Print(Box<Expr>),
     Ref(Box<Expr>),
     StringLiteral(String),
@@ -59,6 +85,7 @@ pub enum ExprKind {
         mangled: Option<String>,
     },
     ModuleImport {
+        name: String,
         module: Vec<Expr>,
         objects: Option<Vec<Expr>>
     },
@@ -78,8 +105,11 @@ impl Display for ExprKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExprKind::Boolean(val)                     => write!(f, "{}", val),
+            ExprKind::Convert(inner)                   => write!(f, "{}", inner.kind),
+            ExprKind::FloatLiteral(value)              => write!(f, "{:?}", value),
             ExprKind::Identifier(name)                 => write!(f, "{}", name),
-            ExprKind::Int32(value)                     => write!(f, "{}", value),
+            ExprKind::IntLiteral(value)                => write!(f, "{}", value),
+            ExprKind::Negation(inner)                  => write!(f, "-{}", inner.kind),
             ExprKind::Print(expr)                      => write!(f, "Print({})", expr.kind),
             ExprKind::Ref(inner)                       => write!(f, "&{}", inner.kind),
             ExprKind::StringLiteral(lit)               => write!(f, "\"{}\"", lit),
@@ -89,7 +119,7 @@ impl Display for ExprKind {
             ExprKind::ColonAccess { name, tag }        => write!(f, "{}::{}", name, tag),
             ExprKind::FieldAccess { name, field }      => write!(f, "{}.{}", name, field.kind),
             ExprKind::FunctionCall { name, .. }        => write!(f, "{}()", name),
-            ExprKind::ModuleImport { .. }              => write!(f, "ModuleImport"),
+            ExprKind::ModuleImport { name, .. }              => write!(f, "{}", name),
 
             ExprKind::EnumInit { name, .. }            => write!(f, "{}(..)", name),
             ExprKind::StructInit { class, .. }         => write!(f, "{} {{ .. }}", class),
@@ -117,8 +147,39 @@ impl Codegen for Expr {
                     }
                 }
             }
-            ExprKind::Int32(value) => {
-                Some(Box::new(ctx.context.i32_type().const_int(*value as u64, false).into()))
+            ExprKind::Convert(inner) => {
+                let value = *inner.codegen(ctx).unwrap();
+                let target = self.ty.to_llvm(ctx);
+                let converted: BasicValueEnum = match (&inner.ty, &self.ty) {
+                    (Type::Int { signed: true, .. }, Type::Int { .. }) =>
+                        ctx.builder.build_int_s_extend(value.into_int_value(), target.into_int_type(), "conv").unwrap().into(),
+                    (Type::Int { signed: false, .. }, Type::Int { .. }) =>
+                        ctx.builder.build_int_z_extend(value.into_int_value(), target.into_int_type(), "conv").unwrap().into(),
+                    (Type::Int { signed: true, .. }, Type::Float { .. }) =>
+                        ctx.builder.build_signed_int_to_float(value.into_int_value(), target.into_float_type(), "conv").unwrap().into(),
+                    (Type::Int { signed: false, .. }, Type::Float { .. }) =>
+                        ctx.builder.build_unsigned_int_to_float(value.into_int_value(), target.into_float_type(), "conv").unwrap().into(),
+                    (Type::Float { .. }, Type::Float { .. }) =>
+                        ctx.builder.build_float_ext(value.into_float_value(), target.into_float_type(), "conv").unwrap().into(),
+                    (from, to) => panic!("no conversion from '{}' to '{}', sema only inserts lossless ones", from, to),
+                };
+                Some(Box::new(converted))
+            }
+            ExprKind::FloatLiteral(value) => {
+                let float_ty = self.ty.to_llvm(ctx).into_float_type();
+                Some(Box::new(float_ty.const_float(*value).into()))
+            }
+            ExprKind::IntLiteral(value) => {
+                let int_ty = self.ty.to_llvm(ctx).into_int_type();
+                Some(Box::new(int_ty.const_int(*value as u64, true).into()))
+            }
+            ExprKind::Negation(inner) => {
+                let value = *inner.codegen(ctx).unwrap();
+                let negated: BasicValueEnum = match &self.ty {
+                    Type::Float { .. } => ctx.builder.build_float_neg(value.into_float_value(), "tmpneg").unwrap().into(),
+                    _ => ctx.builder.build_int_neg(value.into_int_value(), "tmpneg").unwrap().into(),
+                };
+                Some(Box::new(negated))
             }
             ExprKind::Print(expr) => {
                 let printfn = match ctx.module.get_function("printf") {
@@ -127,19 +188,18 @@ impl Codegen for Expr {
                 };
 
                 match &expr.ty {
-                    Type::Bool(val) => {
+                    Type::Bool => {
+                        // The value is only known at runtime, so pick the string there
+                        let value = expr.codegen(ctx).unwrap().into_int_value();
+                        let true_str = ctx.builder.build_global_string_ptr("true", "true_str").unwrap();
+                        let false_str = ctx.builder.build_global_string_ptr("false", "false_str").unwrap();
+                        let chosen = ctx.builder.build_select(
+                            value,
+                            true_str.as_pointer_value(),
+                            false_str.as_pointer_value(),
+                            "bool_str",
+                        ).unwrap();
 
-                        let chosen = match val {
-                            true => {
-                                let t = ctx.builder.build_global_string_ptr("true", "true_str").unwrap();
-                                t.as_pointer_value()
-                            }
-                            false => {
-                                let f = ctx.builder.build_global_string_ptr("false", "false_str").unwrap();
-                                f.as_pointer_value()
-                            }
-                        };
-                        
                         let fmt = ctx.builder.build_global_string_ptr("%s\n", "fmt").unwrap();
                         ctx.builder.build_call(
                             printfn,
@@ -167,9 +227,11 @@ impl Codegen for Expr {
                     }
                     _ => {
                         let expr_value = expr.codegen(ctx).unwrap();
+                        let signed = !matches!(expr.ty, Type::Int { signed: false, .. });
+                        let expr_value = promote_vararg(ctx, *expr_value, signed);
                         let formatter = expr.ty.formatter().unwrap_or_else(|| CodegenError::UndefinedFormatter(expr.ty.clone()).throw(&ctx.source, span));
                         let format_str = ctx.builder.build_global_string_ptr((formatter.to_owned() + &"\n").as_str(), "fmt").unwrap();
-                        let args = &[format_str.as_pointer_value().into(), (*expr_value).into()];
+                        let args = &[format_str.as_pointer_value().into(), expr_value.into()];
                         ctx.builder.build_call(printfn, args, "printFn").unwrap();
                     }
                 }
@@ -195,25 +257,44 @@ impl Codegen for Expr {
                 None
             },
             ExprKind::BinaryExpr { lhs, op, rhs } => {
-                match op {
-                    Token::Plus => {
-                        let lhs_value = lhs.codegen(ctx).unwrap().into_int_value();
-                        let rhs_value = rhs.codegen(ctx).unwrap().into_int_value();
-                        let sum = ctx.builder.build_int_add(lhs_value, rhs_value, "tmpadd").unwrap();
-                        Some(Box::new(sum.into()))
-                    }
-                    Token::Minus => {
-                        let lhs_value = lhs.codegen(ctx).unwrap().into_int_value();
-                        let rhs_value = rhs.codegen(ctx).unwrap().into_int_value();
-                        let dif = ctx.builder.build_int_add(lhs_value, rhs_value.const_neg(), "tmpadd").unwrap();
-                        Some(Box::new(dif.into()))
+                let lhs_value = *lhs.codegen(ctx).unwrap();
+                let rhs_value = *rhs.codegen(ctx).unwrap();
 
+                // Sema made both sides the same type as the whole expression.
+                let result: BasicValueEnum = match (&self.ty, op) {
+                    (Type::Int { signed, .. }, _) => {
+                        let (l, r) = (lhs_value.into_int_value(), rhs_value.into_int_value());
+                        match op {
+                            Token::Plus     => ctx.builder.build_int_add(l, r, "tmpadd"),
+                            Token::Minus    => ctx.builder.build_int_sub(l, r, "tmpsub"),
+                            Token::Multiply => ctx.builder.build_int_mul(l, r, "tmpmul"),
+                            Token::Divide if *signed => ctx.builder.build_int_signed_div(l, r, "tmpdiv"),
+                            Token::Divide   => ctx.builder.build_int_unsigned_div(l, r, "tmpdiv"),
+                            other => {
+                                let source = ctx.source.clone();
+                                CodegenError::UnsupportedOperator(other.to_string()).throw(&source, span)
+                            }
+                        }.unwrap().into()
                     }
-                    other => {
+                    (Type::Float { .. }, _) => {
+                        let (l, r) = (lhs_value.into_float_value(), rhs_value.into_float_value());
+                        match op {
+                            Token::Plus     => ctx.builder.build_float_add(l, r, "tmpadd"),
+                            Token::Minus    => ctx.builder.build_float_sub(l, r, "tmpsub"),
+                            Token::Multiply => ctx.builder.build_float_mul(l, r, "tmpmul"),
+                            Token::Divide   => ctx.builder.build_float_div(l, r, "tmpdiv"),
+                            other => {
+                                let source = ctx.source.clone();
+                                CodegenError::UnsupportedOperator(other.to_string()).throw(&source, span)
+                            }
+                        }.unwrap().into()
+                    }
+                    (_, other) => {
                         let source = ctx.source.clone();
                         CodegenError::UnsupportedOperator(other.to_string()).throw(&source, span)
                     }
-                }
+                };
+                Some(Box::new(result))
             }
             ExprKind::ColonAccess { name, tag } => {
                 let variants = match ctx.enums.get(name) {
@@ -475,10 +556,31 @@ fn create_printfn<'ctx>(ctx: &CodegenContext<'ctx>) -> FunctionValue<'ctx> {
 
 fn printf_format_for(ty: &BasicTypeEnum<'_>) -> &'static str {
     match ty {
+        BasicTypeEnum::IntType(int) if int.get_bit_width() == 64 => "%lld",
         BasicTypeEnum::IntType(_)     => "%d",
         BasicTypeEnum::PointerType(_) => "%s",
         BasicTypeEnum::FloatType(_)   => "%f",
         _ => "%d",
+    }
+}
+
+/// Widens `value` the way C varargs like `printf` expect it: integers narrower
+/// than 32 bits to `i32`, `float32` to `float64`. Other values stay unchanged.
+fn promote_vararg<'ctx>(ctx: &CodegenContext<'ctx>, value: BasicValueEnum<'ctx>, signed: bool) -> BasicValueEnum<'ctx> {
+    let i32_type = ctx.context.i32_type();
+    match value {
+        BasicValueEnum::IntValue(int) if int.get_type().get_bit_width() < 32 => {
+            // bool is an i1, sign extending would turn true into -1
+            if signed && int.get_type().get_bit_width() > 1 {
+                ctx.builder.build_int_s_extend(int, i32_type, "promoted").unwrap().into()
+            } else {
+                ctx.builder.build_int_z_extend(int, i32_type, "promoted").unwrap().into()
+            }
+        }
+        BasicValueEnum::FloatValue(float) if float.get_type() == ctx.context.f32_type() => {
+            ctx.builder.build_float_ext(float, ctx.context.f64_type(), "promoted").unwrap().into()
+        }
+        other => other,
     }
 }
 
@@ -526,6 +628,8 @@ fn create_enum_printer<'ctx>(
 
         let fmt = printf_format_for(payload_ty).to_string() + "\n";
         let fmt_str = ctx.builder.build_global_string_ptr(&fmt, "fmt").unwrap();
+        // The LLVM type has no signedness, so payloads print as signed
+        let payload_val = promote_vararg(ctx, payload_val, true);
         ctx.builder.build_call(
             printfn,
             &[fmt_str.as_pointer_value().into(), payload_val.into()],

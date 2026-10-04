@@ -1,44 +1,7 @@
-class Person {
-    pub age: int32 = age;
-    name: String = name;
+import math;
 
-    Constructor(age: int32, name: String);
+let sum = add(11, 14);
+print(sum);
 
-    pub func name(&self) {
-        print(self.name);
-    }
-
-    pub func age(&self) {
-        print(self.age);
-    }
-
-    pub func age(&self) {
-        print(self.age);
-    }
-
-    func older(mut &self, other: &Person) -> int32 {
-        return other.age;
-    }
-}
-
-mut nick = Person { 
-  name: "Nick Schefner",
-  age: 23
-};
-
-enum Type {
-    Class => Person,
-    Function => int32,
-    Enum => String 
-}
-
-let type = Type::Function(20);
-
-match type {
-    Type::Class(p) => {
-      let y: int32 = p.age + 2;
-      print(y);
-    }
-    c => print(c),
-}
-
+let s = sqrt(sum);
+print(s);

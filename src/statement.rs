@@ -66,7 +66,7 @@ impl Display for StmtKind {
             StmtKind::Declaration(decl)                 => write!(f, "DeclarationStmt({})", decl.kind),
             StmtKind::Expression(expr)                  => write!(f, "ExpressionStmt({})", expr.kind),
             StmtKind::Return(expr)                      => write!(f, "Return({})", expr.kind),
-            StmtKind::Import(expr)                      => write!(f, "Import({})", expr.kind),
+            StmtKind::Import(expr)                      => write!(f, "{}", expr.kind),
 
             StmtKind::Instantiation { name, typedef, value, ..}    =>
                 write!(f, "Instantiation({}, {}, {})", name, typedef.clone().unwrap_or_else(|| Type::from(value.kind.clone())) , value.kind),

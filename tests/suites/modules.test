@@ -1,0 +1,131 @@
+=== call a public function from another module
+import math;
+print(add(2, 16));
+--- file math.lv
+pub func add(x: int32, y: int32) -> int32 {
+  return x + y;
+}
+--- output
+18
+
+=== calling a private function from another module is an error
+import math;
+print(add(2, 16));
+--- file math.lv
+func add(x: int32, y: int32) -> int32 {
+  return x + y;
+}
+--- error
+Tried calling a private function 'add' in 'math'
+
+=== private function can be called inside its own module
+import math;
+print(double_add(1, 2));
+--- file math.lv
+func add(x: int32, y: int32) -> int32 {
+  return x + y;
+}
+pub func double_add(x: int32, y: int32) -> int32 {
+  return add(x, y) * 2;
+}
+--- output
+6
+
+=== private function in the same file
+func helper() -> int32 {
+  return 3;
+}
+print(helper());
+--- output
+3
+
+=== import two modules
+import a;
+import b;
+print(one());
+print(two());
+--- file a.lv
+pub func one() -> int32 {
+  return 1;
+}
+--- file b.lv
+pub func two() -> int32 {
+  return 2;
+}
+--- output
+1
+2
+
+=== import chain
+import a;
+print(from_a());
+--- file a.lv
+import b;
+pub func from_a() -> int32 {
+  return from_b() + 1;
+}
+--- file b.lv
+pub func from_b() -> int32 {
+  return 10;
+}
+--- output
+11
+
+=== shared import is loaded once
+import a;
+import b;
+print(a_val());
+print(b_val());
+--- file a.lv
+import shared;
+pub func a_val() -> int32 {
+  return base() + 1;
+}
+--- file b.lv
+import shared;
+pub func b_val() -> int32 {
+  return base() + 2;
+}
+--- file shared.lv
+pub func base() -> int32 {
+  return 100;
+}
+--- output
+101
+102
+
+=== missing module is an error
+import nothing;
+print(1);
+--- error
+Module
+
+=== top level code of an imported module runs first
+import a;
+print("main");
+--- file a.lv
+print("module a");
+--- output
+module a
+main
+
+=== number types across modules
+import conv;
+let x: int32 = 7;
+print(widen(x));
+--- file conv.lv
+pub func widen(x: int64) -> int64 {
+  return x * 1000000000;
+}
+--- output
+7000000000
+
+=== error in an imported module shows its line
+import broken;
+print(1);
+--- file broken.lv
+pub func f() -> int32 {
+  return "text";
+}
+--- error
+return "text";

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::Path};
 
-use inkwell::{builder::Builder, context::Context, module::Module, targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine}, types::BasicTypeEnum, values::{BasicValueEnum, PointerValue}};
+use inkwell::{builder::Builder, context::Context, intrinsics::Intrinsic, module::{Linkage, Module}, targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine}, types::BasicTypeEnum, values::{BasicValueEnum, PointerValue}};
 
 use crate::{field::Field, param::Param, span::Span, sym::Symbol, r#type::Type};
 
@@ -60,7 +60,7 @@ pub struct CodegenContext<'ctx> {
 }
 
 impl<'ctx> CodegenContext<'ctx> {
-    pub fn new(context: &'ctx Context, source: String) -> Self {
+    pub fn new(context: &'ctx Context) -> Self {
         Target::initialize_native(&InitializationConfig::default())
             .expect("Failed to initialize native target");
         let triple = TargetMachine::get_default_triple();
@@ -73,8 +73,8 @@ impl<'ctx> CodegenContext<'ctx> {
             RelocMode::PIC,
             CodeModel::Default,
         ).unwrap();
-        Self {
-            source,
+        let mut ctx = Self {
+            source: "".to_string(),
             context,
             module: context.create_module("mod"),
             builder: context.create_builder(),
@@ -85,7 +85,31 @@ impl<'ctx> CodegenContext<'ctx> {
             enums: HashMap::new(),
             current_class: None,
             current_class_fields: None,
-        }
+        };
+        ctx.define_builtins();
+        ctx
+    }
+
+    /// Defines the functions built into the language.
+    ///
+    /// Sema declares the same functions in [`Sema::new`](crate::sema::Sema::new).
+    fn define_builtins(&mut self) {
+        let f32_type = self.context.f32_type();
+
+        // sqrt(x: float32) -> float32. Private linkage keeps it from clashing
+        // with libm's `sqrt(double)` when linking.
+        let sqrt_fn = self.module.add_function("sqrt", f32_type.fn_type(&[f32_type.into()], false), Some(Linkage::Private));
+        let entry = self.context.append_basic_block(sqrt_fn, "entry");
+        self.builder.position_at_end(entry);
+
+        let x = sqrt_fn.get_nth_param(0).unwrap().into_float_value();
+        let llvm_sqrt = Intrinsic::find("llvm.sqrt").unwrap()
+            .get_declaration(&self.module, &[f32_type.into()]).unwrap();
+        let root = self.builder.build_call(llvm_sqrt, &[x.into()], "root").unwrap()
+            .try_as_basic_value().basic().unwrap();
+        self.builder.build_return(Some(&root)).unwrap();
+
+        self.push_func("sqrt".to_string(), vec![Param::builtin("x", Type::Float { bits: 32 })]);
     }
 
     pub fn build_entry(&self) {
@@ -97,7 +121,7 @@ impl<'ctx> CodegenContext<'ctx> {
     }
 
     pub fn push_var(&mut self, name: String, ty: BasicTypeEnum<'ctx>, ptr: PointerValue<'ctx>, parent: Option<String>) {
-        let symbol = Symbol { ty, ptr, mutable: true, class_name: parent};
+        let symbol = Symbol { ty, ptr, class_name: parent};
         self.scope.insert(name, symbol);
     }
 
@@ -118,7 +142,12 @@ impl<'ctx> CodegenContext<'ctx> {
     }
 
     pub fn func_has_self(&self, name: &str) -> bool {
-        self.functions.get(name).unwrap()[0].name == "self"
+        let params = self.functions.get(name).unwrap();
+        if params.len() == 0 {
+            return false;
+        }
+
+        params[0].name == "self"
     }
 
     pub fn load_sym(&mut self, name: &str) -> Option<&Symbol<'ctx>> {

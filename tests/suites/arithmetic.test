@@ -1,0 +1,234 @@
+=== addition
+print(2 + 3);
+--- output
+5
+
+=== subtraction
+print(10 - 4);
+--- output
+6
+
+=== subtraction with negative result
+print(3 - 10);
+--- output
+-7
+
+=== multiplication
+print(6 * 7);
+--- output
+42
+
+=== division
+print(20 / 4);
+--- output
+5
+
+=== integer division truncates
+print(7 / 2);
+--- output
+3
+
+=== signed division truncates toward zero
+print(-7 / 2);
+--- output
+-3
+
+=== addition with variables
+let a = 12;
+let b = 30;
+print(a + b);
+--- output
+42
+
+=== multiplication with variables
+let a = 3;
+let b = 4;
+print(a * b);
+--- output
+12
+
+=== variable and literal
+let a = 9;
+print(a + 1);
+print(1 + a);
+--- output
+10
+10
+
+=== result stored in variable
+let x = 4 * 5;
+print(x);
+--- output
+20
+
+=== expression as argument
+func show(x: int32) {
+  print(x);
+}
+show(2 + 2);
+--- output
+4
+
+=== multiply by zero
+let a = 123;
+print(a * 0);
+--- output
+0
+
+=== int64 arithmetic beyond int32
+let a: int64 = 3000000000;
+let b: int64 = 3000000000;
+print(a + b);
+--- output
+6000000000
+
+=== uint8 arithmetic
+let a: uint8 = 200;
+let b: uint8 = 50;
+print(a + b);
+--- output
+250
+
+=== uint8 wraps around
+let a: uint8 = 200;
+let b: uint8 = 100;
+print(a + b);
+--- output
+44
+
+=== int8 wraps around
+let a: int8 = 127;
+let b: int8 = 1;
+print(a + b);
+--- output
+-128
+
+=== unsigned division
+let a: uint32 = 4000000000;
+let b: uint32 = 2;
+print(a / b);
+--- output
+2000000000
+
+=== float addition
+print(1.5 + 2.25);
+--- output
+3.750000
+
+=== float subtraction
+print(5.5 - 0.5);
+--- output
+5.000000
+
+=== float multiplication
+print(2.5 * 4.0);
+--- output
+10.000000
+
+=== float division
+print(7.0 / 2.0);
+--- output
+3.500000
+
+=== float32 arithmetic
+let a: float32 = 1.5;
+let b: float32 = 2.5;
+print(a * b);
+--- output
+3.750000
+
+=== literal takes the type of the other side
+let a: uint8 = 250;
+print(a + 5);
+--- output
+255
+
+=== mixing int and uint of the same size is an error
+let a: int32 = 1;
+let b: uint32 = 2;
+print(a + b);
+--- error
+type 'int32' does not match 'uint32' in binary expression
+
+=== mixing int and string is an error
+let a = 1;
+let b = "x";
+print(a + b);
+--- error
+does not match
+
+=== subtraction is left associative
+print(10 - 3 - 2);
+--- output
+5
+
+=== division is left associative
+print(100 / 10 / 2);
+--- output
+5
+
+=== multiplication binds tighter than addition
+print(2 + 3 * 4);
+--- output
+14
+
+=== multiplication binds tighter than subtraction
+print(20 - 2 * 3);
+--- output
+14
+
+=== multiplication first on both sides
+print(2 * 3 + 4 * 5);
+--- output
+26
+
+=== multiplication before addition at the start
+print(2 * 3 + 4);
+--- output
+10
+
+=== division binds tighter than addition
+print(1 + 10 / 2);
+--- output
+6
+
+=== mixed chain
+print(1 + 2 * 3 - 4 / 2);
+--- output
+5
+
+=== long subtraction chain
+print(100 - 1 - 2 - 3 - 4);
+--- output
+90
+
+=== multiplication and division left to right
+print(12 / 3 * 2);
+--- output
+8
+
+=== precedence with variables
+let a = 3;
+let b = 4;
+print(a * a + b * b);
+--- output
+25
+
+=== precedence with function calls
+func two() -> int32 {
+  return 2;
+}
+print(1 + two() * 5);
+--- output
+11
+
+=== precedence with negation
+let x = 3;
+print(-x * 2 + 10);
+--- output
+4
+
+=== float precedence
+print(1.0 + 2.0 * 3.5);
+--- output
+8.000000

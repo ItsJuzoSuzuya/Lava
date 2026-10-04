@@ -1,0 +1,153 @@
+=== print an int
+print(42);
+--- output
+42
+
+=== print a string
+print("hello world");
+--- output
+hello world
+
+=== print true
+print(true);
+--- output
+true
+
+=== print false
+print(false);
+--- output
+false
+
+=== print zero
+print(0);
+--- output
+0
+
+=== several prints keep their order
+print(1);
+print(2);
+print(3);
+--- output
+1
+2
+3
+
+=== empty program prints nothing
+--- output
+
+=== let binding
+let x = 5;
+print(x);
+--- output
+5
+
+=== let with type annotation
+let x: int32 = 17;
+print(x);
+--- output
+17
+
+=== string variable
+let s: String = "lava";
+print(s);
+--- output
+lava
+
+=== bool variable
+let b = true;
+print(b);
+--- output
+true
+
+=== typed bool variable prints its value
+let b: bool = true;
+let c: bool = false;
+print(b);
+print(c);
+--- output
+true
+false
+
+=== reassigned bool prints the new value
+mut b = false;
+b = true;
+print(b);
+--- output
+true
+
+=== variable copied into another
+let a = 3;
+let b = a;
+print(b);
+--- output
+3
+
+=== mut variable can be reassigned
+mut x = 1;
+x = 2;
+print(x);
+--- output
+2
+
+=== mut variable reassigned several times
+mut x = 1;
+x = 2;
+x = 3;
+x = 4;
+print(x);
+--- output
+4
+
+=== reassign from another variable
+let a = 10;
+mut b = 0;
+b = a;
+print(b);
+--- output
+10
+
+=== reassign with an expression
+mut x = 5;
+x = x + 1;
+print(x);
+--- output
+6
+
+=== let can't be reassigned
+let x = 1;
+x = 2;
+--- error
+Tried reassigning a value to the unmutable Variable 'x'
+
+=== unknown identifier
+print(y);
+--- error
+unknown identifier 'y'
+
+=== whitespace and newlines don't matter
+let    x   =
+  5
+  ;
+print(  x  );
+--- output
+5
+
+=== identifiers with underscores and digits
+let my_var_2 = 8;
+let _hidden = 9;
+print(my_var_2);
+print(_hidden);
+--- output
+8
+9
+
+=== string with spaces and symbols
+print("a + b = c; {}");
+--- output
+a + b = c; {}
+
+=== statements on one line
+let a = 1; let b = 2; print(a); print(b);
+--- output
+1
+2

@@ -1,7 +1,7 @@
 use std::{fs::{self}};
 
 use inkwell::context::Context;
-use crate::{program::Program};
+use crate::{module::ModuleGraph, parser::Parser, program::Program};
 
 mod traits;
 mod span;
@@ -22,7 +22,8 @@ mod module;
 
 fn main() {
     let context = Context::create();
-    let mut program = Program::new(&context, load_file("main.lv"));
+    let mut module_graph = ModuleGraph::new("main.lv");
+    let mut program = Program::new(&context, &mut module_graph);
     program.run();
 }
 

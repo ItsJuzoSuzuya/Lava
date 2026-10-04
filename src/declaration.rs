@@ -1,9 +1,16 @@
-use std::fmt::{Display, Formatter, Result};
+use std::{fmt::{Display, Formatter, Result}, ops::Not};
 
 use inkwell::{AddressSpace, types::BasicMetadataTypeEnum, values::BasicValueEnum};
-
+use serde::Serialize;
 use crate::{codegen_ctx::CodegenContext, field::Field, param::Param, span::Span, statement::Stmt, traits::codegen::{Codegen, Declare}, r#type::Type};
 
+/// Scope of declarations and fields in the global context. 
+#[derive(Debug, Clone, Serialize)]
+pub enum Visibility {
+    Public, Private, Protected
+}
+
+/// Type of declarations
 pub enum DeclarationKind {
     Class {
         name: String,
@@ -21,21 +28,20 @@ pub enum DeclarationKind {
         return_type: Option<Type>,
         parent: Option<String>,
         mangled: Option<String>,
-        public: bool
+        visibility: Visibility 
     },
 }
 
-
-
+/// A declaration built by [`Declaration::new`], with the [`Span`] where it occurred.
 pub struct Declaration {
     pub kind: DeclarationKind,
     pub span: Span,
-    pub ty: Type,
+    pub visibility: Visibility,
 }
 
 impl Declaration {
-    pub fn new(kind: DeclarationKind, span: Span, ty: Type ) -> Self {
-        Self { kind, span, ty }
+    pub fn new(kind: DeclarationKind, span: Span, visibility: Visibility) -> Self {
+        Self { kind, span, visibility }
     }
 }
 
@@ -174,13 +180,15 @@ impl Codegen for Declaration {
                 }
                 None
             }
-            DeclarationKind::Function { params, body, return_type, parent, mangled, .. } => {
+            DeclarationKind::Function { params, body, return_type, mangled, .. } => {
                 let mangled = mangled.as_ref()
                     .expect("function mangled name missing — sema must run first");
                 let function = ctx.module.get_function(mangled)
                     .expect("function signature missing — declare pass must run first");
 
                 let prev_block = ctx.builder.get_insert_block()?;
+                // Params and locals of this function must not leak into the outer scope
+                let prev_scope = ctx.scope.clone();
                 let bb = ctx.context.append_basic_block(function, "entry");
                 ctx.builder.position_at_end(bb);
 
@@ -211,7 +219,7 @@ impl Codegen for Declaration {
                     let value = function.get_nth_param(i as u32)?;
                     let ptr = ctx.builder.build_alloca(ty, &param.name).unwrap();
                     ctx.builder.build_store(ptr, value).unwrap();
-                    ctx.push_var(param.name.to_string(), ty, ptr, parent.clone());
+                    ctx.push_var(param.name.to_string(), ty, ptr, param.ty.class_name());
                 }
 
                 if is_ctor {
@@ -253,6 +261,7 @@ impl Codegen for Declaration {
                 }
 
                 ctx.builder.position_at_end(prev_block);
+                ctx.scope = prev_scope;
                 None
             },
         }

@@ -1,0 +1,385 @@
+=== create an instance and read a public field
+class Point {
+  pub x: int32 = x;
+  pub y: int32 = y;
+
+  Constructor(x: int32, y: int32);
+}
+let p = Point { x: 3, y: 4 };
+print(p.x);
+print(p.y);
+--- output
+3
+4
+
+=== brace init fields in any order
+class Point {
+  pub x: int32 = x;
+  pub y: int32 = y;
+
+  Constructor(x: int32, y: int32);
+}
+let p = Point { y: 4, x: 3 };
+print(p.x);
+print(p.y);
+--- output
+3
+4
+
+=== brace init with explicit type
+class Point {
+  pub x: int32 = x;
+  pub y: int32 = y;
+
+  Constructor(x: int32, y: int32);
+}
+let p: Point = { x: 1, y: 2 };
+print(p.y);
+--- output
+2
+
+=== constructor called like a function
+class Point {
+  pub x: int32 = x;
+  pub y: int32 = y;
+
+  Constructor(x: int32, y: int32);
+}
+let p = Point(5, 6);
+print(p.x);
+print(p.y);
+--- output
+5
+6
+
+=== string field
+class Person {
+  pub name: String = name;
+
+  Constructor(name: String);
+}
+let p = Person { name: "Ada" };
+print(p.name);
+--- output
+Ada
+
+=== fields of different types
+class Thing {
+  pub id: int64 = id;
+  pub ok: bool = ok;
+  pub weight: float32 = weight;
+  pub label: String = label;
+
+  Constructor(id: int64, ok: bool, weight: float32, label: String);
+}
+let t = Thing { id: 9000000000, ok: true, weight: 1.5, label: "box" };
+print(t.id);
+print(t.ok);
+print(t.weight);
+print(t.label);
+--- output
+9000000000
+true
+1.500000
+box
+
+=== field default that isn't a constructor parameter
+class Counter {
+  pub count: int32 = 10;
+  pub step: int32 = step;
+
+  Constructor(step: int32);
+}
+let c = Counter { step: 2 };
+print(c.count);
+print(c.step);
+--- output
+10
+2
+
+=== field in arithmetic
+class Point {
+  pub x: int32 = x;
+  pub y: int32 = y;
+
+  Constructor(x: int32, y: int32);
+}
+let p = Point { x: 3, y: 4 };
+print(p.x * p.x + p.y * p.y);
+--- output
+25
+
+=== method without return value
+class Dog {
+  name: String = name;
+
+  Constructor(name: String);
+
+  pub func bark(&self) {
+    print(self.name);
+  }
+}
+let d = Dog { name: "Rex" };
+d.bark();
+--- output
+Rex
+
+=== method with return value
+class Rect {
+  w: int32 = w;
+  h: int32 = h;
+
+  Constructor(w: int32, h: int32);
+
+  pub func area(&self) -> int32 {
+    return self.w * self.h;
+  }
+}
+let r = Rect { w: 3, h: 5 };
+print(r.area());
+--- output
+15
+
+=== method with parameters
+class Adder {
+  base: int32 = base;
+
+  Constructor(base: int32);
+
+  pub func add(&self, x: int32) -> int32 {
+    return self.base + x;
+  }
+}
+let a = Adder { base: 100 };
+print(a.add(23));
+--- output
+123
+
+=== method calling another method
+class Num {
+  value: int32 = value;
+
+  Constructor(value: int32);
+
+  pub func get(&self) -> int32 {
+    return self.value;
+  }
+
+  pub func twice(&self) -> int32 {
+    return get() * 2;
+  }
+}
+let n = Num { value: 21 };
+print(n.twice());
+--- output
+42
+
+=== method calling a private method
+class Secret {
+  value: int32 = value;
+
+  Constructor(value: int32);
+
+  func hidden(&self) -> int32 {
+    return self.value;
+  }
+
+  pub func reveal(&self) -> int32 {
+    return hidden();
+  }
+}
+let s = Secret { value: 7 };
+print(s.reveal());
+--- output
+7
+
+=== two instances are independent
+class Box {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+let a = Box { v: 1 };
+let b = Box { v: 2 };
+print(a.v);
+print(b.v);
+--- output
+1
+2
+
+=== two classes
+class A {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+class B {
+  pub w: int32 = w;
+
+  Constructor(w: int32);
+}
+let a = A { v: 1 };
+let b = B { w: 2 };
+print(a.v + b.w);
+--- output
+3
+
+=== assign a field of a mut instance
+class Box {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+mut b = Box { v: 1 };
+b.v = 5;
+print(b.v);
+--- output
+5
+
+=== assigning a field of a let instance is an error
+class Box {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+let b = Box { v: 1 };
+b.v = 5;
+--- error
+Tried reassigning a value to the unmutable Variable 'b'
+
+=== private field can't be read from outside
+class Box {
+  v: int32 = v;
+
+  Constructor(v: int32);
+}
+let b = Box { v: 1 };
+print(b.v);
+--- error
+Tried accessing a private field 'v'
+
+=== private method can't be called from outside
+class Box {
+  v: int32 = v;
+
+  Constructor(v: int32);
+
+  func hidden(&self) -> int32 {
+    return self.v;
+  }
+}
+let b = Box { v: 1 };
+print(b.hidden());
+--- error
+Tried calling a private function 'hidden'
+
+=== unknown field in brace init
+class Box {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+let b = Box { w: 1 };
+--- error
+class 'Box' has no field 'w'
+
+=== missing field in brace init
+class Point {
+  pub x: int32 = x;
+  pub y: int32 = y;
+
+  Constructor(x: int32, y: int32);
+}
+let p = Point { x: 1 };
+--- error
+missing argument 1 for 'Point'
+
+=== wrong field type in brace init
+class Box {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+let b = Box { v: "text" };
+--- error
+type 'String' does not match 'int32' in struct initializer field
+
+=== literal adapts to field type
+class Box {
+  pub v: uint8 = v;
+
+  Constructor(v: uint8);
+}
+let b = Box { v: 255 };
+print(b.v);
+--- output
+255
+
+=== literal out of range for field type
+class Box {
+  pub v: uint8 = v;
+
+  Constructor(v: uint8);
+}
+let b = Box { v: 256 };
+--- error
+literal '256' doesn't fit into 'uint8'
+
+=== reading an unknown field is an error
+class Box {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+let b = Box { v: 1 };
+print(b.nothing);
+--- error
+class 'Box' has no field 'nothing'
+
+=== field access on a non object
+let x = 5;
+print(x.y);
+--- error
+is not an object
+
+=== method call on a non object
+let x = 5;
+x.go();
+--- error
+is not an object
+
+=== constructor marked pub is an error
+class Box {
+  v: int32 = v;
+
+  pub Constructor(v: int32);
+}
+--- error
+Constructors are always public
+
+=== instance passed to a function
+class Box {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+func show(b: Box) {
+  print(b.v);
+}
+show(Box { v: 8 });
+--- output
+8
+
+=== instance returned from a function
+class Box {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+func make(v: int32) -> Box {
+  return Box { v: v };
+}
+let b = make(9);
+print(b.v);
+--- output
+9
