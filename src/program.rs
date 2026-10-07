@@ -2,8 +2,8 @@ use std::process::Command;
 
 use inkwell::context::Context;
 
-use crate::{codegen_ctx::CodegenContext, module::ModuleGraph, parser::Parser, 
-    sema::Sema, statement::{Stmt, StmtKind}, traits::codegen::{Codegen, Declare}};
+use crate::{codegen_ctx::CodegenContext, declaration::{Declaration, DeclarationKind}, module::ModuleGraph, parser::Parser,
+    sema::Sema, statement::{Stmt, StmtKind}, traits::codegen::{Codegen, Declare}, r#type::Type};
 
 /// Parses, checks semantics and runs the code.
 ///
@@ -41,10 +41,36 @@ impl<'ctx> Program<'ctx> {
             let mut stmts = parser.parse_file();
             sema.check(&mut stmts);
 
-            for stmt in &stmts {
-                if let StmtKind::Declaration(decl) = &stmt.kind {
-                    decl.declare(&mut self.context);
+            // Instances of generic functions, classes and enums used by this module are generated with it
+            for decl in sema.take_instances() {
+                let span = decl.span.clone();
+                stmts.push(Stmt::new(StmtKind::Declaration(decl), span, Type::Unknown));
+            }
+
+            // Instances like `Box<int32>` come after the functions using them, so every
+            // struct type is created first. Classes are declared before enums, since
+            // an enum's size depends on the classes in its payloads.
+            let decls: Vec<&Declaration> = stmts.iter()
+                .filter_map(|stmt| match &stmt.kind {
+                    StmtKind::Declaration(decl) => Some(decl),
+                    _ => None,
+                })
+                .collect();
+            for decl in &decls {
+                if let DeclarationKind::Class { name, .. } | DeclarationKind::Enum { name, .. } = &decl.kind {
+                    self.context.struct_type(name);
                 }
+            }
+            let is_class = |decl: &&&Declaration| matches!(decl.kind, DeclarationKind::Class { .. });
+            let is_enum = |decl: &&&Declaration| matches!(decl.kind, DeclarationKind::Enum { .. });
+            for decl in decls.iter().filter(is_class) {
+                decl.declare(&mut self.context);
+            }
+            for decl in decls.iter().filter(is_enum) {
+                decl.declare(&mut self.context);
+            }
+            for decl in decls.iter().filter(|d| !is_class(d) && !is_enum(d)) {
+                decl.declare(&mut self.context);
             }
 
             for stmt in &stmts {

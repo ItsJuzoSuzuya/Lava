@@ -1,0 +1,229 @@
+=== unique as a class field
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+class Holder {
+  pub p: Unique<Point> = p;
+
+  Constructor(p: Unique<Point>);
+}
+let h = Holder { p: unique(Point { x: 3 }) };
+print(h.p.x);
+--- output
+3
+
+=== buffer as a class field
+class Store {
+  pub data: Buffer<int32> = Buffer<int32>(capacity);
+
+  Constructor(capacity: uint64);
+}
+mut s = Store { capacity: 2 };
+s.data.set(1, 42);
+print(s.data.get(1));
+--- output
+42
+
+=== copying a class copies its unique
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+class Holder {
+  pub p: Unique<Point> = p;
+
+  Constructor(p: Unique<Point>);
+}
+mut a = Holder { p: unique(Point { x: 1 }) };
+mut b = a;
+b.p.x = 2;
+print(a.p.x);
+print(b.p.x);
+--- output
+1
+2
+
+=== copying a class copies its buffer
+class Store {
+  pub data: Buffer<int32> = Buffer<int32>(2);
+
+  Constructor();
+}
+mut a = Store();
+a.data.set(0, 1);
+mut b = a;
+b.data.set(0, 2);
+print(a.data.get(0));
+print(b.data.get(0));
+--- output
+1
+2
+
+=== the original stays usable after a copy
+class Holder {
+  pub v: Unique<int32> = v;
+
+  Constructor(v: Unique<int32>);
+
+  pub func show(&self) {
+    print(1);
+  }
+}
+let a = Holder { v: unique(5) };
+let b = a;
+let c = a;
+a.show();
+--- output
+1
+
+=== passing to a function copies
+class Store {
+  pub data: Buffer<int32> = Buffer<int32>(1);
+
+  Constructor();
+}
+func change(mut s: Store) {
+  s.data.set(0, 99);
+  print(s.data.get(0));
+}
+mut s = Store();
+s.data.set(0, 1);
+change(s);
+print(s.data.get(0));
+--- output
+99
+1
+
+=== returning from a function
+class Store {
+  pub data: Buffer<int32> = Buffer<int32>(1);
+
+  Constructor();
+}
+func make(v: int32) -> Store {
+  mut s = Store();
+  s.data.set(0, v);
+  return s;
+}
+let s = make(7);
+print(s.data.get(0));
+--- output
+7
+
+=== reading an owning field gives a copy
+class Store {
+  pub data: Buffer<int32> = Buffer<int32>(1);
+
+  Constructor();
+}
+mut s = Store();
+s.data.set(0, 1);
+mut copy = s.data;
+copy.set(0, 2);
+print(s.data.get(0));
+print(copy.get(0));
+--- output
+1
+2
+
+=== assigning a new value to an owning field
+class Store {
+  pub data: Buffer<int32> = Buffer<int32>(1);
+
+  Constructor();
+}
+mut s = Store();
+s.data = Buffer<int32>(3);
+print(s.data.capacity());
+--- output
+3
+
+=== reassigning an owning class variable
+class Store {
+  pub data: Buffer<int32> = Buffer<int32>(size);
+
+  Constructor(size: uint64);
+}
+mut s = Store { size: 1 };
+s = Store { size: 4 };
+print(s.data.capacity());
+--- output
+4
+
+=== nested owning classes copy deeply
+class Inner {
+  pub v: Unique<int32> = v;
+
+  Constructor(v: Unique<int32>);
+}
+class Outer {
+  pub inner: Inner = inner;
+
+  Constructor(inner: Inner);
+}
+mut a = Outer { inner: Inner { v: unique(1) } };
+mut b = a;
+print(1);
+--- output
+1
+
+=== owning class created in a loop
+class Store {
+  pub data: Buffer<int32> = Buffer<int32>(1);
+
+  Constructor();
+}
+mut i = 0;
+while i < 3 {
+  mut s = Store();
+  s.data.set(0, i);
+  print(s.data.get(0));
+  i = i + 1;
+}
+--- output
+0
+1
+2
+
+=== generic class holding a unique
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+let b = Box { value: unique(9) };
+print(1);
+--- output
+1
+
+=== buffer of an owning class
+class Store {
+  pub data: Buffer<int32> = Buffer<int32>(1);
+
+  Constructor();
+}
+mut b = Buffer<Store>(2);
+mut s = Store();
+s.data.set(0, 4);
+b.set(1, s);
+print(b.get(1).data.get(0));
+--- output
+4
+
+=== field of a returned owning class
+class Store {
+  pub data: Buffer<int32> = Buffer<int32>(1);
+  pub size: int32 = 3;
+
+  Constructor();
+}
+func make() -> Store {
+  return Store();
+}
+print(make().size);
+make();
+--- output
+3

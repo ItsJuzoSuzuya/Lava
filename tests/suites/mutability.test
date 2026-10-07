@@ -1,0 +1,237 @@
+=== method changes a field through mut self
+class Counter {
+  pub count: int32 = count;
+
+  Constructor(count: int32);
+
+  pub func bump(mut &self) {
+    self.count = self.count + 1;
+  }
+}
+mut c = Counter { count: 1 };
+c.bump();
+c.bump();
+print(c.count);
+--- output
+3
+
+=== method changes the value through a unique
+class Counter {
+  pub count: int32 = count;
+
+  Constructor(count: int32);
+
+  pub func bump(mut &self) {
+    self.count = self.count + 1;
+  }
+}
+mut c = unique(Counter { count: 1 });
+c.bump();
+c.bump();
+print(c.count);
+--- output
+3
+
+=== method with mut self and a parameter
+class Account {
+  pub balance: int64 = balance;
+
+  Constructor(balance: int64);
+
+  pub func deposit(mut &self, amount: int64) {
+    self.balance = self.balance + amount;
+  }
+}
+mut a = Account { balance: 100 };
+a.deposit(50);
+a.deposit(3000000000);
+print(a.balance);
+--- output
+3000000150
+
+=== mut self method calls another mut self method
+class Counter {
+  pub count: int32 = count;
+
+  Constructor(count: int32);
+
+  pub func bump(mut &self) {
+    self.count = self.count + 1;
+  }
+
+  pub func bump_twice(mut &self) {
+    bump();
+    bump();
+  }
+}
+mut c = Counter { count: 0 };
+c.bump_twice();
+print(c.count);
+--- output
+2
+
+=== read only method can be called on a let binding
+class Counter {
+  count: int32 = count;
+
+  Constructor(count: int32);
+
+  pub func get(&self) -> int32 {
+    return self.count;
+  }
+}
+let c = Counter { count: 5 };
+print(c.get());
+--- output
+5
+
+=== mut self method on a let binding is an error
+class Counter {
+  pub count: int32 = count;
+
+  Constructor(count: int32);
+
+  pub func bump(mut &self) {
+    self.count = self.count + 1;
+  }
+}
+let c = Counter { count: 1 };
+c.bump();
+--- error
+method 'bump' changes 'self', so 'c' has to be mutable
+
+=== changing a field without mut self is an error
+class Counter {
+  pub count: int32 = count;
+
+  Constructor(count: int32);
+
+  pub func bump(&self) {
+    self.count = self.count + 1;
+  }
+}
+--- error
+Tried reassigning a value to the unmutable Variable 'self'
+
+=== read only method can't call a mut self method
+class Counter {
+  pub count: int32 = count;
+
+  Constructor(count: int32);
+
+  pub func bump(mut &self) {
+    self.count = self.count + 1;
+  }
+
+  pub func sneaky(&self) {
+    bump();
+  }
+}
+--- error
+method 'bump' changes 'self', so 'self' has to be mutable
+
+=== constructor can change fields
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32) {
+    self.x = x * 10;
+  }
+}
+let p = Point { x: 4 };
+print(p.x);
+--- output
+40
+
+=== assigning to self of a class is an error
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+
+  pub func reset(mut &self) {
+    self = Point { x: 0 };
+  }
+}
+--- error
+can't assign to 'self' of a class
+
+=== mut self of a built-in type changes the variable
+trait Increment {
+  func increment(mut &self);
+}
+impl Increment for int32 {
+  func increment(mut &self) {
+    self = self + 1;
+  }
+}
+mut x: int32 = 41;
+x.increment();
+print(x);
+--- output
+42
+
+=== mut self of a built-in type on a let binding is an error
+trait Increment {
+  func increment(mut &self);
+}
+impl Increment for int32 {
+  func increment(mut &self) {
+    self = self + 1;
+  }
+}
+let x: int32 = 41;
+x.increment();
+--- error
+method 'increment' changes 'self', so 'x' has to be mutable
+
+=== impl has to keep mut self of the trait
+trait Increment {
+  func increment(mut &self);
+}
+impl Increment for int32 {
+  func increment(&self) {
+    print(self);
+  }
+}
+--- error
+method 'increment' doesn't match its signature in trait 'Increment'
+
+=== impl can't add mut self to the trait
+trait Show {
+  func show(&self);
+}
+impl Show for int32 {
+  func show(mut &self) {
+    print(self);
+  }
+}
+--- error
+method 'show' doesn't match its signature in trait 'Show'
+
+=== mut parameter can be reassigned
+func countdown(mut n: int32) -> int32 {
+  n = n - 1;
+  n = n - 1;
+  return n;
+}
+print(countdown(10));
+--- output
+8
+
+=== mut parameter doesn't change the caller's variable
+func change(mut n: int32) {
+  n = 99;
+}
+let x = 1;
+change(x);
+print(x);
+--- output
+1
+
+=== parameter without mut can't be reassigned
+func change(n: int32) {
+  n = 99;
+}
+--- error
+Tried reassigning a value to the unmutable Variable 'n'

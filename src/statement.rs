@@ -1,10 +1,12 @@
 use std::{fmt::Display};
 
+use inkwell::basic_block::BasicBlock;
 use inkwell::types::BasicType;
 use inkwell::values::BasicValueEnum;
 
 use crate::{codegen_ctx::{CodegenContext, CodegenError}, declaration::Declaration, expression::{Expr, ExprKind}, span::Span, traits::codegen::Codegen, r#type::Type};
 
+#[derive(Clone)]
 pub struct Stmt {
     pub kind: StmtKind,
     pub span: Span,
@@ -17,6 +19,7 @@ impl Stmt {
     }
 }
 
+#[derive(Clone)]
 pub enum Pattern {
     EnumVariant {
         enum_name: String,
@@ -36,12 +39,14 @@ impl Display for Pattern {
     }
 }
 
+#[derive(Clone)]
 pub struct MatchArm {
     pub pattern: Pattern,
     pub body: Vec<Stmt>,
     pub span: Span,
 }
 
+#[derive(Clone)]
 pub enum StmtKind {
     Declaration(Declaration),
     Expression(Expr),
@@ -58,6 +63,18 @@ pub enum StmtKind {
         scrutinee: Expr,
         arms: Vec<MatchArm>,
     },
+    /// `if condition { ... } else { ... }`. An `else if` is an `If` as the only
+    /// statement of `else_body`.
+    If {
+        condition: Expr,
+        then_body: Vec<Stmt>,
+        else_body: Option<Vec<Stmt>>,
+    },
+    /// `while condition { ... }`
+    While {
+        condition: Expr,
+        body: Vec<Stmt>,
+    },
 }
 
 impl Display for StmtKind {
@@ -71,6 +88,8 @@ impl Display for StmtKind {
             StmtKind::Instantiation { name, typedef, value, ..}    =>
                 write!(f, "Instantiation({}, {}, {})", name, typedef.clone().unwrap_or_else(|| Type::from(value.kind.clone())) , value.kind),
             StmtKind::Match { scrutinee, .. }  => write!(f, "Match({})", scrutinee.kind),
+            StmtKind::If { condition, .. }     => write!(f, "If({})", condition.kind),
+            StmtKind::While { condition, .. }  => write!(f, "While({})", condition.kind),
         }
     }
 }
@@ -79,9 +98,22 @@ impl Codegen for Stmt {
     fn codegen<'ctx, 'a>(&self, ctx: &'a mut CodegenContext<'ctx>) -> Option<Box<BasicValueEnum<'ctx>>> {
         match &self.kind {
             StmtKind::Declaration(decl) => decl.codegen(ctx),
-            StmtKind::Expression(expr) => expr.codegen(ctx),
+            StmtKind::Expression(expr) => {
+                let value = expr.codegen(ctx);
+                // Nobody keeps a result like the one of `make();`, so its memory is freed right away
+                if let Some(value) = &value {
+                    if ctx.owns_memory(&expr.ty) {
+                        let mark = ctx.temporaries.len();
+                        ctx.push_temporary(**value, &expr.ty);
+                        ctx.drop_temporaries(mark);
+                    }
+                }
+                value
+            }
             StmtKind::Return(expr) => {
+                // The return value is computed first, it may move a `Unique` out of a variable
                 let expr_val = expr.codegen(ctx).unwrap();
+                ctx.emit_all_drops();
                 ctx.builder.build_return(Some(&*expr_val)).unwrap();
                 None
             }
@@ -94,7 +126,16 @@ impl Codegen for Stmt {
                 }
 
                 let llvm_ty = ty.to_llvm(ctx);
-                let ptr = ctx.builder.build_alloca(llvm_ty, name).unwrap();
+                let ptr = ctx.build_entry_alloca(llvm_ty, name);
+
+                // The variable owns its `Unique`, `Buffer` or the memory of its class
+                // and frees it at the end of the scope
+                if ctx.owns_memory(&ty) {
+                    let llvm_val = *value.codegen(ctx).unwrap();
+                    ctx.builder.build_store(ptr, llvm_val).unwrap();
+                    ctx.push_owned_var(name.to_string(), ptr, ty.clone());
+                    return None;
+                }
 
                 let nominal_name = match &ty {
                     Type::Class(n) | Type::Enum(n) => Some(n.clone()),
@@ -102,7 +143,7 @@ impl Codegen for Stmt {
                 };
 
                 if nominal_name.is_some() {
-                    if let ExprKind::FunctionCall { params, parent_name: None, mangled, .. } = &value.kind {
+                    if let ExprKind::FunctionCall { params, receiver: None, mangled, .. } = &value.kind {
                         match mangled {
                             Some(fn_name) => {
                                 let function = match ctx.module.get_function(fn_name) {
@@ -144,9 +185,66 @@ impl Codegen for Stmt {
                 codegen_match(ctx, scrutinee, arms, &self.span);
                 None
             }
+            StmtKind::If { condition, then_body, else_body } => {
+                let function = ctx.builder.get_insert_block().and_then(|b| b.get_parent())
+                    .expect("if statement outside of a function");
+                let then_bb = ctx.context.append_basic_block(function, "then");
+                let else_bb = ctx.context.append_basic_block(function, "else");
+                let merge_bb = ctx.context.append_basic_block(function, "if_end");
+
+                let condition = condition.codegen(ctx).unwrap().into_int_value();
+                ctx.builder.build_conditional_branch(condition, then_bb, else_bb).unwrap();
+
+                ctx.builder.position_at_end(then_bb);
+                codegen_block(ctx, then_body, merge_bb);
+                ctx.builder.position_at_end(else_bb);
+                codegen_block(ctx, else_body.as_deref().unwrap_or(&[]), merge_bb);
+
+                ctx.builder.position_at_end(merge_bb);
+                None
+            }
+            StmtKind::While { condition, body } => {
+                let function = ctx.builder.get_insert_block().and_then(|b| b.get_parent())
+                    .expect("while loop outside of a function");
+                let cond_bb = ctx.context.append_basic_block(function, "while_cond");
+                let body_bb = ctx.context.append_basic_block(function, "while_body");
+                let end_bb = ctx.context.append_basic_block(function, "while_end");
+
+                ctx.builder.build_unconditional_branch(cond_bb).unwrap();
+                ctx.builder.position_at_end(cond_bb);
+                let condition = condition.codegen(ctx).unwrap().into_int_value();
+                ctx.builder.build_conditional_branch(condition, body_bb, end_bb).unwrap();
+
+                // After the body, the condition is checked again
+                ctx.builder.position_at_end(body_bb);
+                codegen_block(ctx, body, cond_bb);
+
+                ctx.builder.position_at_end(end_bb);
+                None
+            }
         }
     }
 
+}
+
+/// Generates the statements of a block, like a match arm or the body of an
+/// `if` or `while`, and jumps to `next_bb` afterwards.
+///
+/// The block is its own scope: its variables are gone afterwards, and the
+/// `Unique`s declared in it are freed at its end. If it ends with `return`,
+/// that freed them already.
+fn codegen_block<'ctx>(ctx: &mut CodegenContext<'ctx>, body: &[Stmt], next_bb: BasicBlock<'ctx>) {
+    let prev_scope = ctx.scope.clone();
+    ctx.drop_scopes.push(Vec::new());
+    for stmt in body {
+        stmt.codegen(ctx);
+    }
+    let owned = ctx.drop_scopes.pop().unwrap_or_default();
+    if ctx.builder.get_insert_block().and_then(|b| b.get_terminator()).is_none() {
+        ctx.emit_drops(&owned);
+        ctx.builder.build_unconditional_branch(next_bb).unwrap();
+    }
+    ctx.scope = prev_scope;
 }
 
 fn codegen_match<'ctx>(
@@ -176,7 +274,7 @@ fn codegen_match<'ctx>(
             None => {
                 let val = *scrutinee.codegen(ctx).unwrap();
                 let ty = scrutinee_ty.to_llvm(ctx);
-                let tmp = ctx.builder.build_alloca(ty, "match_scrut").unwrap();
+                let tmp = ctx.build_entry_alloca(ty, "match_scrut");
                 ctx.builder.build_store(tmp, val).unwrap();
                 tmp
             }
@@ -248,12 +346,7 @@ fn codegen_match<'ctx>(
                 ctx.push_var(name.clone(), payload_ty, payload_ptr, class_name);
             }
 
-            for stmt in &arm.body {
-                stmt.codegen(ctx);
-            }
-            if ctx.builder.get_insert_block().and_then(|b| b.get_terminator()).is_none() {
-                ctx.builder.build_unconditional_branch(merge_bb).unwrap();
-            }
+            codegen_block(ctx, &arm.body, merge_bb);
             ctx.scope = prev_scope;
         }
 
@@ -295,12 +388,9 @@ fn codegen_match<'ctx>(
 
         for (arm, bb) in arms.iter().zip(arm_blocks.iter()) {
             ctx.builder.position_at_end(*bb);
-            for stmt in &arm.body {
-                stmt.codegen(ctx);
-            }
-            if ctx.builder.get_insert_block().and_then(|b| b.get_terminator()).is_none() {
-                ctx.builder.build_unconditional_branch(merge_bb).unwrap();
-            }
+            let prev_scope = ctx.scope.clone();
+            codegen_block(ctx, &arm.body, merge_bb);
+            ctx.scope = prev_scope;
         }
 
         ctx.builder.position_at_end(default_bb);

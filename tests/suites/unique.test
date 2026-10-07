@@ -1,0 +1,377 @@
+=== unique of a class and field access
+class Point {
+  pub x: int32 = x;
+  pub y: int32 = y;
+
+  Constructor(x: int32, y: int32);
+}
+let p = unique(Point { x: 3, y: 4 });
+print(p.x);
+print(p.y);
+--- output
+3
+4
+
+=== field assignment through a unique
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+mut p = unique(Point { x: 1 });
+p.x = 9;
+print(p.x);
+--- output
+9
+
+=== field assignment needs a mut binding
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+let p = unique(Point { x: 1 });
+p.x = 9;
+--- error
+Tried reassigning a value to the unmutable Variable 'p'
+
+=== method call through a unique
+class Rect {
+  w: int32 = w;
+  h: int32 = h;
+
+  Constructor(w: int32, h: int32);
+
+  pub func area(&self) -> int32 {
+    return self.w * self.h;
+  }
+}
+let r = unique(Rect { w: 3, h: 5 });
+print(r.area());
+--- output
+15
+
+=== trait method through a unique of a built-in type
+trait Double {
+  func double(&self) -> int32;
+}
+impl Double for int32 {
+  func double(&self) -> int32 {
+    return self * 2;
+  }
+}
+let u = unique(21);
+print(u.double());
+--- output
+42
+
+=== explicit type argument
+class Box {
+  pub v: int64 = v;
+
+  Constructor(v: int64);
+}
+let b = unique<Box>(Box { v: 5 });
+print(b.v);
+--- output
+5
+
+=== type from the annotation adapts the literal
+trait Show {
+  func show(&self);
+}
+impl Show for int64 {
+  func show(&self) {
+    print(self);
+  }
+}
+let u: Unique<int64> = unique(3000000000);
+u.show();
+--- output
+3000000000
+
+=== move into another variable
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+let a = unique(Point { x: 7 });
+let b = a;
+print(b.x);
+--- output
+7
+
+=== use after moving into another variable is an error
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+let a = unique(Point { x: 7 });
+let b = a;
+print(a.x);
+--- error
+use of moved value 'a'
+
+=== move into a function
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+func show(p: Unique<Point>) {
+  print(p.x);
+}
+let a = unique(Point { x: 5 });
+show(a);
+--- output
+5
+
+=== use after moving into a function is an error
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+func show(p: Unique<Point>) {
+  print(p.x);
+}
+let a = unique(Point { x: 5 });
+show(a);
+show(a);
+--- error
+use of moved value 'a'
+
+=== method call after a move is an error
+class Rect {
+  w: int32 = w;
+
+  Constructor(w: int32);
+
+  pub func width(&self) -> int32 {
+    return self.w;
+  }
+}
+let a = unique(Rect { w: 2 });
+let b = a;
+print(a.width());
+--- error
+use of moved value 'a'
+
+=== returned from a function
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+func make(x: int32) -> Unique<Point> {
+  let p = unique(Point { x: x });
+  return p;
+}
+let p = make(11);
+print(p.x);
+--- output
+11
+
+=== passed through a function
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+func pass(p: Unique<Point>) -> Unique<Point> {
+  return p;
+}
+let a = unique(Point { x: 12 });
+let b = pass(a);
+print(b.x);
+--- output
+12
+
+=== borrowed with a reference doesn't move
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+func peek(p: &Unique<Point>) {
+  print(1);
+}
+let a = unique(Point { x: 13 });
+peek(&a);
+print(a.x);
+--- output
+1
+13
+
+=== assigning a new value to a moved variable
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+mut a = unique(Point { x: 1 });
+let b = a;
+a = unique(Point { x: 2 });
+print(a.x);
+print(b.x);
+--- output
+2
+1
+
+=== reassigning frees the old value
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+mut a = unique(Point { x: 1 });
+a = unique(Point { x: 2 });
+a = unique(Point { x: 3 });
+print(a.x);
+--- output
+3
+
+=== moved in one match arm is moved after the match
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+func take(p: Unique<Point>) {
+  print(p.x);
+}
+let a = unique(Point { x: 4 });
+let n = 1;
+match n {
+  1 => take(a),
+  _ => print(0),
+}
+print(a.x);
+--- error
+use of moved value 'a'
+
+=== moved in a match arm that runs
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+func take(p: Unique<Point>) {
+  print(p.x);
+}
+let a = unique(Point { x: 4 });
+let n = 1;
+match n {
+  1 => take(a),
+  _ => print(0),
+}
+print(9);
+--- output
+4
+9
+
+=== moved in a match arm that doesn't run
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+func take(p: Unique<Point>) {
+  print(p.x);
+}
+let a = unique(Point { x: 4 });
+let n = 2;
+match n {
+  1 => take(a),
+  _ => print(0),
+}
+print(9);
+--- output
+0
+9
+
+=== unique declared inside a match arm
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+let n = 1;
+match n {
+  1 => {
+    let p = unique(Point { x: 6 });
+    print(p.x);
+  }
+  _ => print(0),
+}
+print(7);
+--- output
+6
+7
+
+=== unique inside a generic function
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+let a = unique(Point { x: 1 });
+let b = unique(Point { x: 2 });
+let c = first(a, b);
+print(c.x);
+--- output
+1
+
+=== nested unique
+let u = unique(unique(5));
+print(1);
+--- output
+1
+
+=== unique as an enum payload is an error
+enum Value {
+  Boxed => Unique<int32>
+}
+--- error
+a Unique, Buffer or class owning one can't be an enum payload
+
+=== printing a unique is an error
+let u = unique(5);
+print(u);
+--- error
+a Unique or Buffer can't be printed
+
+=== unique without an argument is an error
+let u = unique();
+--- error
+missing argument 0 for 'unique'
+
+=== unique with two arguments is an error
+let u = unique(1, 2);
+--- error
+Too many arguments
+
+=== wrong value for an explicit type is an error
+let u = unique<String>(5);
+--- error
+type 'int32' does not match 'String' in unique value
+
+=== wrong unique type is an error
+class A {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+class B {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+let u: Unique<A> = unique(B { x: 1 });
+--- error
+does not match

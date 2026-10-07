@@ -18,6 +18,14 @@ pub struct LexError {
     pub span: Span,
 }
 
+/// A saved position of a [`Lexer`], to go back to with [`Lexer::rewind`].
+#[derive(Clone, Copy)]
+pub struct Checkpoint {
+    line: usize,
+    col: usize,
+    pos: usize,
+}
+
 /// Turns source code into [`Token`]s, one at a time.
 ///
 /// Tracks the current line and column, so every token comes with the [`Span`]
@@ -42,16 +50,24 @@ impl Lexer {
 
     /// Lexes the next token without advancing the lexer.
     pub fn peek(&mut self) -> Result<(Token, Span), LexError> {
-        let saved_pos = self.pos;
-        let saved_line = self.line;
-        let saved_col = self.col;
-
+        let checkpoint = self.checkpoint();
         let result = self.get_next_token();
-        self.pos = saved_pos;
-        self.line = saved_line;
-        self.col = saved_col;
+        self.rewind(checkpoint);
 
         return result
+    }
+
+    /// Saves the current position, so the parser can try parsing something
+    /// and go back with [`Lexer::rewind`] if it doesn't fit.
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint { line: self.line, col: self.col, pos: self.pos }
+    }
+
+    /// Goes back to a position saved with [`Lexer::checkpoint`].
+    pub fn rewind(&mut self, checkpoint: Checkpoint) {
+        self.line = checkpoint.line;
+        self.col = checkpoint.col;
+        self.pos = checkpoint.pos;
     }
 
     /// Lexes the next token and advances the lexer past it.
@@ -307,6 +323,31 @@ mod tests {
     }
 
     #[test]
+    fn angle_brackets() {
+        assert_eq!(lex_all("max<int64>(3)"), vec![
+            ident("max"), Token::Lt, Token::Int64Ty, Token::Gt, Token::LParen, Token::IntLiteral(3), Token::RParen,
+        ]);
+    }
+
+    #[test]
+    fn arrows_take_precedence_over_angle_brackets() {
+        assert_eq!(lex_all("-> => < >"), vec![Token::Arrow, Token::ThickArrow, Token::Lt, Token::Gt]);
+    }
+
+    #[test]
+    fn rewind_goes_back_to_checkpoint() {
+        let mut lexer = Lexer::new("a < b".to_string());
+        lexer.get_next_token().unwrap();
+        let checkpoint = lexer.checkpoint();
+        lexer.get_next_token().unwrap();
+        lexer.get_next_token().unwrap();
+        lexer.rewind(checkpoint);
+        let (token, span) = lexer.get_next_token().unwrap();
+        assert_eq!(token, Token::Lt);
+        assert_eq!(span.col, 2);
+    }
+
+    #[test]
     fn two_char_tokens() {
         assert_eq!(lex_all("-> :: =>"), vec![Token::Arrow, Token::ColonColon, Token::ThickArrow]);
     }
@@ -405,7 +446,7 @@ mod tests {
 
     #[test]
     fn unexpected_chars() {
-        for c in ['$', '#', '!', '?', '%', '<', '>', '|', '^', '~', '\''] {
+        for c in ['$', '#', '!', '?', '%', '|', '^', '~', '\''] {
             let error = lex_error(&format!("a {} b", c));
             assert!(matches!(error.kind, LexErrorKind::UnexpectedChar(got) if got == c), "for {:?}", c);
         }

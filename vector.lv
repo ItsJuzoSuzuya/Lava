@@ -1,0 +1,35 @@
+pub class Vector<T> {
+  data: Buffer<T> = Buffer<T>(4);
+  length: uint64 = 0;
+
+  Constructor();
+
+  pub func push(mut &self, item: T) {
+    if self.length == self.data.capacity() {
+      self.data.resize(self.data.capacity() * 2);
+    }
+    self.data.set(self.length, item);
+    self.length = self.length + 1;
+  }
+
+  pub func pop(mut &self) -> T {
+    self.length = self.length - 1;
+    return self.data.get(self.length);
+  }
+
+  pub func get(&self, index: uint64) -> T {
+    return self.data.get(index);
+  }
+
+  pub func set(mut &self, index: uint64, item: T) {
+    self.data.set(index, item);
+  }
+
+  pub func len(&self) -> uint64 {
+    return self.length;
+  }
+
+  pub func capacity(&self) -> uint64 {
+    return self.data.capacity();
+  }
+}

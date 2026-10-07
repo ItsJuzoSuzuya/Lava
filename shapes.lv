@@ -1,0 +1,15 @@
+pub trait Shape {
+  func area(self) -> float64;
+}
+
+pub class Square {
+  a: float64 = width;
+
+  Constructor(width: float64);
+}
+
+impl Shape for Square {
+  func area(self) -> float64 {
+    return self.a * self.a;
+  }
+}

@@ -20,6 +20,20 @@ pub enum Type {
     Object(String),
     Enum(String),
     Class(String),
+    /// A type parameter like `T` of a generic function. Only appears in the
+    /// generic declaration itself, sema replaces it in every instance.
+    Param(String),
+    /// A generic class or enum with type arguments as written, like `Box<int32>`.
+    /// Only comes from the parser, sema replaces it by the instance's
+    /// [`Type::Class`] or [`Type::Enum`].
+    Generic { name: String, args: Vec<Type> },
+    /// `Unique<T>`: a `T` on the heap, owned by one variable at a time and freed
+    /// when its owner goes out of scope. Created with `unique(value)`.
+    Unique(Box<Type>),
+    /// `Buffer<T>`: a block of `T`s on the heap with a fixed but resizable
+    /// capacity, the building block for growable containers. Owned like a
+    /// `Unique`. Created with `Buffer<T>(capacity)`.
+    Buffer(Box<Type>),
     Ref(Box<Type>),
 }
 
@@ -37,6 +51,13 @@ impl Display for Type {
             Type::Object(name)  => write!(f, "Object({})", name),
             Type::Enum(name)    => write!(f, "Enum({})", name),
             Type::Class(name)   => write!(f, "Class({})", name),
+            Type::Param(name)   => write!(f, "{}", name),
+            Type::Generic { name, args } => {
+                let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                write!(f, "{}<{}>", name, args.join(", "))
+            }
+            Type::Unique(inner) => write!(f, "Unique<{}>", inner),
+            Type::Buffer(inner) => write!(f, "Buffer<{}>", inner),
             Type::Ref(inner)    => write!(f, "Ref({})", inner),
         }
     }
@@ -47,13 +68,32 @@ impl<'ctx> Type {
     pub const INT32: Type = Type::Int { bits: 32, signed: true };
     /// The default type of float literals without context.
     pub const FLOAT64: Type = Type::Float { bits: 64 };
+    /// The type of sizes and indices, like a `Buffer`'s capacity.
+    pub const UINT64: Type = Type::Int { bits: 64, signed: false };
 
-    /// Name of the class or enum this type refers to, also through a reference.
-    /// `None` for every other type.
+    /// Name of the class or enum this type refers to, also through a reference
+    /// or a `Unique`. `None` for every other type.
     pub fn class_name(&self) -> Option<String> {
         match self {
             Type::Class(name) | Type::Enum(name) => Some(name.clone()),
-            Type::Ref(inner) => inner.class_name(),
+            Type::Ref(inner) | Type::Unique(inner) => inner.class_name(),
+            _ => None,
+        }
+    }
+
+    /// Whether values of this type own heap memory and get moved instead of
+    /// copied: `Unique` and `Buffer`.
+    pub fn is_move_only(&self) -> bool {
+        matches!(self, Type::Unique(_) | Type::Buffer(_))
+    }
+
+    /// Name the methods of this type are declared and mangled under: the class
+    /// or enum name, or the type's spelling for built-in types like `int32`.
+    /// `None` for types that can't have methods.
+    pub fn owner_name(&self) -> Option<String> {
+        match self {
+            Type::Class(name) | Type::Enum(name) => Some(name.clone()),
+            Type::Int { .. } | Type::Float { .. } | Type::Bool | Type::String => Some(self.to_string()),
             _ => None,
         }
     }
@@ -95,7 +135,9 @@ impl<'ctx> Type {
             Type::Object(_) => panic!("Object type reached codegen — sema did not canonicalize it"),
             Type::Enum(name) => ctx.module.get_struct_type(name).expect("enum not defined").into(),
             Type::Class(name) => ctx.module.get_struct_type(name).expect("struct not defined").into(),
-            Type::Ref(_) => ctx.context.ptr_type(AddressSpace::default()).into(),
+            Type::Param(name) => panic!("type parameter '{}' reached codegen — sema did not substitute it", name),
+            Type::Generic { name, .. } => panic!("generic type '{}' reached codegen — sema did not instantiate it", name),
+            Type::Ref(_) | Type::Unique(_) | Type::Buffer(_) => ctx.context.ptr_type(AddressSpace::default()).into(),
         }
     }
 
@@ -113,7 +155,9 @@ impl<'ctx> Type {
             Type::Object(_) => panic!("Object type reached codegen — sema did not canonicalize it"),
             Type::Enum(name) => ctx.module.get_struct_type(name).expect("enum not defined").fn_type(param_types, false),
             Type::Class(name) => ctx.module.get_struct_type(name).expect("struct not defined").fn_type(param_types, false),
-            Type::Ref(_) => ctx.context.ptr_type(AddressSpace::default()).fn_type(param_types, false),
+            Type::Param(name) => panic!("type parameter '{}' reached codegen — sema did not substitute it", name),
+            Type::Generic { name, .. } => panic!("generic type '{}' reached codegen — sema did not instantiate it", name),
+            Type::Ref(_) | Type::Unique(_) | Type::Buffer(_) => ctx.context.ptr_type(AddressSpace::default()).fn_type(param_types, false),
         }
     }
 

@@ -1,0 +1,420 @@
+=== equal
+print(3 == 3);
+print(3 == 4);
+--- output
+true
+false
+
+=== not equal
+print(3 != 4);
+print(3 != 3);
+--- output
+true
+false
+
+=== less and greater
+print(1 < 2);
+print(2 < 1);
+print(2 > 1);
+print(1 > 2);
+--- output
+true
+false
+true
+false
+
+=== less or equal and greater or equal
+print(2 <= 2);
+print(3 <= 2);
+print(2 >= 2);
+print(1 >= 2);
+--- output
+true
+false
+true
+false
+
+=== comparison of variables
+let a = 5;
+let b = 7;
+print(a < b);
+print(a == b);
+--- output
+true
+false
+
+=== arithmetic binds tighter than comparison
+let a = 5;
+print(a + 1 == 6);
+print(a * 2 > 9);
+--- output
+true
+true
+
+=== unsigned comparison
+let a: uint8 = 200;
+let b: uint8 = 100;
+print(a > b);
+--- output
+true
+
+=== signed comparison with negative numbers
+let a: int8 = -56;
+let b: int8 = 100;
+print(a < b);
+--- output
+true
+
+=== float comparison
+let a = 1.5;
+print(a < 2.0);
+print(a == 1.5);
+--- output
+true
+true
+
+=== comparison widens the narrower side
+let a: int8 = 5;
+let b: int64 = 5;
+print(a == b);
+--- output
+true
+
+=== comparing bools
+let a = true;
+print(a == true);
+print(a != false);
+--- output
+true
+true
+
+=== comparison result in a variable
+let big = 10 > 3;
+print(big);
+--- output
+true
+
+=== ordering bools is an error
+print(true < false);
+--- error
+'<' can't be used on values of type 'bool'
+
+=== comparing strings is an error
+let a = "x";
+print(a == "y");
+--- error
+'==' can't be used on values of type 'String'
+
+=== comparing different types is an error
+let a: int32 = 1;
+let b: uint32 = 1;
+print(a == b);
+--- error
+does not match
+
+=== if takes the then branch
+let x = 5;
+if x > 3 {
+  print("big");
+}
+print("done");
+--- output
+big
+done
+
+=== if skips the then branch
+let x = 1;
+if x > 3 {
+  print("big");
+}
+print("done");
+--- output
+done
+
+=== if else
+let x = 1;
+if x > 3 {
+  print("big");
+} else {
+  print("small");
+}
+--- output
+small
+
+=== else if chain
+func size(x: int32) {
+  if x > 100 {
+    print("huge");
+  } else if x > 10 {
+    print("big");
+  } else {
+    print("small");
+  }
+}
+size(500);
+size(50);
+size(5);
+--- output
+huge
+big
+small
+
+=== if with a bool variable
+let flag = true;
+if flag {
+  print("on");
+}
+--- output
+on
+
+=== variable declared inside if is local
+let x = 1;
+if x == 1 {
+  let y = 2;
+  print(y);
+}
+print(x);
+--- output
+2
+1
+
+=== variable declared inside if isn't visible after it
+if true {
+  let y = 2;
+}
+print(y);
+--- error
+unknown identifier 'y'
+
+=== if changes an outer mut variable
+mut x = 1;
+if x == 1 {
+  x = 10;
+}
+print(x);
+--- output
+10
+
+=== return from inside if
+func sign(x: int32) -> int32 {
+  if x < 0 {
+    return -1;
+  }
+  if x > 0 {
+    return 1;
+  }
+  return 0;
+}
+print(sign(-5));
+print(sign(5));
+print(sign(0));
+--- output
+-1
+1
+0
+
+=== both branches return
+func max(a: int32, b: int32) -> int32 {
+  if a > b {
+    return a;
+  } else {
+    return b;
+  }
+}
+print(max(3, 9));
+print(max(9, 3));
+--- output
+9
+9
+
+=== if condition must be a bool
+if 1 {
+  print("no");
+}
+--- error
+type 'int32' does not match 'bool' in if condition
+
+=== if with a struct name in the condition
+class Box {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+let b = Box { v: 3 };
+if b.v == 3 {
+  print("three");
+}
+--- output
+three
+
+=== while loop
+mut i = 0;
+while i < 3 {
+  print(i);
+  i = i + 1;
+}
+print("done");
+--- output
+0
+1
+2
+done
+
+=== while loop that never runs
+mut i = 5;
+while i < 3 {
+  print(i);
+  i = i + 1;
+}
+print("done");
+--- output
+done
+
+=== while loop summing numbers
+mut i = 1;
+mut sum = 0;
+while i <= 100 {
+  sum = sum + i;
+  i = i + 1;
+}
+print(sum);
+--- output
+5050
+
+=== nested while loops
+mut i = 0;
+mut count = 0;
+while i < 3 {
+  mut j = 0;
+  while j < 4 {
+    count = count + 1;
+    j = j + 1;
+  }
+  i = i + 1;
+}
+print(count);
+--- output
+12
+
+=== if inside while
+mut i = 0;
+while i < 6 {
+  if i == 2 {
+    print("two");
+  } else if i == 4 {
+    print("four");
+  }
+  i = i + 1;
+}
+--- output
+two
+four
+
+=== return from inside while
+func first_over(limit: int32) -> int32 {
+  mut i = 0;
+  while true {
+    if i * i > limit {
+      return i;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+print(first_over(50));
+--- output
+8
+
+=== while condition must be a bool
+mut i = 0;
+while i {
+  i = i + 1;
+}
+--- error
+type 'int32' does not match 'bool' in while condition
+
+=== unique moved in an if branch is moved afterwards
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+func take(p: Unique<Point>) {
+  print(p.x);
+}
+let a = unique(Point { x: 1 });
+if true {
+  take(a);
+}
+print(a.x);
+--- error
+use of moved value 'a'
+
+=== unique moved in an if branch that runs
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+func take(p: Unique<Point>) {
+  print(p.x);
+}
+let a = unique(Point { x: 1 });
+let n = 1;
+if n == 1 {
+  take(a);
+}
+print("end");
+--- output
+1
+end
+
+=== unique moved inside a loop is an error
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+func take(p: Unique<Point>) {
+  print(p.x);
+}
+let a = unique(Point { x: 1 });
+mut i = 0;
+while i < 2 {
+  take(a);
+  i = i + 1;
+}
+--- error
+'a' is moved inside the loop
+
+=== unique created inside a loop
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+mut i = 0;
+while i < 3 {
+  let p = unique(Point { x: i });
+  print(p.x);
+  i = i + 1;
+}
+--- output
+0
+1
+2
+
+=== less than a variable is still a comparison
+let a = 1;
+let b = 2;
+print(a < b);
+--- output
+true
+
+=== generic call next to comparisons
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+print(first<int32>(1, 2) < 3);
+--- output
+true

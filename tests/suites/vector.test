@@ -1,0 +1,253 @@
+=== push and get from an imported module
+import vector;
+
+mut v = Vector<int32>();
+v.push(10);
+v.push(20);
+print(v.get(0));
+print(v.get(1));
+print(v.len());
+--- file vector.lv
+pub class Vector<T> {
+  data: Buffer<T> = Buffer<T>(4);
+  length: uint64 = 0;
+
+  Constructor();
+
+  pub func push(mut &self, item: T) {
+    if self.length == self.data.capacity() {
+      self.data.resize(self.data.capacity() * 2);
+    }
+    self.data.set(self.length, item);
+    self.length = self.length + 1;
+  }
+
+  pub func pop(mut &self) -> T {
+    self.length = self.length - 1;
+    return self.data.get(self.length);
+  }
+
+  pub func get(&self, index: uint64) -> T {
+    return self.data.get(index);
+  }
+
+  pub func set(mut &self, index: uint64, item: T) {
+    self.data.set(index, item);
+  }
+
+  pub func len(&self) -> uint64 {
+    return self.length;
+  }
+
+  pub func capacity(&self) -> uint64 {
+    return self.data.capacity();
+  }
+}
+--- output
+10
+20
+2
+
+=== grows by doubling
+class Vector<T> {
+  data: Buffer<T> = Buffer<T>(4);
+  length: uint64 = 0;
+
+  Constructor();
+
+  pub func push(mut &self, item: T) {
+    if self.length == self.data.capacity() {
+      self.data.resize(self.data.capacity() * 2);
+    }
+    self.data.set(self.length, item);
+    self.length = self.length + 1;
+  }
+
+  pub func get(&self, index: uint64) -> T {
+    return self.data.get(index);
+  }
+
+  pub func capacity(&self) -> uint64 {
+    return self.data.capacity();
+  }
+}
+mut v = Vector<int32>();
+mut i = 0;
+while i < 10 {
+  v.push(i * i);
+  i = i + 1;
+}
+print(v.capacity());
+print(v.get(0));
+print(v.get(9));
+--- output
+16
+0
+81
+
+=== pop and set
+class Vector<T> {
+  data: Buffer<T> = Buffer<T>(4);
+  length: uint64 = 0;
+
+  Constructor();
+
+  pub func push(mut &self, item: T) {
+    if self.length == self.data.capacity() {
+      self.data.resize(self.data.capacity() * 2);
+    }
+    self.data.set(self.length, item);
+    self.length = self.length + 1;
+  }
+
+  pub func pop(mut &self) -> T {
+    self.length = self.length - 1;
+    return self.data.get(self.length);
+  }
+
+  pub func get(&self, index: uint64) -> T {
+    return self.data.get(index);
+  }
+
+  pub func set(mut &self, index: uint64, item: T) {
+    self.data.set(index, item);
+  }
+
+  pub func len(&self) -> uint64 {
+    return self.length;
+  }
+}
+mut v = Vector<float64>();
+v.push(1.5);
+v.push(2.5);
+v.set(0, 9.0);
+print(v.pop());
+print(v.len());
+print(v.get(0));
+--- output
+2.500000
+1
+9.000000
+
+=== copying a vector copies its elements
+class Vector<T> {
+  data: Buffer<T> = Buffer<T>(4);
+  length: uint64 = 0;
+
+  Constructor();
+
+  pub func push(mut &self, item: T) {
+    if self.length == self.data.capacity() {
+      self.data.resize(self.data.capacity() * 2);
+    }
+    self.data.set(self.length, item);
+    self.length = self.length + 1;
+  }
+
+  pub func get(&self, index: uint64) -> T {
+    return self.data.get(index);
+  }
+
+  pub func set(mut &self, index: uint64, item: T) {
+    self.data.set(index, item);
+  }
+}
+mut a = Vector<int32>();
+a.push(1);
+mut b = a;
+b.set(0, 2);
+print(a.get(0));
+print(b.get(0));
+--- output
+1
+2
+
+=== vector of a class
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+class Vector<T> {
+  data: Buffer<T> = Buffer<T>(4);
+  length: uint64 = 0;
+
+  Constructor();
+
+  pub func push(mut &self, item: T) {
+    if self.length == self.data.capacity() {
+      self.data.resize(self.data.capacity() * 2);
+    }
+    self.data.set(self.length, item);
+    self.length = self.length + 1;
+  }
+
+  pub func get(&self, index: uint64) -> T {
+    return self.data.get(index);
+  }
+}
+mut v = Vector<Point>();
+v.push(Point { x: 3 });
+v.push(Point { x: 4 });
+print(v.get(1).x);
+--- output
+4
+
+=== vector of uniques
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+class Vector<T> {
+  data: Buffer<T> = Buffer<T>(4);
+  length: uint64 = 0;
+
+  Constructor();
+
+  pub func push(mut &self, item: T) {
+    if self.length == self.data.capacity() {
+      self.data.resize(self.data.capacity() * 2);
+    }
+    self.data.set(self.length, item);
+    self.length = self.length + 1;
+  }
+
+  pub func get(&self, index: uint64) -> T {
+    return self.data.get(index);
+  }
+}
+mut v = Vector<Unique<Point>>();
+mut i = 0;
+while i < 6 {
+  v.push(unique(Point { x: i }));
+  i = i + 1;
+}
+mut w = v;
+print(v.get(5).x);
+print(w.get(0).x);
+--- output
+5
+0
+
+=== vector without its import is an unknown type
+mut v = Vector<int32>();
+--- error
+unknown function 'Vector'
+
+=== push needs a mut binding
+class Vector<T> {
+  data: Buffer<T> = Buffer<T>(4);
+  length: uint64 = 0;
+
+  Constructor();
+
+  pub func push(mut &self, item: T) {
+    self.data.set(self.length, item);
+    self.length = self.length + 1;
+  }
+}
+let v = Vector<int32>();
+v.push(1);
+--- error
+method 'push' changes 'self', so 'v' has to be mutable

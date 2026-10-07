@@ -209,14 +209,14 @@ match a {
 --- error
 match arm pattern
 
-=== enum methods are an error
+=== unknown enum method is an error
 enum Value {
   Number => int32
 }
 let a = Value::Number(1);
 a.go();
 --- error
-has no methods (enum)
+unknown function 'go'
 
 === enum passed to a function
 enum Value {

@@ -1,0 +1,225 @@
+=== set and get
+mut b = Buffer<int32>(3);
+b.set(0, 10);
+b.set(1, 20);
+b.set(2, 30);
+print(b.get(0));
+print(b.get(2));
+--- output
+10
+30
+
+=== capacity
+let b = Buffer<int32>(5);
+print(b.capacity());
+--- output
+5
+
+=== type from the annotation
+mut b: Buffer<float64> = Buffer(2);
+b.set(1, 2.5);
+print(b.get(1));
+--- output
+2.500000
+
+=== fill with a loop
+mut b = Buffer<int64>(4);
+mut i: uint64 = 0;
+while i < b.capacity() {
+  b.set(i, (i * 10) as int64);
+  i = i + 1;
+}
+print(b.get(3));
+--- output
+30
+
+=== resize keeps the elements
+mut b = Buffer<int32>(2);
+b.set(0, 1);
+b.set(1, 2);
+b.resize(4);
+b.set(3, 4);
+print(b.get(0));
+print(b.get(1));
+print(b.get(3));
+print(b.capacity());
+--- output
+1
+2
+4
+4
+
+=== buffer of a class
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+mut b = Buffer<Point>(2);
+b.set(0, Point { x: 5 });
+print(b.get(0).x);
+--- output
+5
+
+=== get out of bounds stops the program
+let b = Buffer<int32>(2);
+print(1);
+print(b.get(2));
+print(2);
+--- output
+1
+error: index 2 is out of bounds for a Buffer of capacity 2
+
+=== set out of bounds stops the program
+mut b = Buffer<int32>(1);
+b.set(5, 1);
+print(2);
+--- output
+error: index 5 is out of bounds for a Buffer of capacity 1
+
+=== buffer moved into a function
+func sum(b: Buffer<int32>) -> int32 {
+  return b.get(0) + b.get(1);
+}
+mut b = Buffer<int32>(2);
+b.set(0, 3);
+b.set(1, 4);
+print(sum(b));
+--- output
+7
+
+=== use after moving a buffer is an error
+func take(b: Buffer<int32>) {
+  print(b.capacity());
+}
+let b = Buffer<int32>(2);
+take(b);
+print(b.capacity());
+--- error
+use of moved value 'b'
+
+=== set needs a mut binding
+let b = Buffer<int32>(2);
+b.set(0, 1);
+--- error
+method 'set' changes 'self', so 'b' has to be mutable
+
+=== resize needs a mut binding
+let b = Buffer<int32>(2);
+b.resize(4);
+--- error
+method 'resize' changes 'self', so 'b' has to be mutable
+
+=== element of the wrong type is an error
+mut b = Buffer<int32>(2);
+b.set(0, "text");
+--- error
+type 'String' does not match 'int32' in function argument
+
+=== unknown buffer method is an error
+let b = Buffer<int32>(2);
+b.push(1);
+--- error
+unknown function 'push'
+
+=== wrong argument count is an error
+let b = Buffer<int32>(2);
+print(b.get());
+--- error
+'get' takes 1 arguments, got 0
+
+=== element type can't be inferred
+let b = Buffer(2);
+--- error
+can't infer type parameter 'T' of 'Buffer'
+
+=== buffer of uniques
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+mut b = Buffer<Unique<Point>>(2);
+b.set(0, unique(Point { x: 1 }));
+b.set(0, unique(Point { x: 2 }));
+print(b.get(0).x);
+--- output
+2
+
+=== getting a unique element gives a copy
+mut b = Buffer<Unique<int32>>(1);
+b.set(0, unique(5));
+let u = b.get(0);
+print(1);
+--- output
+1
+
+=== buffer of buffers
+mut b = Buffer<Buffer<int32>>(2);
+b.set(1, Buffer<int32>(3));
+print(b.get(1).capacity());
+--- output
+3
+
+=== moving a buffer of uniques
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+mut a = Buffer<Unique<Point>>(1);
+a.set(0, unique(Point { x: 1 }));
+mut b = a;
+b.set(0, unique(Point { x: 2 }));
+print(b.get(0).x);
+--- output
+2
+
+=== resizing a buffer of uniques
+mut b = Buffer<Unique<int32>>(3);
+b.set(2, unique(1));
+b.resize(1);
+b.resize(5);
+mut c = b;
+print(c.capacity());
+--- output
+5
+
+=== printing a buffer is an error
+let b = Buffer<int32>(2);
+print(b);
+--- error
+a Unique or Buffer can't be printed
+
+=== parentheses group
+print((2 + 3) * 4);
+print(2 + 3 * 4);
+--- output
+20
+14
+
+=== nested parentheses
+print(((1 + 2) * (3 + 4)) - 1);
+--- output
+20
+
+=== parentheses with as
+let i: uint64 = 3;
+let x = (i * 10) as int64;
+print(x);
+--- output
+30
+
+=== method on a parenthesized value
+class Point {
+  x: int32 = x;
+
+  Constructor(x: int32);
+
+  pub func get(&self) -> int32 {
+    return self.x;
+  }
+}
+print((Point { x: 9 }).get());
+--- output
+9

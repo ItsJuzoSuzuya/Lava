@@ -1,0 +1,633 @@
+=== type inferred from int arguments
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+print(first(3, 7));
+--- output
+3
+
+=== type inferred from string arguments
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+print(first("a", "b"));
+--- output
+a
+
+=== type inferred from float arguments
+func second<T>(a: T, b: T) -> T {
+  return b;
+}
+print(second(1.5, 2.5));
+--- output
+2.500000
+
+=== same generic function with different types
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+print(first(1, 2));
+print(first("x", "y"));
+print(first(true, false));
+--- output
+1
+x
+true
+
+=== same instance used twice
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+print(first(1, 2));
+print(first(3, 4));
+--- output
+1
+3
+
+=== typed argument wins over a literal
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+let big: int64 = 5000000000;
+print(first(big, 7));
+print(first(7, big));
+--- output
+5000000000
+7
+
+=== type inferred from the expected type
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+let x: int64 = first(3, 7);
+print(x);
+--- output
+3
+
+=== expected type lets literals exceed int32
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+let x: int64 = first(3000000000, 7);
+print(x);
+--- output
+3000000000
+
+=== type inferred from the return type of the caller
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+func get() -> int64 {
+  return first(4000000000, 1);
+}
+print(get());
+--- output
+4000000000
+
+=== type inferred from a parameter type
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+func show(x: uint8) {
+  print(x);
+}
+show(first(200, 1));
+--- output
+200
+
+=== explicit type argument
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+print(first<int64>(3000000000, 1));
+--- output
+3000000000
+
+=== explicit type argument converts typed arguments
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+let small: int32 = 9;
+print(first<int64>(small, 1));
+--- output
+9
+
+=== two type parameters
+func pick_second<A, B>(a: A, b: B) -> B {
+  return b;
+}
+print(pick_second(1, "two"));
+--- output
+two
+
+=== explicit type arguments for two parameters
+func pick_second<A, B>(a: A, b: B) -> B {
+  return b;
+}
+print(pick_second<int8, float32>(1, 2.5));
+--- output
+2.500000
+
+=== type parameter only in the return type needs explicit argument
+func convert<T>(x: int32) -> T {
+  return x as T;
+}
+print(convert<float64>(5));
+--- output
+5.000000
+
+=== type parameter only in the return type inferred from expected type
+func convert<T>(x: int32) -> T {
+  return x as T;
+}
+let f: float32 = convert(7);
+print(f);
+--- output
+7.000000
+
+=== type parameter in a local variable
+func copy<T>(x: T) -> T {
+  let y: T = x;
+  return y;
+}
+print(copy(11));
+--- output
+11
+
+=== generic function calls a generic function
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+func first_of_three<T>(a: T, b: T, c: T) -> T {
+  return first(first(a, b), c);
+}
+print(first_of_three(1, 2, 3));
+--- output
+1
+
+=== generic function with a class
+class Box {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+let b = first(Box { v: 1 }, Box { v: 2 });
+print(b.v);
+--- output
+1
+
+=== generic function with an enum
+enum Value {
+  Number => int32,
+  Text => String
+}
+func same<T>(x: T) -> T {
+  return x;
+}
+print(same(Value::Text("enum")));
+--- output
+enum
+
+=== bound allows calling the trait method
+trait Show {
+  func show(&self);
+}
+impl Show for int32 {
+  func show(&self) {
+    print(self);
+  }
+}
+func display<T: Show>(x: T) {
+  x.show();
+}
+display(42);
+--- output
+42
+
+=== bound with a trait method returning a value
+trait Double {
+  func double(&self) -> int32;
+}
+impl Double for int32 {
+  func double(&self) -> int32 {
+    return self * 2;
+  }
+}
+func doubled<T: Double>(x: T) -> int32 {
+  return x.double() + 1;
+}
+print(doubled(20));
+--- output
+41
+
+=== bound with a class implementing the trait
+trait Area {
+  func area(&self) -> int32;
+}
+class Square {
+  side: int32 = side;
+
+  Constructor(side: int32);
+}
+impl Area for Square {
+  func area(&self) -> int32 {
+    return self.side * self.side;
+  }
+}
+func print_area<T: Area>(x: T) {
+  print(x.area());
+}
+print_area(Square { side: 5 });
+--- output
+25
+
+=== several bounds
+trait A {
+  func a(&self) -> int32;
+}
+trait B {
+  func b(&self) -> int32;
+}
+impl A for int32 {
+  func a(&self) -> int32 {
+    return 1;
+  }
+}
+impl B for int32 {
+  func b(&self) -> int32 {
+    return 2;
+  }
+}
+func both<T: A + B>(x: T) -> int32 {
+  return x.a() + x.b();
+}
+print(both(0));
+--- output
+3
+
+=== impl shorthand
+trait Show {
+  func show(&self);
+}
+impl Show for int32 {
+  func show(&self) {
+    print(self);
+  }
+}
+func twice(x: impl Show) {
+  x.show();
+  x.show();
+}
+twice(9);
+--- output
+9
+9
+
+=== two impl shorthand parameters can have different types
+trait Show {
+  func show(&self);
+}
+impl Show for int32 {
+  func show(&self) {
+    print(self);
+  }
+}
+impl Show for String {
+  func show(&self) {
+    print(self);
+  }
+}
+func both(a: impl Show, b: impl Show) {
+  a.show();
+  b.show();
+}
+both(1, "one");
+--- output
+1
+one
+
+=== impl shorthand next to a type parameter
+trait Show {
+  func show(&self);
+}
+impl Show for String {
+  func show(&self) {
+    print(self);
+  }
+}
+func show_and_return<T>(x: T, label: impl Show) -> T {
+  label.show();
+  return x;
+}
+print(show_and_return<int32>(5, "label"));
+--- output
+label
+5
+
+=== generic function from another module
+import util;
+print(first(8, 9));
+--- file util.lv
+pub func first<T>(a: T, b: T) -> T {
+  return a;
+}
+--- output
+8
+
+=== generic function from another module uses its private helper
+import util;
+print(wrap(8));
+--- file util.lv
+func helper(x: int32) -> int32 {
+  return x + 1;
+}
+pub func wrap<T>(x: T) -> T {
+  print(helper(1));
+  return x;
+}
+--- output
+2
+8
+
+=== private generic function from another module is an error
+import util;
+print(first(8, 9));
+--- file util.lv
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+--- error
+Tried calling a private function 'first' in 'util'
+
+=== bound not implemented is an error
+trait Show {
+  func show(&self);
+}
+impl Show for int32 {
+  func show(&self) {
+    print(self);
+  }
+}
+func display<T: Show>(x: T) {
+  x.show();
+}
+display(1.5);
+--- error
+'float64' doesn't implement trait 'Show'
+
+=== impl shorthand bound not implemented is an error
+trait Show {
+  func show(&self);
+}
+func twice(x: impl Show) {
+  x.show();
+}
+twice(1);
+--- error
+'int32' doesn't implement trait 'Show'
+
+=== unknown trait as bound is an error
+func f<T: Nothing>(x: T) {
+  print(1);
+}
+--- error
+unknown trait 'Nothing'
+
+=== type parameter that can't be inferred is an error
+func convert<T>(x: int32) -> T {
+  return x as T;
+}
+convert(5);
+--- error
+can't infer type parameter 'T' of 'convert'
+
+=== too many type arguments is an error
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+print(first<int32, int32>(1, 2));
+--- error
+'first' takes 1 type arguments, got 2
+
+=== impl shorthand can't be given explicitly
+trait Show {
+  func show(&self);
+}
+impl Show for int32 {
+  func show(&self) {
+    print(self);
+  }
+}
+func twice(x: impl Show) {
+  x.show();
+}
+twice<int32>(5);
+--- error
+'twice' takes 0 type arguments, got 1
+
+=== type arguments for a non generic function is an error
+func plain(x: int32) -> int32 {
+  return x;
+}
+print(plain<int32>(1));
+--- error
+'plain' isn't generic, it takes no type arguments
+
+=== arguments of different types for the same parameter is an error
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+print(first(1, "a"));
+--- error
+type 'int32' does not match 'String' in function argument
+
+=== error in the body shows up for the instance
+func add_one<T>(x: T) -> T {
+  return x + 1;
+}
+print(add_one("text"));
+--- error
+does not match
+
+=== impl shorthand as return type is an error
+trait Show {
+  func show(&self);
+}
+func make() -> impl Show {
+  return 1;
+}
+--- error
+'impl Trait' is only allowed as a parameter type
+
+=== generic method in a non generic class
+class Box {
+  v: int32 = v;
+
+  Constructor(v: int32);
+
+  pub func pick<T>(&self, x: T) -> T {
+    return x;
+  }
+}
+let b = Box { v: 1 };
+print(b.pick("picked"));
+print(b.pick(5));
+--- output
+picked
+5
+
+=== generic method with a bound
+trait Show {
+  func show(&self);
+}
+impl Show for int32 {
+  func show(&self) {
+    print(self);
+  }
+}
+class Printer {
+  prefix: String = prefix;
+
+  Constructor(prefix: String);
+
+  pub func show_both<T: Show>(&self, x: T) {
+    print(self.prefix);
+    x.show();
+  }
+}
+let p = Printer { prefix: "value:" };
+p.show_both(5);
+--- output
+value:
+5
+
+=== generic method uses fields
+class Counter {
+  count: int32 = count;
+
+  Constructor(count: int32);
+
+  pub func count_as<T>(&self) -> T {
+    return self.count as T;
+  }
+}
+let c = Counter { count: 3 };
+print(c.count_as<float64>());
+--- output
+3.000000
+
+=== generic method calls a normal method
+class Counter {
+  count: int32 = count;
+
+  Constructor(count: int32);
+
+  pub func get(&self) -> int32 {
+    return self.count;
+  }
+
+  pub func with<T>(&self, x: T) -> T {
+    print(get());
+    return x;
+  }
+}
+let c = Counter { count: 9 };
+print(c.with("done"));
+--- output
+9
+done
+
+=== normal method calls a generic method
+class Counter {
+  count: int32 = count;
+
+  Constructor(count: int32);
+
+  pub func echo<T>(&self, x: T) -> T {
+    return x;
+  }
+
+  pub func run(&self) -> int32 {
+    return echo(self.count) + 1;
+  }
+}
+let c = Counter { count: 4 };
+print(c.run());
+--- output
+5
+
+=== method calls a free function
+func helper() -> int32 {
+  return 10;
+}
+class Box {
+  v: int32 = v;
+
+  Constructor(v: int32);
+
+  pub func plus_helper(&self) -> int32 {
+    return self.v + helper();
+  }
+}
+let b = Box { v: 1 };
+print(b.plus_helper());
+--- output
+11
+
+=== method calls a free generic function
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+class Box {
+  v: int32 = v;
+
+  Constructor(v: int32);
+
+  pub func get(&self) -> int32 {
+    return first(self.v, 0);
+  }
+}
+let b = Box { v: 6 };
+print(b.get());
+--- output
+6
+
+=== private generic method can't be called from outside
+class Box {
+  v: int32 = v;
+
+  Constructor(v: int32);
+
+  func pick<T>(&self, x: T) -> T {
+    return x;
+  }
+}
+let b = Box { v: 1 };
+print(b.pick(2));
+--- error
+Tried calling a private function 'pick'
+
+=== explicit type arguments on a non generic method
+class Box {
+  v: int32 = v;
+
+  Constructor(v: int32);
+
+  pub func get(&self) -> int32 {
+    return self.v;
+  }
+}
+let b = Box { v: 1 };
+print(b.get<int32>());
+--- error
+'get' isn't generic, it takes no type arguments
+
+=== less than without a call is not type arguments
+let a = 1;
+let b = 2;
+print(a < b);
+--- output
+true

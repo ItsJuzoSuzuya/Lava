@@ -1,7 +1,15 @@
 import math;
+import shapes;
+import vector;
 
-let sum = add(11, 14);
-print(sum);
+mut vec = Vector<int32>();
+vec.push(20);
+print(vec.get(0));
 
-let s = sqrt(sum);
-print(s);
+let square = Square(20);
+let area = square.area();
+print(area);
+
+let sqrt = sqrt(area);
+print(sqrt);
+

@@ -1,0 +1,560 @@
+=== generic class inferred from a brace initializer
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+let b = Box { value: 5 };
+print(b.value);
+--- output
+5
+
+=== generic class with a string
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+let b = Box { value: "text" };
+print(b.value);
+--- output
+text
+
+=== generic class from a type annotation
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+let b: Box<int64> = { value: 3000000000 };
+print(b.value);
+--- output
+3000000000
+
+=== generic class with explicit type arguments
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+let b = Box<uint8> { value: 255 };
+print(b.value);
+--- output
+255
+
+=== generic class constructor call
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+let b = Box(2.5);
+print(b.value);
+--- output
+2.500000
+
+=== generic class constructor call with explicit type arguments
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+let b = Box<int64>(7);
+print(b.value);
+--- output
+7
+
+=== expected type wins over the literal in a brace initializer
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+let b: Box<int64> = Box { value: 5 };
+print(b.value);
+--- output
+5
+
+=== method returning the type parameter
+class Box<T> {
+  value: T = value;
+
+  Constructor(value: T);
+
+  pub func get(&self) -> T {
+    return self.value;
+  }
+}
+let b = Box { value: 42 };
+print(b.get());
+--- output
+42
+
+=== method with a type parameter argument
+class Box<T> {
+  value: T = value;
+
+  Constructor(value: T);
+
+  pub func pick(&self, other: T) -> T {
+    return other;
+  }
+}
+let b = Box { value: "first" };
+print(b.pick("second"));
+--- output
+second
+
+=== two instances of the same generic class
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+let a = Box { value: 1 };
+let b = Box { value: "one" };
+let c = Box { value: 2 };
+print(a.value);
+print(b.value);
+print(c.value);
+--- output
+1
+one
+2
+
+=== generic class with two type parameters
+class Pair<A, B> {
+  pub first: A = first;
+  pub second: B = second;
+
+  Constructor(first: A, second: B);
+}
+let p = Pair { first: 1, second: "two" };
+print(p.first);
+print(p.second);
+--- output
+1
+two
+
+=== generic class holding a class
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+let b = Box { value: Point { x: 9 } };
+let p = b.value;
+print(p.x);
+--- output
+9
+
+=== nested generic class
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+
+  pub func get(&self) -> T {
+    return self.value;
+  }
+}
+let inner = Box { value: 3 };
+let outer: Box<Box<int32>> = { value: inner };
+let got = outer.get();
+print(got.get());
+--- output
+3
+
+=== generic class as function parameter
+class Box<T> {
+  value: T = value;
+
+  Constructor(value: T);
+
+  pub func get(&self) -> T {
+    return self.value;
+  }
+}
+func show(b: Box<int32>) {
+  print(b.get());
+}
+show(Box { value: 11 });
+--- output
+11
+
+=== generic function taking a generic class
+class Box<T> {
+  value: T = value;
+
+  Constructor(value: T);
+
+  pub func get(&self) -> T {
+    return self.value;
+  }
+}
+func unbox<T>(b: Box<T>) -> T {
+  return b.get();
+}
+print(unbox(Box { value: "unboxed" }));
+--- output
+unboxed
+
+=== generic function returning a generic class
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+func wrap<T>(x: T) -> Box<T> {
+  return Box { value: x };
+}
+let b = wrap(8);
+print(b.value);
+--- output
+8
+
+=== class bound satisfied
+trait Show {
+  func show(&self);
+}
+impl Show for int32 {
+  func show(&self) {
+    print(self);
+  }
+}
+class Shown<T: Show> {
+  value: T = value;
+
+  Constructor(value: T);
+
+  pub func show_value(&self) {
+    let v = self.value;
+    v.show();
+  }
+}
+let s = Shown { value: 77 };
+s.show_value();
+--- output
+77
+
+=== impl for one instance of a generic class
+trait Show {
+  func show(&self);
+}
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+impl Show for Box<int32> {
+  func show(&self) {
+    print(self.value);
+  }
+}
+let b = Box { value: 5 };
+b.show();
+--- output
+5
+
+=== generic class from another module
+import boxes;
+let b = Box { value: 4 };
+print(b.get());
+--- file boxes.lv
+pub class Box<T> {
+  value: T = value;
+
+  Constructor(value: T);
+
+  pub func get(&self) -> T {
+    return self.value;
+  }
+}
+--- output
+4
+
+=== generic enum inferred from the payload
+enum Option<T> {
+  Some => T,
+  None => bool
+}
+let o = Option::Some(42);
+match o {
+  Option::Some(v) => print(v),
+  Option::None(x) => print("none"),
+}
+--- output
+42
+
+=== generic enum from a type annotation
+enum Option<T> {
+  Some => T,
+  None => bool
+}
+let o: Option<String> = Option::None(true);
+match o {
+  Option::Some(v) => print(v),
+  Option::None(x) => print("none"),
+}
+--- output
+none
+
+=== generic enum with explicit type arguments
+enum Option<T> {
+  Some => T,
+  None => bool
+}
+let o = Option<int64>::Some(3000000000);
+match o {
+  Option::Some(v) => print(v),
+  Option::None(x) => print("none"),
+}
+--- output
+3000000000
+
+=== generic enum with a string payload
+enum Option<T> {
+  Some => T,
+  None => bool
+}
+let o = Option::Some("payload");
+match o {
+  Option::Some(v) => print(v),
+  _ => print("other"),
+}
+--- output
+payload
+
+=== print a generic enum
+enum Option<T> {
+  Some => T,
+  None => bool
+}
+let o = Option::Some(5);
+print(o);
+--- output
+5
+
+=== generic enum with two type parameters
+enum Result<T, E> {
+  Ok => T,
+  Err => E
+}
+let r: Result<int32, String> = Result::Err("failed");
+match r {
+  Result::Ok(v) => print(v),
+  Result::Err(e) => print(e),
+}
+--- output
+failed
+
+=== generic function returning a generic enum
+enum Option<T> {
+  Some => T,
+  None => bool
+}
+func some<T>(x: T) -> Option<T> {
+  return Option::Some(x);
+}
+let o = some("wrapped");
+match o {
+  Option::Some(v) => print(v),
+  _ => print("none"),
+}
+--- output
+wrapped
+
+=== generic enum as function parameter
+enum Option<T> {
+  Some => T,
+  None => bool
+}
+func unwrap_or(o: Option<int32>, fallback: int32) -> int32 {
+  mut result = fallback;
+  match o {
+    Option::Some(v) => result = v,
+    _ => result = fallback,
+  }
+  return result;
+}
+print(unwrap_or(Option::Some(3), 0));
+print(unwrap_or(Option::None(true), 9));
+--- output
+3
+9
+
+=== generic method of a generic class with explicit type argument
+class Box<T> {
+  value: T = value;
+
+  Constructor(value: T);
+
+  pub func convert<U>(&self) -> U {
+    return self.value as U;
+  }
+}
+let b = Box { value: 7 };
+print(b.convert<float64>());
+--- output
+7.000000
+
+=== generic method of a generic class inferred from the expected type
+class Box<T> {
+  value: T = value;
+
+  Constructor(value: T);
+
+  pub func convert<U>(&self) -> U {
+    return self.value as U;
+  }
+}
+let b = Box { value: 2.9 };
+let i: int32 = b.convert();
+print(i);
+--- output
+2
+
+=== generic method uses both type parameters
+class Box<T> {
+  value: T = value;
+
+  Constructor(value: T);
+
+  pub func pair_with<U>(&self, other: U) -> Pair<T, U> {
+    return Pair { first: self.value, second: other };
+  }
+}
+class Pair<A, B> {
+  pub first: A = first;
+  pub second: B = second;
+
+  Constructor(first: A, second: B);
+}
+let b = Box { value: 1 };
+let p = b.pair_with("one");
+print(p.first);
+print(p.second);
+--- output
+1
+one
+
+=== generic method on two instances of the class
+class Box<T> {
+  value: T = value;
+
+  Constructor(value: T);
+
+  pub func pick<U>(&self, other: U) -> U {
+    return other;
+  }
+}
+let a = Box { value: 1 };
+let b = Box { value: "x" };
+print(a.pick(2.5));
+print(b.pick(3));
+--- output
+2.500000
+3
+
+=== generic method in an impl is an error
+trait Get {
+  func get(&self) -> int32;
+}
+class Box {
+  v: int32 = v;
+
+  Constructor(v: int32);
+}
+impl Get for Box {
+  func get<T>(&self) -> int32 {
+    return 1;
+  }
+}
+--- error
+can't be generic
+
+=== generic type without type arguments is an error
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+let b: Box = { value: 1 };
+--- error
+generic type 'Box' needs type arguments
+
+=== wrong number of type arguments for a generic class
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+let b: Box<int32, int32> = { value: 1 };
+--- error
+'Box' takes 1 type arguments, got 2
+
+=== generic enum type that can't be inferred
+enum Option<T> {
+  Some => T,
+  None => bool
+}
+let o = Option::None(true);
+--- error
+can't infer type parameter 'T' of 'Option'
+
+=== bound of a generic class not implemented
+trait Show {
+  func show(&self);
+}
+class Shown<T: Show> {
+  value: T = value;
+
+  Constructor(value: T);
+}
+let s = Shown { value: 1 };
+--- error
+'int32' doesn't implement trait 'Show'
+
+=== wrong field type with explicit type arguments
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+let b = Box<int32> { value: "text" };
+--- error
+type 'String' does not match 'int32' in struct initializer field
+
+=== type arguments for a non generic class is an error
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+let p = Point<int32> { x: 1 };
+--- error
+'Point' isn't generic, it takes no type arguments
+
+=== unknown variant of a generic enum
+enum Option<T> {
+  Some => T,
+  None => bool
+}
+let o = Option::Other(1);
+--- error
+enum 'Option' has no variant 'Other'
+
+=== mismatched instances are different types
+class Box<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+}
+let a: Box<int64> = Box { value: "text" };
+--- error
+does not match

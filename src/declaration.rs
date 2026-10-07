@@ -10,19 +10,47 @@ pub enum Visibility {
     Public, Private, Protected
 }
 
+/// A type parameter of a generic function, class or enum, like `T: Show + Clone`
+/// in `func f<T: Show + Clone>(...)`.
+#[derive(Debug, Clone)]
+pub struct TypeParam {
+    /// Name of the parameter. Parameters created from `impl Trait` shorthands
+    /// get a name like `impl Show`, which no written identifier can clash with.
+    pub name: String,
+    /// Traits every type argument for this parameter has to implement.
+    pub bounds: Vec<String>,
+}
+
+impl TypeParam {
+    /// Whether this parameter comes from an `impl Trait` shorthand. Those are
+    /// always inferred and can't be given explicitly as `f<int32>(...)`.
+    pub fn is_hidden(&self) -> bool {
+        self.name.starts_with("impl ")
+    }
+}
+
 /// Type of declarations
+#[derive(Clone)]
 pub enum DeclarationKind {
     Class {
         name: String,
+        /// Empty for non-generic classes. Generic classes are only templates,
+        /// sema creates a class like `Box<int32>` for every set of type arguments.
+        type_params: Vec<TypeParam>,
         fields: Vec<Field>,
         methods: Vec<Declaration>,
     },
     Enum {
         name: String,
+        /// Empty for non-generic enums, see [`DeclarationKind::Class`].
+        type_params: Vec<TypeParam>,
         fields: Vec<(String, u32, Type, Span)>
     },
     Function {
         name: String,
+        /// Empty for non-generic functions. Generic functions are only templates,
+        /// sema creates a non-generic instance for every set of type arguments.
+        type_params: Vec<TypeParam>,
         params: Vec<Param>,
         body: Option<Vec<Stmt>>,
         return_type: Option<Type>,
@@ -30,9 +58,23 @@ pub enum DeclarationKind {
         mangled: Option<String>,
         visibility: Visibility 
     },
+    Trait {
+        name: String,
+        methods: Vec<Declaration>
+    },
+    /// `impl trait_name for target { methods }`.
+    ///
+    /// Sema copies the trait's default methods that aren't overridden into
+    /// `methods`, so afterwards it holds every method of the trait.
+    Impl {
+        trait_name: String,
+        target: Type,
+        methods: Vec<Declaration>,
+    },
 }
 
 /// A declaration built by [`Declaration::new`], with the [`Span`] where it occurred.
+#[derive(Clone)]
 pub struct Declaration {
     pub kind: DeclarationKind,
     pub span: Span,
@@ -49,13 +91,17 @@ impl Declaration {
 impl Declare for Declaration {
     fn declare<'ctx>(&self, ctx: &mut CodegenContext<'ctx>) {
         match &self.kind {
-            DeclarationKind::Class { name, fields, methods } => {
+            // Generic classes and enums are templates, sema hands their instances to codegen instead
+            DeclarationKind::Class { type_params, .. } | DeclarationKind::Enum { type_params, .. }
+                if !type_params.is_empty() => {}
+            DeclarationKind::Class { name, fields, methods, .. } => {
                 let named_fields: Vec<(String, _)> = fields.iter()
                     .map(|p| (p.name.clone(), p.ty.to_llvm(ctx)))
                     .collect();
                 let field_types: Vec<_> = named_fields.iter().map(|(_, t)| *t).collect();
-                ctx.context.opaque_struct_type(name).set_body(&field_types, false);
+                ctx.struct_type(name).set_body(&field_types, false);
                 ctx.push_class(name.to_string(), named_fields);
+                ctx.class_field_types.insert(name.to_string(), fields.iter().map(|f| f.ty.clone()).collect());
 
                 ctx.current_class = Some(name.clone());
                 for method in methods {
@@ -63,7 +109,7 @@ impl Declare for Declaration {
                 }
                 ctx.current_class = None;
             }
-            DeclarationKind::Enum { name, fields } => {
+            DeclarationKind::Enum { name, fields, .. } => {
                 let named_fields: Vec<(String, _)> = fields.iter()
                     .map(|p| (p.0.clone(), p.2.to_llvm(ctx)))
                     .collect();
@@ -76,7 +122,7 @@ impl Declare for Declaration {
 
                 let i32_ty = ctx.context.i32_type();
                 let payload_ty = ctx.context.i8_type().array_type(max_payload as u32);
-                ctx.context.opaque_struct_type(name)
+                ctx.struct_type(name)
                     .set_body(&[i32_ty.into(), payload_ty.into()], false);
 
                 for (variant, _, payload_ty, ty_span) in fields.iter() {
@@ -96,6 +142,8 @@ impl Declare for Declaration {
 
                 ctx.push_enum(name.to_string(), named_fields);
             }
+            // Generic functions are templates, sema hands their instances to codegen instead
+            DeclarationKind::Function { type_params, .. } if !type_params.is_empty() => {}
             DeclarationKind::Function { params, return_type, mangled, .. } => {
                 let mangled = mangled.as_ref()
                     .expect("function mangled name missing — sema must run first");
@@ -115,6 +163,16 @@ impl Declare for Declaration {
                 };
                 ctx.module.add_function(mangled, fn_type, None);
                 ctx.push_func(mangled.clone(), params.to_vec());
+            },
+            // Traits only describe methods, there's nothing to generate
+            DeclarationKind::Trait { .. } => {}
+            DeclarationKind::Impl { target, methods, .. } => {
+                // Impl methods are methods of the target, so `self` refers to it
+                ctx.current_class = target.owner_name();
+                for method in methods {
+                    method.declare(ctx);
+                }
+                ctx.current_class = None;
             }
         }
     }
@@ -126,6 +184,8 @@ impl Display for DeclarationKind {
             DeclarationKind::Class { name, .. }    => write!(f, "Class Declaration: {}", name),
             DeclarationKind::Enum { name, .. }     => write!(f, "Emum Declaration: {}", name),
             DeclarationKind::Function { name, .. } => write!(f, "Function Declaration: func {}", name),
+            DeclarationKind::Trait { name, .. } => write!(f, "Trait Declaration: {}", name),
+            DeclarationKind::Impl { trait_name, target, .. } => write!(f, "Impl Declaration: {} for {}", trait_name, target),
         }
     }
 }
@@ -133,7 +193,9 @@ impl Display for DeclarationKind {
 impl Codegen for Declaration {
     fn codegen<'ctx, 'a>(&self, ctx: &'a mut CodegenContext<'ctx>) -> Option<Box<BasicValueEnum<'ctx>>> {
         match &self.kind {
-            DeclarationKind::Class { name, fields, methods } => {
+            DeclarationKind::Class { type_params, .. } | DeclarationKind::Enum { type_params, .. }
+                if !type_params.is_empty() => None,
+            DeclarationKind::Class { name, fields, methods, .. } => {
                 ctx.current_class = Some(name.clone());
                 ctx.current_class_fields = Some(fields.clone());
                 for method in methods {
@@ -143,7 +205,16 @@ impl Codegen for Declaration {
                 ctx.current_class_fields = None;
                 None
             }
-            DeclarationKind::Enum { name, fields } => {
+            DeclarationKind::Trait { .. } => None,
+            DeclarationKind::Impl { target, methods, .. } => {
+                ctx.current_class = target.owner_name();
+                for method in methods {
+                    method.codegen(ctx);
+                }
+                ctx.current_class = None;
+                None
+            }
+            DeclarationKind::Enum { name, fields, .. } => {
                 let prev_block = ctx.builder.get_insert_block();
                 let struct_ty = ctx.module.get_struct_type(name)
                     .expect("enum struct not defined — declare pass must run first");
@@ -180,6 +251,7 @@ impl Codegen for Declaration {
                 }
                 None
             }
+            DeclarationKind::Function { type_params, .. } if !type_params.is_empty() => None,
             DeclarationKind::Function { params, body, return_type, mangled, .. } => {
                 let mangled = mangled.as_ref()
                     .expect("function mangled name missing — sema must run first");
@@ -189,6 +261,8 @@ impl Codegen for Declaration {
                 let prev_block = ctx.builder.get_insert_block()?;
                 // Params and locals of this function must not leak into the outer scope
                 let prev_scope = ctx.scope.clone();
+                // The function owns its own `Unique`s, the surrounding code's are freed elsewhere
+                let prev_drops = std::mem::replace(&mut ctx.drop_scopes, vec![Vec::new()]);
                 let bb = ctx.context.append_basic_block(function, "entry");
                 ctx.builder.position_at_end(bb);
 
@@ -210,8 +284,19 @@ impl Codegen for Declaration {
                 for (i, param) in params.iter().enumerate() {
                     if ctx.func_has_self(mangled) && i == 0 {
                         let self_val = function.get_nth_param(0)?;
+                        // `self` is passed as a pointer to the receiver. For anything but
+                        // classes that pointer is used as the variable's storage, so `self`
+                        // reads and writes the caller's value directly
+                        if !matches!(param.ty, Type::Class(_)) {
+                            let ty = param.ty.to_llvm(ctx);
+                            ctx.push_var("self".to_string(), ty, self_val.into_pointer_value(), param.ty.class_name());
+                            continue;
+                        }
                         ctx.builder.build_store(self_ptr, self_val).unwrap();
-                        ctx.push_var("self".to_string(), ptr_ty.into(), self_ptr, self_class_name.clone());
+                        // Instances of generic methods are generated outside their class,
+                        // so the class comes from the parameter's type
+                        let class_name = param.ty.class_name().or_else(|| self_class_name.clone());
+                        ctx.push_var("self".to_string(), ptr_ty.into(), self_ptr, class_name);
                         continue;
                     }
 
@@ -219,6 +304,11 @@ impl Codegen for Declaration {
                     let value = function.get_nth_param(i as u32)?;
                     let ptr = ctx.builder.build_alloca(ty, &param.name).unwrap();
                     ctx.builder.build_store(ptr, value).unwrap();
+                    // Owned memory passed in, moved or copied, belongs to the function from now on
+                    if ctx.owns_memory(&param.ty) {
+                        ctx.push_owned_var(param.name.to_string(), ptr, param.ty.clone());
+                        continue;
+                    }
                     ctx.push_var(param.name.to_string(), ty, ptr, param.ty.class_name());
                 }
 
@@ -249,6 +339,7 @@ impl Codegen for Declaration {
                     .and_then(|b| b.get_terminator())
                     .is_none()
                 {
+                    ctx.emit_all_drops();
                     if is_ctor {
                         let class_name = self_class_name.clone().unwrap();
                         let struct_ty = ctx.module.get_struct_type(&class_name).unwrap();
@@ -257,11 +348,15 @@ impl Codegen for Declaration {
                         ctx.builder.build_return(Some(&loaded)).unwrap();
                     } else if return_type.is_none() {
                         ctx.builder.build_return(None).unwrap();
+                    } else {
+                        // Reached after an `if` whose branches all return, but nothing else
+                        ctx.builder.build_unreachable().unwrap();
                     }
                 }
 
                 ctx.builder.position_at_end(prev_block);
                 ctx.scope = prev_scope;
+                ctx.drop_scopes = prev_drops;
                 None
             },
         }

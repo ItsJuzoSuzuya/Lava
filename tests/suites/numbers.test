@@ -322,13 +322,18 @@ print(sqrt(x));
 --- output
 2.500000
 
-=== sqrt of an int literal is an error
+=== sqrt of an int literal widens to float64
 print(sqrt(4));
---- error
-type 'int32' does not match 'float32' in function argument
+--- output
+2.000000
 
 === sqrt result in arithmetic
-let x: float32 = sqrt(9.0) + 1.0;
+let x: float64 = sqrt(9.0) + 1.0;
 print(x);
 --- output
 4.000000
+
+=== sqrt result doesn't narrow to float32
+let x: float32 = sqrt(9.0);
+--- error
+type 'float64' does not match 'float32' in variable declaration

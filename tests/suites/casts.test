@@ -1,0 +1,278 @@
+=== int32 as float32
+let x: int32 = 7;
+print(x as float32);
+--- output
+7.000000
+
+=== int32 as float32 into sqrt
+let x: int32 = 16;
+print(sqrt(x as float32));
+--- output
+4.000000
+
+=== int64 as float64
+let x: int64 = 9000000000;
+print(x as float64);
+--- output
+9000000000.000000
+
+=== uint64 as float64
+let x: uint64 = 18000000000;
+print(x as float64);
+--- output
+18000000000.000000
+
+=== float as int cuts off the fraction
+let x = 2.9;
+print(x as int32);
+--- output
+2
+
+=== negative float as int cuts toward zero
+let x = -2.9;
+print(x as int32);
+--- output
+-2
+
+=== float too big for int32 saturates
+let x = 3000000000.0;
+print(x as int32);
+--- output
+2147483647
+
+=== float too small for int32 saturates
+let x = -3000000000.0;
+print(x as int32);
+--- output
+-2147483648
+
+=== negative float as unsigned saturates to zero
+let x = -5.5;
+print(x as uint8);
+--- output
+0
+
+=== float too big for uint8 saturates
+let x = 300.0;
+print(x as uint8);
+--- output
+255
+
+=== NaN as int is zero
+let z = 0.0;
+let nan = z / z;
+print(nan as int32);
+--- output
+0
+
+=== float32 as int64
+let x: float32 = 1.5;
+print(x as int64);
+--- output
+1
+
+=== int32 as int8 wraps
+let x: int32 = 300;
+print(x as int8);
+--- output
+44
+
+=== int32 as uint8 wraps
+let x: int32 = 511;
+print(x as uint8);
+--- output
+255
+
+=== int64 as int32 wraps
+let x: int64 = 4294967297;
+print(x as int32);
+--- output
+1
+
+=== negative int32 as uint32 reinterprets
+let x: int32 = -1;
+print(x as uint32);
+--- output
+4294967295
+
+=== negative int8 as uint8 reinterprets
+let x: int8 = -2;
+print(x as uint8);
+--- output
+254
+
+=== uint32 as int32 reinterprets
+let x: uint32 = 4000000000;
+print(x as int32);
+--- output
+-294967296
+
+=== int8 as int64 sign extends
+let x: int8 = -5;
+print(x as int64);
+--- output
+-5
+
+=== uint8 as int64 zero extends
+let x: uint8 = 250;
+print(x as int64);
+--- output
+250
+
+=== negative int8 as uint64 sign extends first
+let x: int8 = -1;
+print(x as uint64);
+--- output
+18446744073709551615
+
+=== float64 as float32 rounds
+let x: float64 = 0.1;
+let y: float32 = x as float32;
+print(y);
+--- output
+0.100000
+
+=== float32 as float64
+let x: float32 = 2.5;
+print(x as float64);
+--- output
+2.500000
+
+=== same type is a no-op
+let x: int32 = 5;
+print(x as int32);
+--- output
+5
+
+=== true as int32
+let b = true;
+print(b as int32);
+--- output
+1
+
+=== false as uint8
+let b = false;
+print(b as uint8);
+--- output
+0
+
+=== bool as float
+let b = true;
+print(b as float64);
+--- output
+1.000000
+
+=== chained conversions
+let x: float64 = 300.7;
+print(x as int32 as int8);
+--- output
+44
+
+=== as binds tighter than multiplication
+let x: int32 = 3;
+print(x as float64 * 1.5);
+--- output
+4.500000
+
+=== as binds tighter than addition on the right side
+let a: int64 = 10;
+let b: int32 = 5;
+print(a + b as int64);
+--- output
+15
+
+=== as binds looser than negation
+let x: int32 = 1;
+print(-x as uint8);
+--- output
+255
+
+=== as on a function call
+func half() -> float64 {
+  return 7.5;
+}
+print(half() as int32);
+--- output
+7
+
+=== as on a field
+class Box {
+  pub v: float32 = v;
+
+  Constructor(v: float32);
+}
+let b = Box { v: 9.9 };
+print(b.v as int32);
+--- output
+9
+
+=== as in a function argument
+func show(x: int8) {
+  print(x);
+}
+let big: int32 = 258;
+show(big as int8);
+--- output
+2
+
+=== result of as stored in a variable
+let x: float64 = 3.99;
+let y = x as int32;
+print(y + 1);
+--- output
+4
+
+=== int literal as int64
+print(3000000000 as int64);
+--- output
+3000000000
+
+=== int literal as float32
+print(5 as float32);
+--- output
+5.000000
+
+=== float literal as int32
+print(2.5 as int32);
+--- output
+2
+
+=== int literal that doesn't fit the target is an error
+print(300 as int8);
+--- error
+literal '300' doesn't fit into 'int8'
+
+=== int as bool is an error
+let x = 1;
+print(x as bool);
+--- error
+cannot convert 'int32' to 'bool'
+
+=== string as int is an error
+let s = "5";
+print(s as int32);
+--- error
+cannot convert 'String' to 'int32'
+
+=== int as string is an error
+let x = 5;
+print(x as String);
+--- error
+cannot convert 'int32' to 'String'
+
+=== class as int is an error
+class Box {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+let b = Box { v: 1 };
+print(b as int32);
+--- error
+cannot convert
+
+=== as without a type is an error
+let x = 5;
+print(x as);
+--- error
+No type for Token

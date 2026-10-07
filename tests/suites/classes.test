@@ -342,11 +342,11 @@ print(x.y);
 --- error
 is not an object
 
-=== method call on a non object
+=== unknown method on an int
 let x = 5;
 x.go();
 --- error
-is not an object
+unknown function 'go'
 
 === constructor marked pub is an error
 class Box {
@@ -383,3 +383,259 @@ let b = make(9);
 print(b.v);
 --- output
 9
+
+=== field of a field
+class Inner {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+class Outer {
+  pub inner: Inner = inner;
+
+  Constructor(inner: Inner);
+}
+let o = Outer { inner: Inner { v: 7 } };
+print(o.inner.v);
+--- output
+7
+
+=== assign a field of a field
+class Inner {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+class Outer {
+  pub inner: Inner = inner;
+
+  Constructor(inner: Inner);
+}
+mut o = Outer { inner: Inner { v: 7 } };
+o.inner.v = 8;
+print(o.inner.v);
+--- output
+8
+
+=== assigning a field of a field needs mut
+class Inner {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+class Outer {
+  pub inner: Inner = inner;
+
+  Constructor(inner: Inner);
+}
+let o = Outer { inner: Inner { v: 7 } };
+o.inner.v = 8;
+--- error
+Tried reassigning a value to the unmutable Variable 'o'
+
+=== method on a field
+class Inner {
+  v: int32 = v;
+
+  Constructor(v: int32);
+
+  pub func get(&self) -> int32 {
+    return self.v;
+  }
+}
+class Outer {
+  pub inner: Inner = inner;
+
+  Constructor(inner: Inner);
+}
+let o = Outer { inner: Inner { v: 5 } };
+print(o.inner.get());
+--- output
+5
+
+=== method on a field of self
+class Inner {
+  v: int32 = v;
+
+  Constructor(v: int32);
+
+  pub func get(&self) -> int32 {
+    return self.v;
+  }
+}
+class Outer {
+  inner: Inner = inner;
+
+  Constructor(inner: Inner);
+
+  pub func inner_value(&self) -> int32 {
+    return self.inner.get() + 1;
+  }
+}
+let o = Outer { inner: Inner { v: 5 } };
+print(o.inner_value());
+--- output
+6
+
+=== mutating method on a field of self
+class Counter {
+  pub count: int32 = count;
+
+  Constructor(count: int32);
+
+  pub func bump(mut &self) {
+    self.count = self.count + 1;
+  }
+}
+class Holder {
+  pub counter: Counter = counter;
+
+  Constructor(counter: Counter);
+
+  pub func bump_counter(mut &self) {
+    self.counter.bump();
+  }
+}
+mut h = Holder { counter: Counter { count: 1 } };
+h.bump_counter();
+h.counter.bump();
+print(h.counter.count);
+--- output
+3
+
+=== mutating method on a field needs mut
+class Counter {
+  pub count: int32 = count;
+
+  Constructor(count: int32);
+
+  pub func bump(mut &self) {
+    self.count = self.count + 1;
+  }
+}
+class Holder {
+  pub counter: Counter = counter;
+
+  Constructor(counter: Counter);
+}
+let h = Holder { counter: Counter { count: 1 } };
+h.counter.bump();
+--- error
+method 'bump' changes 'self', so 'h' has to be mutable
+
+=== field of a call result
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+func make() -> Point {
+  return Point { x: 4 };
+}
+print(make().x);
+--- output
+4
+
+=== method on a call result
+class Point {
+  x: int32 = x;
+
+  Constructor(x: int32);
+
+  pub func doubled(&self) -> int32 {
+    return self.x * 2;
+  }
+}
+func make() -> Point {
+  return Point { x: 4 };
+}
+print(make().doubled());
+--- output
+8
+
+=== method returning an object with a method
+class Point {
+  x: int32 = x;
+
+  Constructor(x: int32);
+
+  pub func moved(&self, by: int32) -> Point {
+    return Point { x: self.x + by };
+  }
+
+  pub func get(&self) -> int32 {
+    return self.x;
+  }
+}
+let p = Point { x: 1 };
+print(p.moved(2).moved(3).get());
+--- output
+6
+
+=== field through a reference parameter
+class Inner {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+}
+class Outer {
+  pub inner: Inner = inner;
+
+  Constructor(inner: Inner);
+}
+func show(o: &Outer) {
+  print(o.inner.v);
+}
+let o = Outer { inner: Inner { v: 3 } };
+show(&o);
+--- output
+3
+
+=== method through a reference parameter
+class Point {
+  x: int32 = x;
+
+  Constructor(x: int32);
+
+  pub func get(&self) -> int32 {
+    return self.x;
+  }
+}
+func show(p: &Point) {
+  print(p.get());
+}
+let p = Point { x: 2 };
+show(&p);
+--- output
+2
+
+=== enum tag of a field
+enum Light {
+  Red => int32,
+  Green => int32
+}
+class Lamp {
+  pub light: Light = light;
+
+  Constructor(light: Light);
+}
+let l = Lamp { light: Light::Green(0) };
+print(l.light.tag);
+--- output
+1
+
+=== private field of a field is an error
+class Inner {
+  v: int32 = v;
+
+  Constructor(v: int32);
+}
+class Outer {
+  pub inner: Inner = inner;
+
+  Constructor(inner: Inner);
+}
+let o = Outer { inner: Inner { v: 7 } };
+print(o.inner.v);
+--- error
+Tried accessing a private field 'v'

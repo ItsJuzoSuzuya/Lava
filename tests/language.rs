@@ -148,13 +148,23 @@ fn run_suite(suite: &str) {
 
 #[test] fn arithmetic()  { run_suite("arithmetic"); }
 #[test] fn basics()      { run_suite("basics"); }
+#[test] fn buffer()      { run_suite("buffer"); }
+#[test] fn casts()       { run_suite("casts"); }
 #[test] fn classes()     { run_suite("classes"); }
+#[test] fn control_flow() { run_suite("control_flow"); }
 #[test] fn conversions() { run_suite("conversions"); }
 #[test] fn enums()       { run_suite("enums"); }
 #[test] fn errors()      { run_suite("errors"); }
 #[test] fn functions()   { run_suite("functions"); }
+#[test] fn generics()    { run_suite("generics"); }
+#[test] fn generic_types() { run_suite("generic_types"); }
 #[test] fn matching()    { run_suite("matching"); }
 #[test] fn modules()     { run_suite("modules"); }
+#[test] fn mutability()  { run_suite("mutability"); }
 #[test] fn negation()    { run_suite("negation"); }
 #[test] fn numbers()     { run_suite("numbers"); }
+#[test] fn owning_classes() { run_suite("owning_classes"); }
 #[test] fn refs()        { run_suite("refs"); }
+#[test] fn traits()      { run_suite("traits"); }
+#[test] fn unique()      { run_suite("unique"); }
+#[test] fn vector()      { run_suite("vector"); }

@@ -29,9 +29,13 @@ pub enum Token {
 
   Class,
   Constructor,
+  Else,
   Enum,
   False,
+  For,
   Func,
+  If,
+  Impl,
   Let,
   Match,
   Mut,
@@ -39,11 +43,18 @@ pub enum Token {
   Pub, 
   Return,
   SelfRef,
+  Trait,
   True,
+  While,
   Import,
+  As,
 
   Arrow,
   ColonColon,
+  EqEq,
+  GtEq,
+  LtEq,
+  NotEq,
   ThickArrow,
 
   Assign, 
@@ -52,8 +63,10 @@ pub enum Token {
   Comma,
   Divide,
   Dot,
+  Gt,
   LBrace,
   LParen,
+  Lt,
   Minus,
   Multiply,
   Plus,
@@ -87,22 +100,33 @@ impl Display for Token {
 
             Token::Print        => write!(f, "print"),
             Token::Func         => write!(f, "func"),
+            Token::If           => write!(f, "if"),
+            Token::Else         => write!(f, "else"),
+            Token::While        => write!(f, "while"),
+            Token::For          => write!(f, "for"),
+            Token::Impl         => write!(f, "impl"),
             Token::False        => write!(f, "false"),
             Token::Let          => write!(f, "let"),
             Token::Return       => write!(f, "return"),
             Token::Class        => write!(f, "class"),
             Token::Constructor  => write!(f, "Constructor"),
             Token::SelfRef      => write!(f, "self"),
+            Token::Trait        => write!(f, "trait"),
             Token::Match        => write!(f, "match"),
             Token::Mut          => write!(f, "mut"),
             Token::Pub          => write!(f, "pub"),
             Token::Enum         => write!(f, "enum"),
             Token::True         => write!(f, "true"),
             Token::Import       => write!(f, "import"),
+            Token::As           => write!(f, "as"),
 
             Token::Arrow        => write!(f, "->"),
             Token::ColonColon   => write!(f, "::"),
             Token::ThickArrow   => write!(f, "=>"),
+            Token::EqEq         => write!(f, "=="),
+            Token::NotEq        => write!(f, "!="),
+            Token::LtEq         => write!(f, "<="),
+            Token::GtEq         => write!(f, ">="),
 
             Token::LParen       => write!(f, "("),
             Token::RParen       => write!(f, ")"),
@@ -118,6 +142,8 @@ impl Display for Token {
             Token::Divide       => write!(f, "/"),
             Token::Dot          => write!(f, "."),
             Token::BAnd         => write!(f, "&"),
+            Token::Lt           => write!(f, "<"),
+            Token::Gt           => write!(f, ">"),
 
             Token::FloatLiteral(value)      => write!(f, "{:?}", value),
             Token::Identifier(name)         => write!(f, "{}", name),
@@ -129,6 +155,19 @@ impl Display for Token {
 }
 
 impl Token {
+    /// Whether this is a comparison operator like `==` or `<`, which gives a `bool`.
+    pub fn is_comparison(&self) -> bool {
+        matches!(self, Token::EqEq | Token::NotEq | Token::Lt | Token::LtEq | Token::Gt | Token::GtEq)
+    }
+
+    /// Whether this is a built-in type keyword like `int32` or `String`.
+    pub fn is_type_keyword(&self) -> bool {
+        matches!(self,
+            Token::BoolTy | Token::Float32Ty | Token::Float64Ty
+            | Token::Int8Ty | Token::Int16Ty | Token::Int32Ty | Token::Int64Ty | Token::StringTy
+            | Token::UInt8Ty | Token::UInt16Ty | Token::UInt32Ty | Token::UInt64Ty)
+    }
+
     /// Converts a type token into its [`Type`].
     ///
     /// # Panics
@@ -162,6 +201,10 @@ impl Token {
         match (c1, c2) {
             ('-', '>') => Some(Token::Arrow),
             (':', ':') => Some(Token::ColonColon),
+            ('=', '=') => Some(Token::EqEq),
+            ('>', '=') => Some(Token::GtEq),
+            ('<', '=') => Some(Token::LtEq),
+            ('!', '=') => Some(Token::NotEq),
             ('=', '>') => Some(Token::ThickArrow),
             _ => None,
         }
@@ -186,6 +229,8 @@ impl Token {
             '/' => { Some(Token::Divide) }
             '.' => { Some(Token::Dot) }
             '&' => { Some(Token::BAnd) }
+            '<' => { Some(Token::Lt) }
+            '>' => { Some(Token::Gt) }
             _ => None
         }
     }
@@ -212,17 +257,24 @@ impl Token {
             "class"         => Token::Class,
             "Constructor"   => Token::Constructor,
             "func"          => Token::Func,
+            "if"            => Token::If,
+            "else"          => Token::Else,
+            "while"         => Token::While,
+            "for"           => Token::For,
+            "impl"          => Token::Impl,
             "false"         => Token::False,
             "print"         => Token::Print,
             "let"           => Token::Let,
             "return"        => Token::Return,
             "self"          => Token::SelfRef,
+            "trait"         => Token::Trait,
             "true"          => Token::True,
             "mut"           => Token::Mut,
             "match"         => Token::Match,
             "pub"           => Token::Pub,
             "enum"          => Token::Enum,
             "import"        => Token::Import,
+            "as"            => Token::As,
             _               => Token::Identifier(token.to_string())
         }
     }
