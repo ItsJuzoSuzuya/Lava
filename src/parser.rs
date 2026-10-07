@@ -1,7 +1,6 @@
 use std::mem::discriminant;
 
-use crate::{declaration::{Declaration, DeclarationKind, TypeParam, Visibility}, expression::{Expr, ExprKind}, field::Field, lexer::{LexError, LexErrorKind, Lexer}, param::Param, span::Span, statement::{MatchArm, Pattern, Stmt, StmtKind}, token::Token, r#type::Type};
-use crate::ModuleGraph;
+use crate::{declaration::{Declaration, DeclarationKind, TypeParam, Visibility}, diagnostic, expression::{Expr, ExprKind}, field::Field, lexer::{LexError, LexErrorKind, Lexer}, param::Param, span::Span, statement::{MatchArm, Pattern, Stmt, StmtKind}, token::Token, r#type::Type};
 
 /// Errors that can occur while parsing a source file.
 enum ParseError {
@@ -14,47 +13,31 @@ enum ParseError {
 }
 
 impl ParseError {
-    /// Panics with an error message for this error.
+    /// Stops compiling with the message for this error, see [`diagnostic::throw`].
     ///
     /// `source` is the parsed source code, used to print the offending line.
     fn throw(self, source: &str) -> ! {
-        match self {
-            ParseError::ParamTypeMissing { span, context } => {
-                panic!("\nerror: parameter needs a clear type declaration {} \n  --> {}:{}\n",
-                    context, span.line + 1, span.col + 1)
-            }
-            ParseError::ParamTypeNotAllowed { span } => {
-                panic!("\nerror: parameter name can only be an Identifier or self \n  --> {}:{}\n",
-                    span.line + 1, span.col + 1)
-            }
-            ParseError::UnexpectedEOF { span, context } => {
-                panic!("\nerror: unexpected end of file {}\n  --> {}:{}\n",
-                    context, span.line + 1, span.col + 1)
-            }
-            ParseError::UnexpectedToken { expected, got, span, context } => {
-                let line_txt = source.lines().nth(span.line).unwrap_or("");
-                let pointer = " ".repeat(span.col) + "^";
-                panic!("\nerror: expected '{}' {}, got '{}'\n  --> {}:{}\n   |\n   | {}\n   | {}\n",
-                    expected, context, got, span.line + 1, span.col + 1, line_txt, pointer)
-            }
-            ParseError::ExpectedDeclaration { got, span, context } => {
-                let line_txt = source.lines().nth(span.line).unwrap_or("");
-                let pointer = " ".repeat(span.col) + "^";
-                panic!("\nerror: expected declaration {}, got '{}'\n  --> {}:{}\n   |\n   | {}\n   | {}\n",
-                    context, got, span.line + 1, span.col + 1, line_txt, pointer)
-            }
+        let (message, span) = match self {
+            ParseError::ParamTypeMissing { span, context } =>
+                (format!("parameter needs a clear type declaration {}", context), span),
+            ParseError::ParamTypeNotAllowed { span } =>
+                ("parameter name can only be an Identifier or self".to_string(), span),
+            ParseError::UnexpectedEOF { span, context } =>
+                (format!("unexpected end of file {}", context), span),
+            ParseError::UnexpectedToken { expected, got, span, context } =>
+                (format!("expected '{}' {}, got '{}'", expected, context, got), span),
+            ParseError::ExpectedDeclaration { got, span, context } =>
+                (format!("expected declaration {}, got '{}'", context, got), span),
             ParseError::Lex(LexError { kind, span }) => {
-                let msg = match kind {
+                let message = match kind {
                     LexErrorKind::UnexpectedChar(c)      => format!("unexpected character '{}'", c),
                     LexErrorKind::UnterminatedString     => "unterminated string literal".to_string(),
                     LexErrorKind::NumberOutOfRange(num)  => format!("number '{}' doesn't fit into int64", num),
                 };
-                let line_txt = source.lines().nth(span.line).unwrap_or("");
-                let pointer = " ".repeat(span.col) + "^";
-                panic!("\nerror: {}\n  --> {}:{}\n   |\n   | {}\n   | {}\n",
-                    msg, span.line + 1, span.col + 1, line_txt, pointer)
+                (message, span)
             }
-        }
+        };
+        diagnostic::throw(message, Some(span), source)
     }
 }
 
@@ -84,28 +67,10 @@ impl Parser {
         Self { lexer: Lexer::new(string), allow_brace_init: true, type_params: vec![], impl_params: None }
     }
 
-    /// Parses the whole file and returns only its import statements.
-    ///
-    /// Used for building the [`ModuleGraph`] before the modules are parsed for
-    /// compilation with [`Parser::parse_file`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if the file contains a syntax error.
-    pub fn parse_imports(&mut self, ) -> Vec<StmtKind> {
-        let mut ast = vec![];
-        while let Some(stmt) = self.parse_statement(){
-            if matches!(stmt.kind, StmtKind::Import(_)) {
-                ast.push(stmt.kind);
-            }
-        }
-        ast
-    }
-
     /// Builds the abstract syntax tree by parsing the whole file.
     ///
-    /// Skips import statements, since the [`ModuleGraph`] already collected them
-    /// through [`Parser::parse_imports`].
+    /// Skips import statements, since the [`ModuleGraph`](crate::module::ModuleGraph)
+    /// already collected them.
     ///
     /// # Panics
     ///
@@ -447,11 +412,10 @@ impl Parser {
             // Negative int literal, like `-2`
             Token::Minus => match self.next_token() {
                 (Token::IntLiteral(v), _) => (Pattern::Literal(Expr::new(ExprKind::IntLiteral(-v), span.clone())), span),
-                (other, other_span) => panic!("\nerror: '-{}' is not a valid pattern\n  --> {}:{}\n",
-                    other, other_span.line + 1, other_span.col + 1),
+                (other, other_span) =>
+                    diagnostic::throw(format!("'-{}' is not a valid pattern", other), Some(other_span), &self.lexer.source),
             },
-            other => panic!("\nerror: '{}' is not a valid pattern\n  --> {}:{}\n",
-                other, span.line + 1, span.col + 1),
+            other => diagnostic::throw(format!("'{}' is not a valid pattern", other), Some(span), &self.lexer.source),
         }
     }
 
@@ -678,7 +642,10 @@ impl Parser {
         while !matches!(self.peek_or_eof("while parsing body"), (Token::RBrace, _)) {
             match self.parse_statement() {
                 Some(s) => body.push(s),
-                None => panic!("unexpected end of file while parsing body"),
+                None => {
+                    let span = self.peek().1;
+                    ParseError::UnexpectedEOF { span, context: "while parsing body" }.throw(&self.lexer.source)
+                }
             }
         }
 
@@ -856,7 +823,7 @@ impl Parser {
             }
             Token::Constructor => {
                 if matches!(visibility, Visibility::Public) {
-                    panic!("Constructors are always public — `pub` is redundant");
+                    diagnostic::throw("constructors are always public, `pub` is redundant", Some(next_span), &self.lexer.source);
                 }
                 self.consume(); // consume 'Constructor'
                 let decl_kind = self.parse_constructor(&class_name);
@@ -953,8 +920,7 @@ impl Parser {
                 self.consume(); // 'impl'
                 let bounds = self.parse_trait_bounds();
                 let Some(impl_params) = self.impl_params.as_mut() else {
-                    panic!("\nerror: 'impl Trait' is only allowed as a parameter type\n  --> {}:{}\n",
-                        span.line + 1, span.col + 1)
+                    diagnostic::throw("'impl Trait' is only allowed as a parameter type", Some(span), &self.lexer.source)
                 };
 
                 // Every `impl Trait` parameter is its own type parameter, even with the same bounds
@@ -1136,7 +1102,7 @@ impl Parser {
         };
         if name == "self" {
             let class_name = parent
-                .expect("`self` parameter outside of a class method")
+                .unwrap_or_else(|| diagnostic::throw("'self' parameter outside of a class method", Some(first_param.span.clone()), &self.lexer.source))
                 .to_string();
             return Param {
                 name,
@@ -1242,7 +1208,14 @@ impl Parser {
                 // `let b: Box<int32> = { ... }` passes the type arguments on
                 let (class, type_args) = match &typedef {
                     Some(Type::Generic { name, args }) => (name.clone(), args.clone()),
-                    other => (other.as_ref().and_then(Type::class_name).expect("type undefined"), vec![]),
+                    other => {
+                        let class = other.as_ref().and_then(Type::class_name).unwrap_or_else(|| diagnostic::throw(
+                            "a brace initializer needs a class type annotation, like `let p: Point = { ... }`",
+                            Some(span.clone()),
+                            &self.lexer.source,
+                        ));
+                        (class, vec![])
+                    }
                 };
                 let kind = self.parse_brace_inst(class, type_args);
                 Expr::new(kind, span)
@@ -1392,8 +1365,7 @@ impl Parser {
             Token::BAnd             => self.parse_refrence(),
             Token::SelfRef          => self.parse_identifier("self".to_string(), span.clone()),
             Token::StringLiteral(literal) => ExprKind::StringLiteral(literal),
-            other => panic!("\nerror: '{}' is not a valid expression\n  --> {}:{}\n",
-                other, span.line + 1, span.col + 1),
+            other => diagnostic::throw(format!("'{}' is not a valid expression", other), Some(span), &self.lexer.source),
         };
         self.parse_postfix(Expr::new(kind, span))
     }
@@ -1506,8 +1478,11 @@ impl Parser {
         }
 
         if !type_args.is_empty() {
-            panic!("\nerror: type arguments are only allowed when constructing a variant, like {}<...>::{}(...)\n  --> {}:{}\n",
-                name, tag, colon_span.line + 1, colon_span.col + 1);
+            diagnostic::throw(
+                format!("type arguments are only allowed when constructing a variant, like {}<...>::{}(...)", name, tag),
+                Some(colon_span),
+                &self.lexer.source,
+            );
         }
         ExprKind::ColonAccess { name, tag: tag.to_string() }
     }
@@ -1546,9 +1521,9 @@ impl Parser {
     fn parse_postfix(&mut self, mut expr: Expr) -> Expr {
         while matches!(self.peek().0, Token::Dot) {
             self.consume(); // '.'
-            let (name, _) = self.expect(Token::Identifier(String::new()), "after '.'");
+            // The access gets the position of the field or method name
+            let (name, span) = self.expect(Token::Identifier(String::new()), "after '.'");
             let name = name.to_string();
-            let span = expr.span.clone();
 
             // A method call, possibly with explicit type arguments like `b.convert<float64>()`
             let type_args = if matches!(self.peek().0, Token::Lt) { self.try_parse_type_args() } else { None };

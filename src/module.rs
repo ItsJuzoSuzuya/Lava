@@ -1,51 +1,38 @@
-use std::{collections::HashMap, fs::{self}, path::{Path, PathBuf}};
+use std::{collections::HashMap, fs, path::{Path, PathBuf}};
 
-use crate::{parser::Parser, statement::{StmtKind}};
+use crate::{diagnostic, lexer::Lexer, span::Span, token::Token};
 
-/// Errors that can occur while building the [`ModuleGraph`].
-enum ModuleError {
-    UndefinedModule,
+/// A module imported by another one, `import name;` at `span`.
+pub struct Import {
+    pub name: String,
+    pub span: Span,
 }
 
-impl ModuleError {
-    /// Panics with an error message for this error.
-    fn throw(&self, source: &str) -> ! {
-        match self {
-            ModuleError::UndefinedModule => panic!("Module {} couldn't be found.", source)
-        }
-    }
-}
-
-#[derive(Hash, PartialEq, Eq, Clone)]
-pub struct ModuleID(pub u64);
-
-/// Possible states a module can be in.
-///
-/// Every module starts in the [`ModuleState::Discovered`] state once it is loaded.
-pub enum ModuleState { Discovered, Parsing, Parsed, Failed }
-
-/// Bundles [`ModuleState`] and every import.
+/// A source file of the program.
 pub struct Module {
-    imports: Vec<StmtKind>,
-    pub state: ModuleState,
+    pub imports: Vec<Import>,
     /// Module name, the file name without `.lv` (`math` for `math.lv`).
     pub name: String,
-    pub path: String,
+    /// Canonical path of the file.
+    pub path: PathBuf,
     pub source: String,
 }
 
 /// All modules reachable from a root source file.
 ///
 /// Built by [`ModuleGraph::new`], which loads the root module and then
-/// recursively loads every module it imports. An import `foo` resolves
-/// to the file `foo.lv`.
+/// recursively loads every module it imports. An import `foo` resolves to the
+/// file `foo.lv` next to the importing file.
 ///
-/// Modules are stored by their [`ModuleID`]. Each file is loaded only once,
-/// even if several modules import it, and import cycles are allowed.
+/// Each file is loaded only once, even if several modules import it, and
+/// import cycles are allowed. [`ModuleGraph::modules`] lists imports before
+/// the modules importing them.
 pub struct ModuleGraph {
-    loader: ModuleLoader,
     pub modules: Vec<Module>,
-    by_path: HashMap<PathBuf, ModuleID>,
+    /// Sources that replace the content of files on disk, like the unsaved
+    /// buffers of an editor.
+    overlay: HashMap<PathBuf, String>,
+    seen: Vec<PathBuf>,
 }
 
 impl ModuleGraph {
@@ -53,90 +40,91 @@ impl ModuleGraph {
     ///
     /// # Panics
     ///
-    /// Panics if the root module or any imported module can't be read.
-    pub fn new(root_path: &'static str) -> Self {
-        let mut graph = Self { loader: ModuleLoader::new(), modules: vec![], by_path: HashMap::new() };
-        let path = graph.loader.resolve(root_path);
-        let (id, module) = graph.loader.load(&path);
-        graph.traverse_module(path, module, id);
+    /// Panics if the root module or any imported module can't be read, or
+    /// contains a syntax error.
+    pub fn new(root_path: impl AsRef<Path>) -> Self {
+        Self::with_overlay(root_path, HashMap::new())
+    }
+
+    /// A graph without modules, for tools when the root can't be loaded.
+    pub fn empty() -> Self {
+        Self { modules: vec![], overlay: HashMap::new(), seen: vec![] }
+    }
+
+    /// Like [`ModuleGraph::new`], but reads files in `overlay` from there
+    /// instead of the disk. Its paths have to be canonical.
+    pub fn with_overlay(root_path: impl AsRef<Path>, overlay: HashMap<PathBuf, String>) -> Self {
+        let mut graph = Self { modules: vec![], overlay, seen: vec![] };
+        let root_path = root_path.as_ref();
+        let path = canonical(root_path).unwrap_or_else(|| {
+            diagnostic::throw(format!("module file '{}' couldn't be found", root_path.display()), None, "")
+        });
+        graph.load(path);
         graph
     }
 
-    /// Adds `module` to [`ModuleGraph::modules`], then recursively loads and adds
-    /// each of its imports.
+    /// Loads the module at `path`, then each of its imports, and adds them
+    /// to [`ModuleGraph::modules`], imports first.
     ///
-    /// Imports that are already in the graph are skipped, so shared imports are
+    /// Modules that are already loaded are skipped, so shared imports are
     /// loaded once and import cycles terminate.
-    fn traverse_module(&mut self, path: PathBuf, module: Module, id: ModuleID) {
-        let imports: Vec<String> = module.imports.iter().map(|i| i.to_string()).collect();
-        self.by_path.insert(path, id.clone());
+    fn load(&mut self, path: PathBuf) {
+        self.seen.push(path.clone());
+        let source = self.overlay.get(&path).cloned()
+            .or_else(|| fs::read_to_string(&path).ok())
+            .unwrap_or_else(|| diagnostic::throw(format!("module file '{}' couldn't be read", path.display()), None, ""));
 
-        for import in imports {
-            let path = self.loader.resolve(&(import + ".lv"));
-            if self.by_path.contains_key(&path) {
-                continue;
+        let imports = imports_of(&source);
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        for import in &imports {
+            let file = dir.join(format!("{}.lv", import.name));
+            let Some(import_path) = canonical(&file).or_else(|| self.overlay.contains_key(&file).then(|| file.clone())) else {
+                diagnostic::throw_in_file(format!("module '{}' couldn't be found", import.name), Some(import.span.clone()), &source, path.clone());
+            };
+            if !self.seen.contains(&import_path) {
+                self.load(import_path);
             }
-            let (id, import_module) = self.loader.load(&path);
-            self.traverse_module(path, import_module, id);
         }
 
-        self.modules.push(module);
-    }
-}
-
-/// Reads module files from disk and assigns each one a unique [`ModuleID`].
-///
-/// IDs are assigned sequentially, starting at 0.
-pub struct ModuleLoader {
-    current_id: u64,
-}
-
-impl ModuleLoader {
-    pub fn new() -> Self {
-        Self { current_id: 0 }
-    }
-
-    /// Resolves `path` to its canonical absolute form, so that different
-    /// spellings of the same file (`math.lv`, `./math.lv`) compare equal.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the file doesn't exist.
-    pub fn resolve(&self, path: &str) -> PathBuf {
-        match fs::canonicalize(path) {
-            Ok(p) => p,
-            Err(_) => ModuleError::UndefinedModule {}.throw(path)
-        }
-    }
-
-    /// Reads the file at `path` and parses only its import statements.
-    ///
-    /// Returns a [`Module`] in the [`ModuleState::Discovered`] state with a fresh ID.
-    /// Calling this twice with the same path gives two different IDs.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the file can't be read.
-    pub fn load(&mut self, path: &Path) -> (ModuleID, Module) {
-        let file_str = self.load_file(path);
-        let imports = Parser::new(file_str.clone()).parse_imports();
-        let id = ModuleID(self.current_id);
-        self.current_id += 1;
         let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        (id, Module { imports, state: ModuleState::Discovered, name, path: path.display().to_string(), source: file_str })
-    }
-
-    /// Reads the file at `path` into a string.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the file can't be read.
-    fn load_file(&self, path: &Path) -> String {
-        match fs::read_to_string(path) {
-            Ok(f) => f,
-            Err(_) => ModuleError::UndefinedModule {}.throw(&path.display().to_string())
-        }
+        self.modules.push(Module { imports, name, path, source });
     }
 }
 
+/// `path` in its canonical absolute form, so different spellings of the same
+/// file (`math.lv`, `./math.lv`) compare equal. `None` if it doesn't exist.
+pub fn canonical(path: impl AsRef<Path>) -> Option<PathBuf> {
+    fs::canonicalize(path).ok()
+}
 
+/// The modules `source` imports.
+///
+/// Only looks at the tokens of `import` statements, so a syntax error
+/// elsewhere doesn't hide the imports. It's reported when the module is
+/// parsed. The module of `import a::b;` is `b`.
+fn imports_of(source: &str) -> Vec<Import> {
+    let mut lexer = Lexer::new(source.to_string());
+    let mut imports = Vec::new();
+    while let Ok((token, _)) = lexer.get_next_token() {
+        match token {
+            Token::EOF => break,
+            Token::Import => {
+                let mut import = None;
+                while let Ok((Token::Identifier(name), span)) = lexer.get_next_token() {
+                    import = Some(Import { name, span: import.map_or(span, |i: Import| i.span) });
+                    if !matches!(lexer.peek(), Ok((Token::ColonColon, _))) {
+                        break;
+                    }
+                    lexer.get_next_token().ok();
+                    // `import a::{x, y}` imports from `a`
+                    if matches!(lexer.peek(), Ok((Token::LBrace, _))) {
+                        break;
+                    }
+                }
+                imports.extend(import);
+            }
+            _ => {}
+        }
+    }
+    imports
+}

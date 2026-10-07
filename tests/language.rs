@@ -16,7 +16,9 @@
 //! ```
 //!
 //! Instead of `--- output` a case can end with `--- error` followed by text the
-//! compiler's error message has to contain.
+//! compiler's error message has to contain, or with `--- lint` followed by the
+//! exact warnings of `Letter lint`, one per line like
+//! `main.lv:3:7 unused_variable: variable 'x' is never used`.
 
 use std::{fs, path::{Path, PathBuf}, process::Command};
 
@@ -26,6 +28,8 @@ enum Expected {
     Output(String),
     /// Compiling fails with an error message containing this.
     Error(String),
+    /// The linter prints exactly these warnings.
+    Lint(String),
 }
 
 struct Case {
@@ -72,6 +76,8 @@ fn parse_suite(text: &str) -> Vec<Case> {
                 expected = Some(Expected::Output(content));
             } else if header == "error" {
                 expected = Some(Expected::Error(content.trim().to_string()));
+            } else if header == "lint" {
+                expected = Some(Expected::Lint(content));
             } else {
                 panic!("case '{}': unknown section '--- {}'", name, header);
             }
@@ -94,7 +100,9 @@ fn run_case(suite: &str, index: usize, case: &Case) -> Result<(), String> {
         fs::write(dir.join(file), source).unwrap();
     }
 
+    let args: &[&str] = if matches!(case.expected, Expected::Lint(_)) { &["lint"] } else { &[] };
     let result = Command::new(env!("CARGO_BIN_EXE_Letter"))
+        .args(args)
         .current_dir(&dir)
         .output()
         .expect("failed to start the compiler");
@@ -120,8 +128,34 @@ fn run_case(suite: &str, index: usize, case: &Case) -> Result<(), String> {
                 return Err(format!("expected error containing '{}', got:\n{}", expected, stderr.trim()));
             }
         }
+        Expected::Lint(expected) => {
+            if !result.status.success() {
+                return Err(format!("expected the program to lint, but it has an error:\n{}", stderr.trim()));
+            }
+            let got = lint_lines(&stdout);
+            if got != normalize(expected) {
+                return Err(format!("expected warnings:\n{}\ngot:\n{}", normalize(expected), got));
+            }
+        }
     }
     Ok(())
+}
+
+/// The warnings in the output of `Letter lint`, one per line like
+/// `main.lv:3:7 unused_variable: variable 'x' is never used`.
+fn lint_lines(output: &str) -> String {
+    let mut lines = Vec::new();
+    let mut warning = None;
+    for line in output.lines() {
+        if let Some(rest) = line.strip_prefix("warning: ") {
+            let (message, code) = rest.rsplit_once(" [").unwrap_or((rest, ""));
+            warning = Some((message.to_string(), code.trim_end_matches(']').to_string()));
+        } else if let (Some(position), Some((message, code))) = (line.trim().strip_prefix("--> "), &warning) {
+            lines.push(format!("{} {}: {}", position, code, message));
+            warning = None;
+        }
+    }
+    lines.join("\n")
 }
 
 /// Drops trailing whitespace of every line and trailing empty lines.
@@ -158,6 +192,7 @@ fn run_suite(suite: &str) {
 #[test] fn functions()   { run_suite("functions"); }
 #[test] fn generics()    { run_suite("generics"); }
 #[test] fn generic_types() { run_suite("generic_types"); }
+#[test] fn lint()        { run_suite("lint"); }
 #[test] fn matching()    { run_suite("matching"); }
 #[test] fn modules()     { run_suite("modules"); }
 #[test] fn mutability()  { run_suite("mutability"); }

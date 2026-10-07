@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{declaration::{Declaration, DeclarationKind, TypeParam, Visibility}, expression::{Expr, ExprKind}, field::Field, param::Param, span::Span, statement::{MatchArm, Pattern, Stmt, StmtKind}, token::Token, r#type::Type};
+use crate::{declaration::{Declaration, DeclarationKind, TypeParam, Visibility}, diagnostic, expression::{Expr, ExprKind}, field::Field, param::Param, span::Span, statement::{MatchArm, Pattern, Stmt, StmtKind}, token::Token, r#type::Type};
 
 enum SemanticError {
     AmbiguousMethod { method: String, class: String, traits: Vec<String>, span: Span },
@@ -120,10 +120,7 @@ impl SemanticError {
             SemanticError::UnknownVariant { enum_name, variant, span } =>
                 (span.line, span.col, format!("enum '{}' has no variant '{}'", enum_name, variant)),
         };
-        let line_txt = source.lines().nth(line).unwrap_or("");
-        let pointer = " ".repeat(col) + "^";
-        panic!("\nerror: {}\n  --> {}:{}\n   |\n   | {}\n   | {}\n",
-            msg, line + 1, col + 1, line_txt, pointer)
+        diagnostic::throw(msg, Some(Span { line, col, len: 1 }), source)
     }
 }
 
@@ -205,6 +202,7 @@ impl Sema {
             source: String::new(), module: String::new(), current_return_type: None, oversized_literals: HashMap::new(),
         };
         sema.push_func("sqrt".to_string(), vec![Param::builtin("x", Type::Float { bits: 64 })], Type::Float { bits: 64 }, Visibility::Public);
+        sema.push_func("panic".to_string(), vec![Param::builtin("message", Type::String)], Type::Void, Visibility::Public);
         sema
     }
 

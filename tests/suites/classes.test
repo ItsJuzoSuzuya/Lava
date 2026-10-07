@@ -355,7 +355,7 @@ class Box {
   pub Constructor(v: int32);
 }
 --- error
-Constructors are always public
+constructors are always public
 
 === instance passed to a function
 class Box {

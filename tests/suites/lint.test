@@ -1,0 +1,263 @@
+=== clean program has no warnings
+func add(a: int32, b: int32) -> int32 {
+  return a + b;
+}
+let x = add(1, 2);
+print(x);
+--- lint
+
+=== unused variable
+let x = 5;
+print(1);
+--- lint
+main.lv:1:5 unused_variable: variable 'x' is never used
+
+=== variable assigned but never read
+mut x = 5;
+x = 6;
+--- lint
+main.lv:1:5 unused_variable: variable 'x' is assigned but never read
+
+=== underscore names are never unused
+let _x = 5;
+func f(_a: int32) {
+  print(1);
+}
+f(1);
+--- lint
+
+=== unused parameter
+func f(a: int32, b: int32) -> int32 {
+  return a;
+}
+print(f(1, 2));
+--- lint
+main.lv:1:18 unused_parameter: parameter 'b' is never used
+
+=== unused function
+func helper() {
+  print(1);
+}
+print(2);
+--- lint
+main.lv:1:6 unused_function: function 'helper' is never used
+
+=== public functions may be unused
+pub func helper() {
+  print(1);
+}
+print(2);
+--- lint
+
+=== mut that is never changed
+mut x = 1;
+print(x);
+--- lint
+main.lv:1:5 unused_mut: 'x' is never changed, it can be declared with 'let'
+
+=== mut that is changed through a field or method
+class Counter {
+  pub n: int32 = 0;
+
+  Constructor();
+
+  pub func bump(mut &self) {
+    self.n = self.n + 1;
+  }
+}
+mut a = Counter();
+a.n = 2;
+mut b = Counter();
+b.bump();
+print(a.n + b.n);
+--- lint
+
+=== mut self that doesn't change anything
+class Counter {
+  pub n: int32 = 0;
+
+  Constructor();
+
+  pub func get(mut &self) -> int32 {
+    return self.n;
+  }
+}
+mut c = Counter();
+print(c.get());
+--- lint
+main.lv:6:21 unused_mut: 'get' doesn't change 'self', it can take '&self'
+
+=== unused private method and field
+class Point {
+  pub x: int32 = 0;
+  hidden: int32 = 0;
+
+  Constructor();
+
+  func secret(&self) -> int32 {
+    return 1;
+  }
+}
+let p = Point();
+print(p.x);
+--- lint
+main.lv:3:3 unused_field: field 'hidden' is never read
+main.lv:7:8 unused_method: method 'secret' is never used
+
+=== trait methods may ignore their parameters
+trait Scale {
+  func scale(&self, factor: int32) -> int32;
+}
+impl Scale for int32 {
+  func scale(&self, factor: int32) -> int32 {
+    return 1;
+  }
+}
+let x: int32 = 2;
+print(x.scale(3));
+--- lint
+
+=== unused import
+import helper;
+
+print(1);
+--- file helper.lv
+pub func help() -> int32 {
+  return 1;
+}
+--- lint
+main.lv:1:8 unused_import: module 'helper' is imported but nothing from it is used
+
+=== used import
+import helper;
+
+print(help());
+--- file helper.lv
+pub func help() -> int32 {
+  return 1;
+}
+--- lint
+
+=== naming conventions
+class my_point {
+  pub someField: int32 = 0;
+
+  Constructor();
+}
+enum color {
+  dark_red => int32
+}
+func DoThing() {
+  let BadName = 1;
+  print(BadName);
+}
+DoThing();
+let p = my_point();
+print(p.someField);
+let c = color::dark_red(1);
+--- lint
+main.lv:1:7 naming: 'my_point' should be PascalCase, like 'MyPoint'
+main.lv:2:7 naming: 'someField' should be snake_case, like 'some_field'
+main.lv:6:6 naming: 'color' should be PascalCase, like 'Color'
+main.lv:7:3 naming: 'dark_red' should be PascalCase, like 'DarkRed'
+main.lv:9:6 naming: 'DoThing' should be snake_case, like 'do_thing'
+main.lv:10:7 naming: 'BadName' should be snake_case, like 'bad_name'
+main.lv:16:5 unused_variable: variable 'c' is never used
+
+=== unreachable code after return
+func f() -> int32 {
+  return 1;
+  print(2);
+}
+print(f());
+--- lint
+main.lv:3:3 unreachable_code: this code never runs, it comes after a 'return'
+
+=== constant conditions
+if true {
+  print(1);
+}
+if false {
+  print(2);
+} else {
+  print(3);
+}
+while false {
+  print(4);
+}
+--- lint
+main.lv:1:4 constant_condition: the condition is always true, the 'if' isn't needed
+main.lv:4:4 constant_condition: the condition is always false, the if branch never runs
+main.lv:9:7 constant_condition: the condition is always false, the loop never runs
+
+=== comparing and assigning a value to itself
+mut x = 1;
+if x == x {
+  print(1);
+}
+x = x;
+--- lint
+main.lv:2:4 self_comparison: comparing a value with itself is always true
+main.lv:5:1 self_assignment: assigning a value to itself does nothing
+
+=== expression without effect
+let x = 1;
+x + 1;
+--- lint
+main.lv:2:1 no_effect: this expression does nothing, its value isn't used
+
+=== comments are allowed
+// a comment
+let x = 1; // after code
+print(x);
+--- lint
+
+=== generic vector has no false warnings
+import vector;
+
+mut v = Vector<int32>();
+v.push(1);
+print(v.get(0));
+--- file vector.lv
+pub class Vector<T> {
+  data: Buffer<T> = Buffer<T>(4);
+  length: uint64 = 0;
+
+  Constructor();
+
+  pub func push(mut &self, item: T) {
+    self.grow_if_full();
+    self.data.set(self.length, item);
+    self.length = self.length + 1;
+  }
+
+  pub func get(&self, index: uint64) -> T {
+    self.check_index(index);
+    return self.data.get(index);
+  }
+
+  pub func clear(mut &self) {
+    self.length = 0;
+  }
+
+  func check_index(&self, index: uint64) {
+    if index >= self.length {
+      panic("index is out of bounds for the Vector");
+    }
+  }
+
+  func grow_if_full(mut &self) {
+    if self.length == self.data.capacity() {
+      self.data.resize(self.data.capacity() * 2);
+    }
+  }
+}
+--- lint
+
+=== generic function
+func first<T>(a: T, b: T) -> T {
+  return a;
+}
+print(first(1, 2));
+--- lint
+main.lv:1:21 unused_parameter: parameter 'b' is never used

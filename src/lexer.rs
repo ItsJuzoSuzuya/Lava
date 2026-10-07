@@ -33,8 +33,11 @@ pub struct Checkpoint {
 pub struct Lexer {
     line: usize,
     col: usize,
+    /// Index into [`Lexer::chars`], not a byte offset.
     pos: usize,
-    pub source: String
+    pub source: String,
+    /// The characters of `source`, so reading one at a position is cheap.
+    chars: Vec<char>,
 }
 
 impl Lexer {
@@ -44,8 +47,14 @@ impl Lexer {
             line: 0,
             col: 0,
             pos: 0,
+            chars: string.chars().collect(),
             source: string,
         }
+    }
+
+    /// The character at index `pos`, `None` past the end.
+    fn char_at(&self, pos: usize) -> Option<char> {
+        self.chars.get(pos).copied()
     }
 
     /// Lexes the next token without advancing the lexer.
@@ -72,23 +81,29 @@ impl Lexer {
 
     /// Lexes the next token and advances the lexer past it.
     ///
-    /// Skips whitespace first. Returns [`Token::EOF`] at the end of the source,
-    /// and keeps returning it on further calls.
+    /// Skips whitespace and `//` comments first. Returns [`Token::EOF`] at the
+    /// end of the source, and keeps returning it on further calls.
     pub fn get_next_token(&mut self) -> Result<(Token, Span), LexError> {
         // Insert EOF at the end of the source code and return EOF.
-        if self.pos >= self.source.len() {
+        if self.pos >= self.chars.len() {
             let span = Span { len: Token::EOF.len(), col: self.col, line: self.line };
             return Ok((Token::EOF, span));
         }
 
-        // Skip whitespace or return EOF when no char 
+        // Skip whitespace and comments or return EOF when no char
         loop {
-            match self.source.chars().nth(self.pos) {
-                Some(c) => 
+            match self.char_at(self.pos) {
+                Some(c) =>
                     if c == '\n' {
                         self.line += 1;
                         self.col = 0;
                         self.pos += 1;
+                    } else if c == '/' && self.char_at(self.pos + 1) == Some('/') {
+                        // A comment runs to the end of the line, the newline is skipped above
+                        while self.char_at(self.pos).is_some_and(|c| c != '\n') {
+                            self.col += 1;
+                            self.pos += 1;
+                        }
                     } else if c.is_whitespace() {
                         self.col += 1;
                         self.pos += 1;
@@ -103,7 +118,7 @@ impl Lexer {
         }
 
         // Get first char of the word
-        let mut c = match self.source.chars().nth(self.pos) {
+        let mut c = match self.char_at(self.pos) {
             Some(c) => c,
             None => {
                 let span = Span { line: self.line, col: self.col, len: Token::EOF.len() };
@@ -116,7 +131,7 @@ impl Lexer {
         let start_col = self.col;
 
         // First check if char belongs to a pair
-        if let Some(c2) = self.source.chars().nth(self.pos + 1) {
+        if let Some(c2) = self.char_at(self.pos + 1) {
             if let Some(t) = Token::from_two_chars(c, c2) {
                 self.pos += 2;
                 self.col += 2;
@@ -139,7 +154,7 @@ impl Lexer {
             self.pos += 1;
             self.col += 1;
             loop {
-                c = match self.source.chars().nth(self.pos) {
+                c = match self.char_at(self.pos) {
                     Some('"') => break,
                     Some(c) => c,
                     None => {
@@ -172,21 +187,21 @@ impl Lexer {
                 token += &c.to_string();
                 self.pos += 1;
                 self.col += 1;
-                c = self.source.chars().nth(self.pos).unwrap_or(' ')
+                c = self.char_at(self.pos).unwrap_or(' ')
             }
 
             // A '.' followed by a digit continues the number as a float
-            let next_is_digit = self.source.chars().nth(self.pos + 1).is_some_and(|n| n.is_digit(10));
+            let next_is_digit = self.char_at(self.pos + 1).is_some_and(|n| n.is_digit(10));
             if c == '.' && next_is_digit {
                 token += ".";
                 self.pos += 1;
                 self.col += 1;
-                c = self.source.chars().nth(self.pos).unwrap_or(' ');
+                c = self.char_at(self.pos).unwrap_or(' ');
                 while c.is_digit(10) {
                     token += &c.to_string();
                     self.pos += 1;
                     self.col += 1;
-                    c = self.source.chars().nth(self.pos).unwrap_or(' ')
+                    c = self.char_at(self.pos).unwrap_or(' ')
                 }
 
                 // Digits and a single '.' always parse as f64
@@ -220,7 +235,7 @@ impl Lexer {
             token += &c.to_string();
             self.pos += 1;
             self.col += 1;
-            c = self.source.chars().nth(self.pos).unwrap_or(' ');
+            c = self.char_at(self.pos).unwrap_or(' ');
         }
 
         let token = Token::from_string(&token);
@@ -267,6 +282,21 @@ mod tests {
     fn empty_source_is_eof() {
         assert_eq!(lex_all(""), vec![]);
         assert_eq!(lex_all("   \n\t  \n"), vec![]);
+    }
+
+    #[test]
+    fn comments_are_skipped() {
+        assert_eq!(lex_all("// only a comment"), vec![]);
+        assert_eq!(lex_all("x // the rest\ny"), vec![ident("x"), ident("y")]);
+        assert_eq!(lex_all("a / b"), vec![ident("a"), Token::Divide, ident("b")]);
+    }
+
+    #[test]
+    fn comment_keeps_line_numbers() {
+        let mut lexer = Lexer::new("// one\n// two\nx".to_string());
+        let (token, span) = lexer.get_next_token().unwrap();
+        assert_eq!(token, ident("x"));
+        assert_eq!((span.line, span.col), (2, 0));
     }
 
     #[test]

@@ -122,6 +122,23 @@ impl<'ctx> CodegenContext<'ctx> {
         self.builder.build_return(Some(&root)).unwrap();
 
         self.push_func("sqrt".to_string(), vec![Param::builtin("x", Type::Float { bits: 64 })]);
+
+        // panic(message: String) prints the message and stops the program,
+        // like a failed Buffer bounds check
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let panic_fn = self.module.add_function("panic", self.context.void_type().fn_type(&[ptr_type.into()], false), Some(Linkage::Private));
+        let entry = self.context.append_basic_block(panic_fn, "entry");
+        self.builder.position_at_end(entry);
+
+        let format = self.builder.build_global_string_ptr("error: %s\n", "panic_msg").unwrap();
+        let message = panic_fn.get_nth_param(0).unwrap();
+        let printf = self.libc_function("printf");
+        self.builder.build_call(printf, &[format.as_pointer_value().into(), message.into()], "").unwrap();
+        let exit = self.libc_function("exit");
+        self.builder.build_call(exit, &[self.context.i32_type().const_int(1, false).into()], "").unwrap();
+        self.builder.build_unreachable().unwrap();
+
+        self.push_func("panic".to_string(), vec![Param::builtin("message", Type::String)]);
     }
 
     pub fn build_entry(&self) {

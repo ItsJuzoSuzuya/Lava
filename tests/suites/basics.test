@@ -13,6 +13,19 @@ print(true);
 --- output
 true
 
+=== panic stops the program
+print(1);
+panic("something broke");
+print(2);
+--- output
+1
+error: something broke
+
+=== panic needs a string
+panic(5);
+--- error
+does not match
+
 === print false
 print(false);
 --- output

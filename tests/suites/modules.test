@@ -98,7 +98,7 @@ pub func base() -> int32 {
 import nothing;
 print(1);
 --- error
-Module
+module 'nothing' couldn't be found
 
 === top level code of an imported module runs first
 import a;

@@ -1,15 +1,13 @@
-import math;
-import shapes;
 import vector;
 
 mut vec = Vector<int32>();
-vec.push(20);
-print(vec.get(0));
+print(vec.is_empty());
+vec.push(1);
+vec.push(2);
+vec.push(4);
 
-let square = Square(20);
-let area = square.area();
-print(area);
-
-let sqrt = sqrt(area);
-print(sqrt);
-
+mut i: uint64 = 0;
+while i < vec.len() {
+  print(vec.get(i));
+  i = i + 1;
+}
