@@ -1,4 +1,4 @@
-//! End-to-end tests for the language server: they start `Letter lsp`, talk
+//! End-to-end tests for the language server: they start `lava lsp`, talk
 //! to it over stdin and stdout like an editor and check its answers.
 
 use std::{fs, io::{BufRead, BufReader, Read, Write}, path::{Path, PathBuf}, process::{Child, ChildStdin, Command, Stdio},
@@ -60,7 +60,7 @@ struct Client {
 
 impl Client {
     fn start(dir: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_Letter"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_lava"))
             .arg("lsp")
             .current_dir(dir)
             .stdin(Stdio::piped())
@@ -203,11 +203,12 @@ fn diagnostics_show_warnings_and_errors() {
     assert_eq!(diagnostics[0]["range"]["start"], json!({ "line": 20, "character": 4 }));
     assert_eq!(diagnostics[0]["range"]["end"], json!({ "line": 20, "character": 10 }));
 
-    // A type error replaces the warnings of the file
+    // A type error is shown next to the warnings, the rest of the file is still linted
     client.change(&main, 2, &MAIN.replace("let unused = 1;", "let unused: String = 1;"));
     let diagnostics = client.diagnostics(&main);
-    assert_eq!(diagnostics.len(), 1, "{:?}", diagnostics);
+    assert_eq!(diagnostics.len(), 2, "{:?}", diagnostics);
     assert_eq!(diagnostics[0]["severity"], 1);
+    assert_eq!(diagnostics[1]["message"], "variable 'unused' is never used");
     assert!(diagnostics[0]["message"].as_str().unwrap().contains("does not match"));
     assert_eq!(diagnostics[0]["range"]["start"]["line"], 20);
 
@@ -338,6 +339,68 @@ fn completion_and_signature_help() {
     let help = client.result("textDocument/signatureHelp", at(&main, 21, 13));
     assert_eq!(help["signatures"][0]["label"], "func add(a: int32, b: int32) -> int32");
     assert_eq!(help["activeParameter"], 1);
+
+    stop(client, dir);
+}
+
+#[test]
+fn completion_imports_what_it_suggests() {
+    let (mut client, dir, main, _) = started("auto_import");
+    fs::write(dir.join("shapes.lv"), "pub func area(w: int32, h: int32) -> int32 {\n  return w * h;\n}\nfunc hidden() {}\n").unwrap();
+    let find = |items: &Value, label: &str| items.as_array().unwrap().iter().find(|i| i["label"] == label).cloned();
+    let import_of = |item: &Value| item["additionalTextEdits"][0]["newText"].as_str().map(str::to_string);
+
+    // A module of the program that isn't imported, its private functions aren't offered
+    let everything = client.result("textDocument/completion", at(&main, 21, 0));
+    let area = find(&everything, "area").expect("area of shapes.lv is suggested");
+    assert_eq!(area["insertText"], "area($0)");
+    assert_eq!(import_of(&area).as_deref(), Some("import shapes;\n"));
+    assert_eq!(area["additionalTextEdits"][0]["range"]["start"]["line"], 1, "after the last import");
+    assert!(find(&everything, "hidden").is_none());
+
+    // A standard library item is written by its name and imported by it
+    let read = find(&everything, "read").expect("fs::read is suggested");
+    assert_eq!(read["insertText"], "read($0)");
+    assert_eq!(import_of(&read).as_deref(), Some("import std::fs::{read};\n"));
+    // The imported module's items need no import
+    assert!(import_of(&find(&everything, "Vector").unwrap()).is_none());
+
+    // An existing import list of the module gets the item added
+    client.change(&main, 2, &format!("import std::env::{{Args}};\n{}", MAIN));
+    let items = client.result("textDocument/completion", at(&main, 22, 0));
+    let args = find(&items, "args").expect("env::args is suggested");
+    assert_eq!(args["insertText"], "args($0)");
+    assert_eq!(import_of(&args).as_deref(), Some(", args"));
+    assert_eq!(args["additionalTextEdits"][0]["range"]["start"], json!({ "line": 0, "character": 22 }));
+    let imported = find(&items, "Args").expect("the imported Args is suggested");
+    assert!(import_of(&imported).is_none());
+
+    // A variable with the same name, here the one being declared, doesn't hide the function
+    client.change(&main, 3, &format!("{}let args = args", MAIN));
+    let items = client.result("textDocument/completion", at(&main, 21, 15));
+    let args: Vec<&Value> = items.as_array().unwrap().iter().filter(|i| i["label"] == "args").collect();
+    assert_eq!(args.len(), 1, "only the function, the variable doesn't exist yet: {:?}", args);
+    assert_eq!(args[0]["insertText"], "args($0)");
+    assert_eq!(import_of(args[0]).as_deref(), Some("import std::env::{args};\n"));
+
+    // After `fs::` only the name is written
+    client.change(&main, 4, &format!("{}fs::", MAIN));
+    let items = client.result("textDocument/completion", at(&main, 21, 4));
+    let read = find(&items, "read").expect("fs:: offers read");
+    assert_eq!(read["insertText"], "read($0)");
+    assert_eq!(import_of(&read).as_deref(), Some("import std::fs;\n"));
+
+    // Once imported, it's offered without adding the import again
+    client.change(&main, 5, &format!("import std::fs;\n{}fs::", MAIN));
+    let items = client.result("textDocument/completion", at(&main, 22, 4));
+    let read = find(&items, "read").expect("fs:: offers read of the imported module");
+    assert_eq!(read["insertText"], "read($0)");
+    assert!(import_of(&read).is_none());
+
+    // `import std::` lists the modules
+    client.change(&main, 6, &format!("import std::\n{}", MAIN));
+    let modules = client.result("textDocument/completion", at(&main, 0, 12));
+    assert!(find(&modules, "fs").is_some() && find(&modules, "math").is_some(), "{}", modules);
 
     stop(client, dir);
 }

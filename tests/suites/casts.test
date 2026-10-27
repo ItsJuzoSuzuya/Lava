@@ -5,8 +5,9 @@ print(x as float32);
 7.000000
 
 === int32 as float32 into sqrt
+import std::math;
 let x: int32 = 16;
-print(sqrt(x as float32));
+print(math::sqrt(x as float32));
 --- output
 4.000000
 
@@ -275,4 +276,4 @@ cannot convert
 let x = 5;
 print(x as);
 --- error
-No type for Token
+expected a type, got ')'

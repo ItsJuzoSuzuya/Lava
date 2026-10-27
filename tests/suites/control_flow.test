@@ -99,11 +99,23 @@ print(true < false);
 --- error
 '<' can't be used on values of type 'bool'
 
-=== comparing strings is an error
+=== comparing strings by their content
 let a = "x";
 print(a == "y");
+print(a == "x");
+print(a != "x");
+print("apple" < "banana");
+--- output
+false
+true
+false
+true
+
+=== subtracting strings is an error
+let a = "x";
+print(a - "y");
 --- error
-'==' can't be used on values of type 'String'
+'-' can't be used on values of type 'String'
 
 === comparing different types is an error
 let a: int32 = 1;
@@ -418,3 +430,101 @@ func first<T>(a: T, b: T) -> T {
 print(first<int32>(1, 2) < 3);
 --- output
 true
+
+=== a ternary gives one of two values
+let n = 5;
+let size = n > 3 ? "big" : "small";
+print(size);
+--- output
+big
+
+=== ternaries chain from the right
+func grade(score: int32) -> String {
+  return score >= 90 ? "A" : score >= 70 ? "B" : "C";
+}
+print(grade(95));
+print(grade(80));
+print(grade(10));
+--- output
+A
+B
+C
+
+=== a ternary only computes the chosen value
+func loud(n: int32) -> int32 {
+  print("computed");
+  n
+}
+let x = 4;
+let y = x % 2 == 0 ? x / 2 * 10 : loud(0);
+print(y);
+--- output
+20
+
+=== a ternary binds loosest, parentheses put it inside an expression
+let a = 3;
+print(1 + (a > 2 ? 10 : 20));
+print(a == 3 ? 1 : 2);
+--- output
+11
+1
+
+=== the expected type adapts literal values
+let big: int64 = true ? 3000000000 : 0;
+print(big);
+--- output
+3000000000
+
+=== a ternary can be a statement
+let ready = true;
+ready ? print("start") : print("wait");
+--- output
+start
+
+=== ternary and match values nest
+import std::option::{Option};
+let o: Option<int32> = Option::Some(7);
+let text = o.is_some() ? match o {
+  Option::Some(v) => v > 5 ? "large" : "small",
+  Option::None => "none",
+} : "missing";
+print(text);
+--- output
+large
+
+=== ternary value owning memory
+import std::vector::{Vector};
+func one_name() -> Vector<String> {
+  mut v = Vector<String>();
+  v.push("a");
+  v
+}
+let names = true ? one_name() : Vector<String>();
+print(names.len());
+--- output
+1
+
+=== if statement blocks still work without semicolons at the end
+let n = 2;
+if n == 2 {
+  print("two")
+} else {
+  print("other")
+}
+--- output
+two
+
+=== an if gives no value
+let x = if true { 1 } else { 2 };
+--- error
+an 'if' doesn't give a value, choose one with `condition ? value : other`
+
+=== different ternary value types are an error
+let x = true ? 1 : "one";
+--- error
+type 'String' does not match 'int32' in if branch value
+
+=== a ternary of print calls gives no value
+let x = true ? print(1) : print(2);
+--- error
+this if gives no value

@@ -1,0 +1,176 @@
+=== copies of a shared use the same value
+class Node {
+  pub value: int32 = value;
+  Constructor(value: int32);
+}
+mut a = shared(Node(1));
+let b = a;
+a.value = 5;
+print(b.value);
+print(a.value);
+--- output
+5
+5
+
+=== a shared stays usable after passing it
+class Node {
+  pub value: int32 = value;
+  Constructor(value: int32);
+}
+func double(node: Shared<Node>) -> int32 {
+  node.value * 2
+}
+let a = shared(Node(4));
+print(double(a));
+print(double(a));
+print(a.value);
+--- output
+8
+8
+4
+
+=== a shared returned from a function
+class Node {
+  pub name: String = name;
+  Constructor(name: String);
+}
+func keep(node: Shared<Node>) -> Shared<Node> {
+  node
+}
+let a = shared(Node("first"));
+let b = keep(a);
+print(b.name);
+print(a.name);
+--- output
+first
+first
+
+=== a class holding only shareds is copied
+class Node {
+  pub value: int32 = value;
+  Constructor(value: int32);
+}
+class Pair {
+  pub left: Shared<Node> = left;
+  pub right: Shared<Node> = right;
+  Constructor(left: Shared<Node>, right: Shared<Node>);
+}
+let pair = Pair(shared(Node(1)), shared(Node(2)));
+let copy = pair;
+print(copy.left.value + pair.right.value);
+--- output
+3
+
+=== shareds in a Vector and an Option
+import std::option::{Option};
+import std::vector::{Vector};
+class Node {
+  pub value: int32 = value;
+  Constructor(value: int32);
+}
+let a = shared(Node(7));
+mut nodes = Vector<Shared<Node>>();
+nodes.push(a);
+nodes.push(a);
+print(nodes.len());
+print(nodes[1].value);
+let maybe: Option<Shared<Node>> = Some(a);
+match maybe {
+  Some(node) => print(node.value),
+  None => print(0),
+}
+--- output
+2
+7
+7
+
+=== methods are called through a shared
+class Counter {
+  pub count: int32 = 0;
+  Constructor();
+
+  pub func add(mut &self) {
+    self.count += 1;
+  }
+}
+mut c = shared(Counter());
+let other = c;
+c.add();
+c.add();
+print(other.count);
+--- output
+2
+
+=== the type of a shared comes from the expected type
+let a: Shared<int64> = shared(5);
+let b = a;
+--- output
+
+=== a shared or unique is passed where a reference to its value is expected
+class Node {
+  pub value: int32 = value;
+  Constructor(value: int32);
+}
+func show(node: &Node) {
+  print(node.value);
+}
+func through(holder: &Shared<Node>) {
+  show(holder);
+}
+let a = shared(Node(3));
+show(&a);
+show(a);
+let u = unique(Node(4));
+show(u);
+through(&a);
+print(a.value);
+--- output
+3
+3
+4
+3
+3
+
+=== get gives a reference to the value
+let n = shared(41);
+print(n.get() + 1);
+print(n.get());
+let plain: int32 = n.get();
+print(plain);
+let u = unique(7);
+print(u.get() * 2);
+--- output
+42
+41
+41
+14
+
+=== a reference to a number is read where a number is needed
+func add(x: &int32) -> int32 {
+  x + 1
+}
+func read(x: &int32) -> int32 {
+  x
+}
+let x = 5;
+let r = &x;
+print(r + 2);
+print(r);
+print(add(&x));
+print(read(&x));
+--- output
+7
+5
+6
+5
+
+=== a shared can't be printed
+let a = shared(5);
+print(a);
+--- error
+a Unique, Shared or Buffer can't be printed
+
+=== a shared value needs the right type
+let a: Shared<String> = shared(5);
+--- error
+in shared value

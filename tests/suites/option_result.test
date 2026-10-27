@@ -1,0 +1,420 @@
+=== variants without the enum's name
+import std::option::{Option};
+import std::result::{Result};
+func half(n: int32) -> Result<int32, String> {
+  if n % 2 == 1 {
+    return Err("odd");
+  }
+  return Ok(n / 2);
+}
+func first(text: &String) -> Option<char> {
+  if text.len() == 0 {
+    return None;
+  }
+  return Some(text[0]);
+}
+match half(4) {
+  Ok(value) => print(value),
+  Err(error) => print(error),
+}
+match half(3) {
+  Ok(value) => print(value),
+  Err(error) => print(error),
+}
+match first("") {
+  Some(c) => print(c),
+  None => print("empty"),
+}
+--- output
+2
+odd
+empty
+
+=== the last expression is returned
+import std::result::{Result};
+func half(n: int32) -> Result<int32, String> {
+  if n % 2 == 1 {
+    return Err("odd");
+  }
+  Ok(n / 2)
+}
+func sign(n: int32) -> String {
+  n < 0 ? "negative" : "positive"
+}
+func name(n: int32) -> String {
+  match n {
+    1 => "one",
+    _ => "many",
+  }
+}
+match half(8) {
+  Ok(value) => print(value),
+  Err(error) => print(error),
+}
+print(sign(-3));
+print(name(1));
+--- output
+4
+negative
+one
+
+=== an own function named like a variant comes first
+func Ok(n: int32) -> int32 {
+  return n + 1;
+}
+print(Ok(1));
+--- output
+2
+
+=== option values
+import std::option::{Option};
+let some = Option::Some(4);
+let none: Option<int32> = Option::None;
+print(some.is_some());
+print(none.is_none());
+print(some.unwrap_or(0));
+print(none.unwrap_or(7));
+--- output
+true
+true
+4
+7
+
+=== matching an option
+import std::option::{Option};
+func half(n: int32) -> Option<int32> {
+  if n % 2 == 1 {
+    return Option::None;
+  }
+  return Option::Some(n / 2);
+}
+match half(7) {
+  Option::Some(h) => print(h),
+  Option::None => print("odd"),
+}
+match half(8) {
+  Option::Some(h) => print(h),
+  Option::None => print("odd"),
+}
+--- output
+odd
+4
+
+=== there is no unwrap, errors are handled explicitly
+import std::option::{Option};
+let none: Option<int32> = Option::None;
+print(none.unwrap());
+--- error
+unknown function 'unwrap'
+
+=== none with explicit type arguments
+import std::option::{Option};
+let none = Option<String>::None;
+print(none.is_none());
+--- output
+true
+
+=== none needs a known type
+import std::option::{Option};
+let none = Option::None;
+--- error
+can't infer type parameter 'T' of 'Option'
+
+=== result values
+import std::result::{Result};
+func divide(a: int32, b: int32) -> Result<int32, String> {
+  if b == 0 {
+    return Result::Err("division by zero");
+  }
+  return Result::Ok(a / b);
+}
+let good = divide(10, 2);
+let bad = divide(1, 0);
+print(good.is_ok());
+print(bad.is_err());
+print(good.ok_or(-1));
+print(bad.ok_or(-1));
+match bad {
+  Result::Ok(value) => print(value),
+  Result::Err(message) => print("failed: " + message),
+}
+--- output
+true
+true
+5
+-1
+failed: division by zero
+
+=== passing an error on explicitly
+import std::option::{Option};
+import std::result::{Result};
+import std::string::{parse_int};
+func parse(text: String) -> Result<int64, String> {
+  match parse_int(text) {
+    Option::Some(value) => return Result::Ok(value),
+    Option::None => return Result::Err("not a number: " + text),
+  }
+}
+func sum(a: String, b: String) -> Result<int64, String> {
+  mut x: int64 = 0;
+  match parse(a) {
+    Result::Err(e) => return Result::Err(e),
+    Result::Ok(value) => x = value,
+  }
+  mut y: int64 = 0;
+  match parse(b) {
+    Result::Err(e) => return Result::Err(e),
+    Result::Ok(value) => y = value,
+  }
+  return Result::Ok(x + y);
+}
+func show(result: Result<int64, String>) {
+  match result {
+    Result::Ok(value) => print(value),
+    Result::Err(message) => print(message),
+  }
+}
+show(sum("2", "40"));
+show(sum("2", "x"));
+--- output
+42
+not a number: x
+
+=== variant without payload
+enum Light {
+  Red,
+  Green => int32
+}
+let a = Light::Red;
+let b = Light::Green(3);
+print(a);
+print(b);
+match a {
+  Light::Red => print("stop"),
+  Light::Green(speed) => print(speed),
+}
+--- output
+Red
+3
+stop
+
+=== variant with payload needs one
+enum Light {
+  Red,
+  Green => int32
+}
+let b = Light::Green;
+--- error
+'Light::Green' carries a 'int32', create it like Light::Green(value)
+
+=== variant without payload has nothing to bind
+enum Light {
+  Red,
+  Green => int32
+}
+match Light::Red {
+  Light::Red(x) => print(x),
+  _ => print(0),
+}
+--- error
+carries no value, there's nothing to bind
+
+=== missing arrow after a variant
+enum Light {
+  Red int32
+}
+--- error
+expected '=>' or ',' after enum variant, got 'int32'
+
+=== recursive list with unique
+import std::option::{Option};
+class Node {
+  pub value: int32 = value;
+  pub next: Option<Unique<Node>> = next;
+
+  Constructor(value: int32, next: Option<Unique<Node>>);
+}
+func sum(node: Unique<Node>) -> int32 {
+  match node.next {
+    Option::Some(rest) => return node.value + sum(rest),
+    Option::None => return node.value,
+  }
+}
+let end: Option<Unique<Node>> = Option::None;
+let list = unique(Node { value: 1, next: Option::Some(unique(Node { value: 2, next: Option::Some(unique(Node { value: 3, next: end })) })) });
+print(sum(list));
+--- output
+6
+
+=== recursive expression tree
+enum Expr {
+  Number => int32,
+  Add => Unique<Pair>,
+  Mul => Unique<Pair>
+}
+class Pair {
+  pub left: Expr = left;
+  pub right: Expr = right;
+
+  Constructor(left: Expr, right: Expr);
+}
+func eval(e: Expr) -> int32 {
+  match e {
+    Expr::Number(n) => return n,
+    Expr::Add(p) => return eval(p.left) + eval(p.right),
+    Expr::Mul(p) => return eval(p.left) * eval(p.right),
+  }
+}
+let tree = Expr::Add(unique(Pair(Expr::Number(2), Expr::Mul(unique(Pair(Expr::Number(3), Expr::Number(4)))))));
+let copy = tree.clone();
+print(eval(tree));
+print(eval(copy));
+--- output
+14
+14
+
+=== an own Option works without importing std's
+import std::string::{parse_int};
+enum Option<T> {
+  Some => T,
+  Nothing => int32
+}
+let a = Option::Some(1);
+match a {
+  Option::Some(v) => print(v),
+  Option::Nothing => print(0),
+}
+print(parse_int("5").is_some());
+--- output
+1
+true
+
+=== map
+import std::collections::{Map};
+mut ages = Map<int32>();
+ages.put("ada", 36);
+ages.put("alan", 41);
+ages.put("ada", 37);
+print(ages.find("ada").unwrap_or(0));
+print(ages.find("bob").is_none());
+print(ages.has("alan"));
+print(ages.len());
+print(ages.delete("ada"));
+print(ages.key_at(0));
+--- output
+37
+true
+true
+2
+true
+alan
+
+=== vector of results
+import std::result::{Result};
+import std::vector::{Vector};
+mut results = Vector<Result<int32, String>>();
+results.push(Result::Ok(1));
+results.push(Result::Err("bad"));
+print(results.get(0).is_ok());
+match results.get(1) {
+  Result::Ok(value) => print(value),
+  Result::Err(message) => print(message),
+}
+--- output
+true
+bad
+
+=== method syntax calls a free function
+func double(n: int32) -> int32 {
+  return n * 2;
+}
+print(21.double());
+--- output
+42
+
+=== a method wins over a free function with the same name
+class Box {
+  pub v: int32 = v;
+
+  Constructor(v: int32);
+
+  pub func get(&self) -> int32 {
+    return self.v;
+  }
+}
+func get(b: Box) -> int32 {
+  return 0;
+}
+let b = Box(5);
+print(b.get());
+--- output
+5
+
+=== ?? gives the value or the default
+import std::option::{Option};
+func find(n: int32) -> Option<int32> {
+  if n > 0 {
+    return Some(n);
+  }
+  None
+}
+print(find(5) ?? 0);
+print(find(-1) ?? 0);
+let name: Option<String> = None;
+print(name ?? "anonymous");
+--- output
+5
+0
+anonymous
+
+=== ?? on a Result
+import std::result::{Result};
+import std::string::{parse_int};
+func parse(text: String) -> Result<int64, String> {
+  match parse_int(&text) {
+    Some(n) => Ok(n),
+    None => Err("not a number"),
+  }
+}
+print(parse("42") ?? -1);
+print(parse("x") ?? -1);
+--- output
+42
+-1
+
+=== ?? binds tighter than comparisons and looser than arithmetic
+import std::option::{Option};
+let none: Option<int32> = None;
+print(none ?? 1 + 2);
+print(Some(4) ?? 0 == 4);
+--- output
+3
+true
+
+=== ?? chains from the right
+import std::option::{Option};
+let first: Option<int32> = None;
+let second: Option<int32> = Some(7);
+print(first ?? second ?? 0);
+--- output
+7
+
+=== the default of ?? only runs when needed
+import std::option::{Option};
+func loud() -> int32 {
+  print("default");
+  99
+}
+let some: Option<int32> = Some(3);
+let none: Option<int32> = None;
+print(some ?? loud());
+print(none ?? loud());
+--- output
+3
+default
+99
+
+=== ?? needs an Option or Result
+let x = 5 ?? 0;
+--- error
+'??' gives the value of an Option or Result, 'int32' is neither

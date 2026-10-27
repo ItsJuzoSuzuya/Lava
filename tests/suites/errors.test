@@ -116,8 +116,47 @@ let b = c;
 --- error
 let b = c;
 
-=== error shows line and column
+=== error shows file, line and column
 let a = 1;
 let b = c;
 --- error
---> 2:9
+--> main.lv:2:9
+
+=== error in an imported module shows its file
+import helper;
+
+print(1);
+--- file helper.lv
+pub func help() -> int32 {
+  return missing;
+}
+--- error
+--> helper.lv:2:10
+
+=== an invalid type is reported where it is
+import std::fs;
+
+func f(items: [String]) {
+}
+--- error
+--> main.lv:3:15
+
+=== a reference to a value isn't a place
+print(&"text");
+--- error
+'&' only refers to a variable or field
+
+=== checking goes on after an error
+let a: int32 = "text";
+print(a + 1);
+let b: bool = 5;
+--- error
+type 'int32' does not match 'bool' in variable declaration
+
+=== a wrong type in a signature doesn't hide later errors
+func f(value: Nope) -> int32 {
+  return value;
+}
+print(missing);
+--- error
+unknown identifier 'missing'

@@ -5,17 +5,124 @@ use inkwell::AddressSpace;
 use inkwell::basic_block::BasicBlock;
 use inkwell::intrinsics::Intrinsic;
 use inkwell::module::Linkage;
-use inkwell::types::{BasicType, BasicTypeEnum};
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue};
-use serde::Serialize;
+use inkwell::types::{BasicType, BasicTypeEnum, FunctionType};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, StructValue};
 
-use crate::codegen_ctx::{CodegenError, CodegenContext};
+use crate::codegen_ctx::{CodegenError, CodegenContext, function_symbol};
+use crate::runtime;
+use crate::sema::{CLONE, GET, SLICE_LEN};
 use crate::span::Span;
+use crate::statement::{Stmt, codegen_if, codegen_match};
 use crate::token::Token;
 use crate::traits::codegen::Codegen;
 use crate::r#type::Type;
 
-#[derive(Debug, Serialize, Clone)]
+
+/// The prelude enum the variant `name` belongs to when written without it:
+/// `Result` for `Ok` and `Err`, `Option` for `Some` and `None`.
+pub fn prelude_variant_enum(name: &str) -> Option<&'static str> {
+    match name {
+        "Ok" | "Err" => Some("Result"),
+        "Some" | "None" => Some("Option"),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    EnumVariant {
+        enum_name: String,
+        variant: String,
+        binding: Option<String>,
+    },
+    /// A literal like `5` or `"run"`, or a name that matches anything and
+    /// binds it.
+    Literal(Expr),
+    Wildcard,
+    /// `[first, second]`, `[first, ..rest]` or `[.., last]`: the items of a
+    /// fixed array or a `Vector`, each matched by its own pattern.
+    List {
+        /// The patterns of the items before the `..`, all of them without one.
+        before: Vec<Pattern>,
+        /// The `..` standing for any number of items in between, if there's one.
+        rest: Option<ListRest>,
+        /// The patterns of the last items, after the `..`.
+        after: Vec<Pattern>,
+    },
+    /// `(a, b)`: the values of a tuple, each matched by its own pattern.
+    Tuple(Vec<Pattern>),
+}
+
+/// The `..` or `..name` in a list pattern.
+#[derive(Debug, Clone)]
+pub struct ListRest {
+    /// The name the items in between are bound to, as a smaller array or a
+    /// `Vector` looking at them.
+    pub binding: Option<String>,
+    /// Position of the `..`.
+    pub span: Span,
+    /// Type of the binding, known after sema.
+    pub ty: Type,
+}
+
+impl Display for Pattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Pattern::Literal(expr) => write!(f, "{}", expr.kind),
+            Pattern::Wildcard => write!(f, "_"),
+            Pattern::EnumVariant { enum_name, variant, binding } => match binding {
+                Some(binding) => write!(f, "{}::{}({})", enum_name, variant, binding),
+                None => write!(f, "{}::{}", enum_name, variant),
+            },
+            Pattern::List { before, rest, after } => {
+                let mut items: Vec<String> = before.iter().map(|p| p.to_string()).collect();
+                if let Some(rest) = rest {
+                    items.push(format!("..{}", rest.binding.as_deref().unwrap_or("")));
+                }
+                items.extend(after.iter().map(|p| p.to_string()));
+                write!(f, "[{}]", items.join(", "))
+            }
+            Pattern::Tuple(items) => {
+                let items: Vec<String> = items.iter().map(|p| p.to_string()).collect();
+                write!(f, "({})", items.join(", "))
+            }
+        }
+    }
+}
+
+/// Statements that can end with a value, like `{ let x = 2; x * 3 }`: the
+/// body of a match arm or a branch of an `if`.
+#[derive(Clone)]
+pub struct Block {
+    pub stmts: Vec<Stmt>,
+    /// The expression ending the block without `;`, the block's value. `None`
+    /// if there's none, like for `{ return x; }`.
+    pub value: Option<Box<Expr>>,
+}
+
+impl Block {
+    /// A block that's only the value `value`, like the arm `Some(x) => x + 1`.
+    pub fn of_value(value: Expr) -> Self {
+        Block { stmts: vec![], value: Some(Box::new(value)) }
+    }
+}
+
+impl std::fmt::Debug for Block {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Block({} statements, value {:?})", self.stmts.len(), self.value)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    /// The arm's statements and value, a lone expression like in
+    /// `Some(x) => x + 1` is a block with only a value.
+    pub block: Block,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
@@ -45,9 +152,11 @@ impl Neg for Expr {
     }
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Clone)]
 pub enum ExprKind {
     Boolean(bool),
+    /// A byte written as a character, like `'a'`. Always a `uint8`.
+    CharLiteral(u8),
     /// Conversion of `value` to the number type `target`.
     ///
     /// Written as `value as target`, or inserted by sema where a value
@@ -58,6 +167,15 @@ pub enum ExprKind {
         value: Box<Expr>,
         target: Type,
     },
+    /// `(a, b)`, a tuple of the values.
+    Tuple(Vec<Expr>),
+    /// A `&[T]` looking at the elements of an array or `Vector`, which it
+    /// only borrows. Sema creates it for an argument passed as a slice.
+    SliceOf(Box<Expr>),
+    /// `&[a, b]`, a slice of values made right there, passed to a function.
+    /// Sema turns it into the [`ExprKind::SliceOf`] an array of them that lives
+    /// until the call ends.
+    SliceLiteral(Vec<Expr>),
     /// Float literal, its exact float type is decided by sema from context.
     FloatLiteral(f64),
     Identifier(String),
@@ -65,15 +183,50 @@ pub enum ExprKind {
     IntLiteral(i64),
     /// `-expr` on anything that isn't a number literal.
     Negation(Box<Expr>),
+    /// `!expr`, the opposite of a `bool`.
+    Not(Box<Expr>),
+    /// `{a, b, c}`, a fixed-size array `T[N]` of the values.
+    ArrayLiteral(Vec<Expr>),
+    /// `object[index]`. Native on arrays, the byte on a `String`, and a call
+    /// of `get` on anything else, like `Vector` and `Buffer`. Sema turns the
+    /// latter into the method call.
+    Index {
+        object: Box<Expr>,
+        index: Box<Expr>,
+    },
     /// Moves the value onto the heap, giving a `Unique`. Sema creates it from
     /// a call of the built-in `unique(value)`.
     Unique(Box<Expr>),
+    /// Moves the value onto the heap with one user, giving a `Shared`. Sema
+    /// creates it from a call of the built-in `shared(value)`.
+    Shared(Box<Expr>),
+    /// The value a reference to a number, bool or char points to, like `x`
+    /// in `x + 1` with `x: &int32`. Sema adds it where a value is needed.
+    Deref(Box<Expr>),
     /// A new `Buffer` with room for `capacity` elements, of the element type in
     /// this expression's type. Sema creates it from a call of `Buffer<T>(capacity)`.
     NewBuffer(Box<Expr>),
     Print(Box<Expr>),
     Ref(Box<Expr>),
     StringLiteral(String),
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<MatchArm>,
+    },
+    /// `if condition { ... } else { ... }`, a statement that runs one of its
+    /// branches. An `else if` is an else branch with only that `if` in it.
+    If {
+        condition: Box<Expr>,
+        then_block: Block,
+        else_block: Option<Block>,
+    },
+    /// `condition ? then_value : else_value`, one of the two values. Only the
+    /// chosen one is computed.
+    Ternary {
+        condition: Box<Expr>,
+        then_value: Box<Expr>,
+        else_value: Box<Expr>,
+    },
 
     Assignment {
         lhs: Box<Expr>,
@@ -84,8 +237,12 @@ pub enum ExprKind {
         op: Token,
         rhs: Box<Expr>,
     },
+    /// A variant without payload, like `Option::None` or `Option<int32>::None`.
+    /// Sema turns it into a call of the variant's constructor.
     ColonAccess {
         name: String,
+        /// Explicit type arguments of a generic enum, empty otherwise.
+        type_args: Vec<Type>,
         tag: String,
     },
     /// `object.field`, where `object` can be any expression like `a.b` or `make()`.
@@ -128,20 +285,35 @@ impl Display for ExprKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExprKind::Boolean(val)                     => write!(f, "{}", val),
-            ExprKind::Convert { value, target }        => write!(f, "{} as {}", value.kind, target),
+            ExprKind::CharLiteral(value)               => write!(f, "'{}'", (*value as char).escape_default()),
+            ExprKind::Not(inner)                       => write!(f, "!{}", inner.kind),
+            ExprKind::ArrayLiteral(values)             => write!(f, "{{{}}}", values.iter().map(|v| v.kind.to_string()).collect::<Vec<_>>().join(", ")),
+            ExprKind::Tuple(values)                    => write!(f, "({})", values.iter().map(|v| v.kind.to_string()).collect::<Vec<_>>().join(", ")),
+            ExprKind::Index { object, index }          => write!(f, "{}[{}]", object.kind, index.kind),            ExprKind::Convert { value, target }        => write!(f, "{} as {}", value.kind, target),
+            ExprKind::SliceOf(value)                   => write!(f, "{}", value.kind),
+            ExprKind::SliceLiteral(values) => {
+                let values: Vec<String> = values.iter().map(|v| v.kind.to_string()).collect();
+                write!(f, "&[{}]", values.join(", "))
+            }
             ExprKind::FloatLiteral(value)              => write!(f, "{:?}", value),
             ExprKind::Identifier(name)                 => write!(f, "{}", name),
             ExprKind::IntLiteral(value)                => write!(f, "{}", value),
             ExprKind::Negation(inner)                  => write!(f, "-{}", inner.kind),
             ExprKind::Unique(inner)                    => write!(f, "unique({})", inner.kind),
+            ExprKind::Shared(inner)                    => write!(f, "shared({})", inner.kind),
+            ExprKind::Deref(inner)                     => write!(f, "*{}", inner.kind),
             ExprKind::NewBuffer(capacity)              => write!(f, "Buffer({})", capacity.kind),
             ExprKind::Print(expr)                      => write!(f, "Print({})", expr.kind),
             ExprKind::Ref(inner)                       => write!(f, "&{}", inner.kind),
             ExprKind::StringLiteral(lit)               => write!(f, "\"{}\"", lit),
+            ExprKind::Match { scrutinee, .. }          => write!(f, "match {} {{ .. }}", scrutinee.kind),
+            ExprKind::If { condition, .. }             => write!(f, "if {} {{ .. }}", condition.kind),
+            ExprKind::Ternary { condition, then_value, else_value } =>
+                write!(f, "{} ? {} : {}", condition.kind, then_value.kind, else_value.kind),
 
             ExprKind::Assignment { lhs, rhs }          => write!(f, "Assignment({} = {})", lhs.kind, rhs.kind),
             ExprKind::BinaryExpr { lhs, op, rhs }      => write!(f, "{} {} {}", lhs.kind, op, rhs.kind),
-            ExprKind::ColonAccess { name, tag }        => write!(f, "{}::{}", name, tag),
+            ExprKind::ColonAccess { name, tag, .. }    => write!(f, "{}::{}", name, tag),
             ExprKind::FieldAccess { object, field }    => write!(f, "{}.{}", object.kind, field),
             ExprKind::FunctionCall { name, .. }        => write!(f, "{}()", name),
             ExprKind::ModuleImport { name, .. }              => write!(f, "{}", name),
@@ -173,14 +345,19 @@ impl Expr {
                         CodegenError::UndefinedVariable(name.clone()).throw(&source, span)
                     }
                 };
-                // Using a `Unique` or `Buffer` as a value moves it, the variable doesn't own it
-                // anymore. A class owning memory is copied instead, with memory of its own
-                if let Some(owned) = ctx.scope.get(name).and_then(|s| s.owned.clone()) {
-                    if owned.ty.is_move_only() {
+                // Using a value that owns memory as a value moves it, the variable doesn't own
+                // it anymore. Sema made sure it isn't used afterwards
+                match ctx.scope.get(name).and_then(|s| s.owned.clone()) {
+                    Some(owned) => {
                         ctx.builder.build_store(owned.alive, ctx.context.bool_type().const_int(0, false)).unwrap();
-                    } else {
-                        return Some(Box::new(ctx.deep_clone(value, &owned.ty)));
                     }
+                    // A match binding looks into the matched value, which keeps an empty
+                    // place instead, so freeing it later doesn't free the moved value
+                    None if ctx.owns_memory(&self.ty) && value.get_type() == self.ty.to_llvm(ctx) => {
+                        let place = ctx.load_var_ptr(name).expect("the binding is in scope");
+                        return Some(Box::new(ctx.move_out(place, &self.ty)));
+                    }
+                    None => {}
                 }
                 Some(Box::new(value))
             }
@@ -193,30 +370,29 @@ impl Expr {
                 ctx.builder.build_store(heap, value).unwrap();
                 Some(Box::new(heap.into()))
             }
+            ExprKind::Shared(inner) => {
+                let value = *inner.codegen(ctx).unwrap();
+                Some(Box::new(ctx.new_shared(value, &inner.ty).into()))
+            }
+            ExprKind::Deref(inner) => {
+                let address = inner.codegen(ctx).unwrap().into_pointer_value();
+                let value_ty = self.ty.to_llvm(ctx);
+                Some(Box::new(ctx.builder.build_load(value_ty, address, "deref").unwrap()))
+            }
             ExprKind::NewBuffer(capacity) => {
                 let Type::Buffer(element) = &self.ty else {
                     panic!("a new Buffer has the type '{}'", self.ty);
                 };
                 let capacity = capacity.codegen(ctx).unwrap().into_int_value();
                 let element_size = element.to_llvm(ctx).size_of().expect("Buffer element has no size");
-
-                // Zeroed, so the slots of owning elements start out as empty null pointers
-                let calloc = ctx.libc_function("calloc");
-                let data = ctx.builder.build_call(calloc, &[capacity.into(), element_size.into()], "data").unwrap()
-                    .try_as_basic_value().basic().unwrap();
-                let malloc = ctx.libc_function("malloc");
-                let header_size = ctx.buffer_header_type().size_of().unwrap();
-                let header = ctx.builder.build_call(malloc, &[header_size.into()], "buffer").unwrap()
-                    .try_as_basic_value().basic().unwrap().into_pointer_value();
-
-                ctx.builder.build_store(ctx.buffer_capacity_ptr(header), capacity).unwrap();
-                ctx.builder.build_store(ctx.buffer_data_ptr(header), data).unwrap();
-                Some(Box::new(header.into()))
+                Some(Box::new(ctx.new_buffer(capacity, element_size).into()))
             }
             ExprKind::Convert { value, target } => {
                 let llvm_value = *value.codegen(ctx).unwrap();
                 Some(Box::new(build_conversion(ctx, llvm_value, &value.ty, target)))
             }
+            ExprKind::SliceOf(value) => Some(Box::new(slice_of(ctx, value))),
+            ExprKind::SliceLiteral(_) => unreachable!("sema turns `&[...]` into a SliceOf"),
             ExprKind::FloatLiteral(value) => {
                 let float_ty = self.ty.to_llvm(ctx).into_float_type();
                 Some(Box::new(float_ty.const_float(*value).into()))
@@ -224,6 +400,68 @@ impl Expr {
             ExprKind::IntLiteral(value) => {
                 let int_ty = self.ty.to_llvm(ctx).into_int_type();
                 Some(Box::new(int_ty.const_int(*value as u64, true).into()))
+            }
+            ExprKind::CharLiteral(value) => {
+                Some(Box::new(ctx.context.i8_type().const_int(*value as u64, false).into()))
+            }
+            ExprKind::Not(inner) => {
+                let value = inner.codegen(ctx).unwrap().into_int_value();
+                Some(Box::new(ctx.builder.build_not(value, "not").unwrap().into()))
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                // Unused as a statement, then there's no value
+                if self.ty == Type::Void {
+                    codegen_match(ctx, scrutinee, arms, span, None);
+                    return None;
+                }
+                let value_ty = self.ty.to_llvm(ctx);
+                let slot = ctx.build_entry_alloca(value_ty, "match_value");
+                codegen_match(ctx, scrutinee, arms, span, Some(slot));
+                Some(Box::new(ctx.builder.build_load(value_ty, slot, "match_value").unwrap()))
+            }
+            ExprKind::If { condition, then_block, else_block } => {
+                if self.ty == Type::Void {
+                    codegen_if(ctx, condition, then_block, else_block.as_ref(), None);
+                    return None;
+                }
+                let value_ty = self.ty.to_llvm(ctx);
+                let slot = ctx.build_entry_alloca(value_ty, "if_value");
+                codegen_if(ctx, condition, then_block, else_block.as_ref(), Some(slot));
+                Some(Box::new(ctx.builder.build_load(value_ty, slot, "if_value").unwrap()))
+            }
+            // Branches like an `if` whose blocks are only the two values
+            ExprKind::Ternary { condition, then_value, else_value } => {
+                let then_block = Block::of_value((**then_value).clone());
+                let else_block = Block::of_value((**else_value).clone());
+                if self.ty == Type::Void {
+                    codegen_if(ctx, condition, &then_block, Some(&else_block), None);
+                    return None;
+                }
+                let value_ty = self.ty.to_llvm(ctx);
+                let slot = ctx.build_entry_alloca(value_ty, "ternary_value");
+                codegen_if(ctx, condition, &then_block, Some(&else_block), Some(slot));
+                Some(Box::new(ctx.builder.build_load(value_ty, slot, "ternary_value").unwrap()))
+            }
+            ExprKind::ArrayLiteral(values) => {
+                let mut array = self.ty.to_llvm(ctx).into_array_type().get_undef();
+                for (i, value) in values.iter().enumerate() {
+                    let value = *value.codegen(ctx).unwrap();
+                    array = ctx.builder.build_insert_value(array, value, i as u32, "array").unwrap().into_array_value();
+                }
+                Some(Box::new(array.into()))
+            }
+            ExprKind::Tuple(values) => {
+                let mut tuple = self.ty.to_llvm(ctx).into_struct_type().get_undef();
+                for (i, value) in values.iter().enumerate() {
+                    let value = *value.codegen(ctx).unwrap();
+                    tuple = ctx.builder.build_insert_value(tuple, value, i as u32, "tuple").unwrap().into_struct_value();
+                }
+                Some(Box::new(tuple.into()))
+            }
+            ExprKind::Index { object, index } => {
+                // The element moves out of the array, sema made sure the array isn't used afterwards
+                let element_ptr = element_address(ctx, object, index, span);
+                Some(Box::new(ctx.move_out(element_ptr, &self.ty)))
             }
             ExprKind::Negation(inner) => {
                 let value = *inner.codegen(ctx).unwrap();
@@ -267,15 +505,25 @@ impl Expr {
                         };
                         let ptr = match expr.codegen_place(ctx) {
                             Some(p) => p,
+                            // A value like a call's result, freed after printing if it owns memory
                             None => {
                                 let val = *expr.codegen(ctx).unwrap();
-                                let ty = expr.ty.to_llvm(ctx);
-                                let tmp = ctx.build_entry_alloca(ty, "tmp_enum");
-                                ctx.builder.build_store(tmp, val).unwrap();
-                                tmp
+                                if ctx.owns_memory(&expr.ty) {
+                                    ctx.push_temporary(val, &expr.ty);
+                                    ctx.temporaries.last().unwrap().0
+                                } else {
+                                    let ty = expr.ty.to_llvm(ctx);
+                                    let tmp = ctx.build_entry_alloca(ty, "tmp_enum");
+                                    ctx.builder.build_store(tmp, val).unwrap();
+                                    tmp
+                                }
                             }
                         };
                         ctx.builder.build_call(printer, &[ptr.into()], "").unwrap();
+                    }
+                    ty if ty.is_string() => {
+                        let string = borrowed_string(ctx, expr);
+                        print_string(ctx, string, "\n");
                     }
                     _ => {
                         let expr_value = expr.codegen(ctx).unwrap();
@@ -295,10 +543,7 @@ impl Expr {
                     .unwrap_or_else(|| panic!("'&' operand is not a place expression"));
                 Some(Box::new(ptr.into()))
             },
-            ExprKind::StringLiteral(lit) => {
-                let string = ctx.builder.build_global_string_ptr(lit, "str").unwrap();
-                Some(Box::new(string.as_pointer_value().into()))
-            },
+            ExprKind::StringLiteral(lit) => Some(Box::new(ctx.string_literal(lit))),
 
             ExprKind::Assignment { lhs, rhs } => {
                 let ptr = lhs.codegen_place(ctx)
@@ -312,7 +557,7 @@ impl Expr {
                 };
                 if let Some(owned) = &owned {
                     ctx.emit_drop(owned);
-                } else if matches!(lhs.kind, ExprKind::FieldAccess { .. }) && ctx.owns_memory(&lhs.ty) {
+                } else if matches!(lhs.kind, ExprKind::FieldAccess { .. } | ExprKind::Index { .. }) && ctx.owns_memory(&lhs.ty) {
                     // So does an owning field, its object keeps owning only the new value
                     ctx.drop_in_place(ptr, &lhs.ty);
                 }
@@ -323,6 +568,9 @@ impl Expr {
 
                 None
             },
+            ExprKind::BinaryExpr { lhs, op, rhs } if op.is_logical() => {
+                Some(Box::new(build_logical(ctx, op, lhs, rhs).into()))
+            }
             ExprKind::BinaryExpr { lhs, op, rhs } => {
                 let lhs_value = *lhs.codegen(ctx).unwrap();
                 let rhs_value = *rhs.codegen(ctx).unwrap();
@@ -341,6 +589,9 @@ impl Expr {
                             Token::Multiply => ctx.builder.build_int_mul(l, r, "tmpmul"),
                             Token::Divide if *signed => ctx.builder.build_int_signed_div(l, r, "tmpdiv"),
                             Token::Divide   => ctx.builder.build_int_unsigned_div(l, r, "tmpdiv"),
+                            Token::Percent if *signed => ctx.builder.build_int_signed_rem(l, r, "tmprem"),
+                            Token::Percent  => ctx.builder.build_int_unsigned_rem(l, r, "tmprem"),
+                            Token::Caret    => ctx.builder.build_xor(l, r, "tmpxor"),
                             other => {
                                 let source = ctx.source.clone();
                                 CodegenError::UnsupportedOperator(other.to_string()).throw(&source, span)
@@ -354,11 +605,16 @@ impl Expr {
                             Token::Minus    => ctx.builder.build_float_sub(l, r, "tmpsub"),
                             Token::Multiply => ctx.builder.build_float_mul(l, r, "tmpmul"),
                             Token::Divide   => ctx.builder.build_float_div(l, r, "tmpdiv"),
+                            Token::Percent  => ctx.builder.build_float_rem(l, r, "tmprem"),
                             other => {
                                 let source = ctx.source.clone();
                                 CodegenError::UnsupportedOperator(other.to_string()).throw(&source, span)
                             }
                         }.unwrap().into()
+                    }
+                    // Exactly one of the two is true
+                    (Type::Bool, Token::Caret) => {
+                        ctx.builder.build_xor(lhs_value.into_int_value(), rhs_value.into_int_value(), "tmpxor").unwrap().into()
                     }
                     (_, other) => {
                         let source = ctx.source.clone();
@@ -367,40 +623,56 @@ impl Expr {
                 };
                 Some(Box::new(result))
             }
-            ExprKind::ColonAccess { name, tag } => {
-                let variants = match ctx.enums.get(name) {
-                    Some(v) => v,
-                    None => {
-                        let source = ctx.source.clone();
-                        CodegenError::UndefinedClass(name.clone()).throw(&source, span)
-                    }
-                };
-                let discriminant = variants.iter()
-                    .position(|(n, _)| *n == tag.to_string())
-                    .unwrap_or_else(|| {
-                        let source = ctx.source.clone();
-                        CodegenError::UndefinedField {
-                            class: name.clone(),
-                            field: tag.to_string(),
-                        }.throw(&source, span)
-                    });
-                let value = ctx.context.i32_type().const_int(discriminant as u64, false);
-                Some(Box::new(value.into()))
-            },
+            ExprKind::ColonAccess { .. } => {
+                unreachable!("ColonAccess must be lowered to a constructor call by sema before codegen")
+            }
             ExprKind::FieldAccess { object, field } => {
-                let (field_ptr, field_type) = field_address(ctx, object, field, span);
-                let field_val = ctx.builder.build_load(field_type, field_ptr, "tmpfield").unwrap();
-                // The object keeps owning its field, so the value used here is a copy
-                Some(Box::new(ctx.deep_clone(field_val, &self.ty)))
+                // The field moves out of its object, which keeps an empty field. Sema made
+                // sure the object is a temporary or isn't used afterwards
+                let (field_ptr, _) = field_address(ctx, object, field, span);
+                Some(Box::new(ctx.move_out(field_ptr, &self.ty)))
             }
             ExprKind::FunctionCall { name: _, type_args: _, params, receiver, mangled } => {
                 let mangled = mangled.as_ref()
                     .expect("function call mangled name missing — sema must run first");
 
+                // `x.clone()` copies the receiver with everything it owns
+                // The length of a slice is part of it
+                if mangled == SLICE_LEN {
+                    let receiver = receiver.as_ref().expect("len has a receiver");
+                    let slice_ty = match &receiver.ty {
+                        Type::Ref(inner) => (**inner).clone(),
+                        other => other.clone(),
+                    };
+                    let slice = borrowed_value(ctx, receiver, &slice_ty).into_struct_value();
+                    return Some(Box::new(ctx.builder.build_extract_value(slice, 1, "len").unwrap()));
+                }
+                if mangled == CLONE {
+                    let receiver = receiver.as_ref().expect("clone has a receiver");
+                    let original = borrowed_value(ctx, receiver, &self.ty);
+                    return Some(Box::new(ctx.deep_clone(original, &self.ty)));
+                }
+                // A `Shared` or `Unique` points to its value, that's the reference
+                if mangled == GET {
+                    let receiver = receiver.as_ref().expect("get has a receiver");
+                    let holder = match &receiver.ty {
+                        Type::Ref(inner) => (**inner).clone(),
+                        other => other.clone(),
+                    };
+                    return Some(Box::new(borrowed_value(ctx, receiver, &holder)));
+                }
                 // Methods of `Buffer` are built in, sema marks them like `Buffer.get`
                 if let Some(method) = mangled.strip_prefix("Buffer.") {
                     let receiver = receiver.as_ref().expect("Buffer methods have a receiver");
                     return codegen_buffer_method(ctx, method, receiver, params, span).map(Box::new);
+                }
+                if let Some((function, fn_type)) = ctx.externs.get(mangled).copied() {
+                    let result = codegen_extern_call(ctx, function, fn_type, mangled, params);
+                    // A returned C string becomes a String
+                    return match result {
+                        Some(c_string) if self.ty.is_string() => Some(Box::new(ctx.from_c_string(c_string.into_pointer_value()).into())),
+                        other => other.map(Box::new),
+                    };
                 }
 
                 // A method gets the address of its receiver as `self`
@@ -436,11 +708,31 @@ impl Expr {
                                 Some(passed) => {
                                     let needs_ref = matches!(def_ty, Type::Ref(_))
                                         && !matches!(passed.ty, Type::Ref(_));
-                                    if needs_ref {
-                                        let ptr = passed.codegen_place(ctx).unwrap_or_else(|| {
-                                            panic!("cannot take address of non-place expression for arg {}", i)
-                                        });
-                                        ptr.into()
+                                    // `self` of a class method holds the object's address, that's the reference
+                                    let holds_address = match &passed.kind {
+                                        ExprKind::Identifier(name) => ctx.scope.get(name)
+                                            .is_some_and(|s| s.ty.is_pointer_type() && !passed.ty.to_llvm(ctx).is_pointer_type()),
+                                        _ => false,
+                                    };
+                                    if needs_ref && holds_address {
+                                        let ExprKind::Identifier(name) = &passed.kind else { unreachable!() };
+                                        variable_address(ctx, name, &passed.span).into()
+                                    } else if needs_ref {
+                                        match passed.codegen_place(ctx) {
+                                            Some(ptr) => ptr.into(),
+                                            // A value like a call's result is lent from a slot, freed when the expression ends
+                                            None => {
+                                                let value = *passed.codegen(ctx).unwrap();
+                                                if ctx.owns_memory(&passed.ty) {
+                                                    ctx.push_temporary(value, &passed.ty);
+                                                    ctx.temporaries.last().unwrap().0.into()
+                                                } else {
+                                                    let slot = ctx.build_entry_alloca(value.get_type(), "lent");
+                                                    ctx.builder.build_store(slot, value).unwrap();
+                                                    slot.into()
+                                                }
+                                            }
+                                        }
                                     } else {
                                         *passed.codegen(ctx).unwrap()
                                     }
@@ -464,7 +756,8 @@ impl Expr {
                     }
                 }
 
-                let function = match ctx.module.get_function(mangled) {
+                // Built-ins have their own LLVM names, so they don't clash with C functions
+                let function = match ctx.module.get_function(&function_symbol(mangled)).or_else(|| ctx.module.get_function(&runtime::symbol(mangled))) {
                     Some(f) => f,
                     None => {
                         let source = ctx.source.clone();
@@ -491,6 +784,11 @@ impl Codegen for Expr {
     /// Emits the value of this expression and frees the owning temporaries
     /// created on the way, like the `Unique` returned by `v.get(0)` in `v.get(0).x`.
     fn codegen<'ctx, 'a>(&self, ctx: &'a mut CodegenContext<'ctx>) -> Option<Box<BasicValueEnum<'ctx>>> {
+        // A slice only looks at its array, a temporary one like of `&[a, b]` has
+        // to live until the call it's passed to ends, which frees it then
+        if matches!(self.kind, ExprKind::SliceOf(_)) {
+            return self.codegen_value(ctx);
+        }
         let mark = ctx.temporaries.len();
         let value = self.codegen_value(ctx);
         ctx.drop_temporaries(mark);
@@ -513,9 +811,99 @@ impl Codegen for Expr {
             ExprKind::FieldAccess { object, field } => {
                 Some(field_address(ctx, object, field, span).0)
             }
+            ExprKind::Index { object, index } => Some(element_address(ctx, object, index, span)),
             _ => None,
         }
     }
+}
+
+/// Address of the element at `index` of the array `object`, also through a
+/// reference or `Unique`. Stops the program if the index is out of bounds.
+fn element_address<'ctx>(ctx: &mut CodegenContext<'ctx>, object: &Expr, index: &Expr, span: &Span) -> PointerValue<'ctx> {
+    let array = match &object.ty {
+        Type::Ref(inner) | Type::Unique(inner) | Type::Shared(inner) => inner.as_ref().clone(),
+        other => other.clone(),
+    };
+    // A slice holds the address of its elements and their count
+    let slice = match &array {
+        Type::Slice(element) => {
+            let value = borrowed_value(ctx, object, &array).into_struct_value();
+            let data = ctx.builder.build_extract_value(value, 0, "data").unwrap().into_pointer_value();
+            let len = ctx.builder.build_extract_value(value, 1, "len").unwrap().into_int_value();
+            Some((element.as_ref().clone(), data, len))
+        }
+        _ => None,
+    };
+
+    // Any integer type indexes, as a 64 bit number. A negative one is out of bounds too.
+    let raw = index.codegen(ctx).unwrap().into_int_value();
+    let i64_ty = ctx.context.i64_type();
+    let index_value = match &index.ty {
+        Type::Int { bits: 64, .. } => raw,
+        Type::Int { signed: true, .. } => ctx.builder.build_int_s_extend(raw, i64_ty, "index").unwrap(),
+        _ => ctx.builder.build_int_z_extend(raw, i64_ty, "index").unwrap(),
+    };
+    if let Some((element, data, len)) = slice {
+        ctx.build_slice_bounds_check(index_value, len);
+        return unsafe { ctx.builder.build_in_bounds_gep(element.to_llvm(ctx), data, &[index_value], "element").unwrap() };
+    }
+
+    let Type::Array(_, len) = array else {
+        panic!("indexing '{}' reached codegen, sema turns it into a method call", object.ty);
+    };
+    let base = object_address(ctx, object, span);
+    ctx.build_array_bounds_check(index_value, len);
+
+    let zero = i64_ty.const_zero();
+    unsafe { ctx.builder.build_in_bounds_gep(array.to_llvm(ctx), base, &[zero, index_value], "element").unwrap() }
+}
+
+/// The `&[T]` of the elements of `value`, an array or `Vector`, also behind a
+/// reference: the address of its first element and how many there are.
+fn slice_of<'ctx>(ctx: &mut CodegenContext<'ctx>, value: &Expr) -> BasicValueEnum<'ctx> {
+    let ty = match &value.ty {
+        Type::Ref(inner) => (**inner).clone(),
+        other => other.clone(),
+    };
+    // Where the array or Vector is, only borrowed
+    let address = match &value.kind {
+        _ if matches!(value.ty, Type::Ref(_)) => value.codegen(ctx).unwrap().into_pointer_value(),
+        ExprKind::Identifier(name) => variable_address(ctx, name, &value.span),
+        _ => match value.codegen_place(ctx) {
+            Some(place) => place,
+            // A temporary like a call's result, freed when the expression ends
+            None => {
+                let result = *value.codegen(ctx).unwrap();
+                ctx.push_temporary(result, &ty);
+                ctx.temporaries.last().unwrap().0
+            }
+        },
+    };
+    let i64_ty = ctx.context.i64_type();
+    let (data, len) = match &ty {
+        Type::Array(_, len) => {
+            let zero = i64_ty.const_zero();
+            let first = unsafe { ctx.builder.build_in_bounds_gep(ty.to_llvm(ctx), address, &[zero, zero], "first").unwrap() };
+            (first, i64_ty.const_int(*len, false))
+        }
+        Type::Class(name) => {
+            // The prelude's `Vector`: its Buffer of elements and its length
+            let field = |field: &str| ctx.classes.get(name)
+                .and_then(|fields| fields.iter().position(|(n, _)| n == field))
+                .unwrap_or_else(|| panic!("'{}' has no field '{}'", name, field)) as u32;
+            let struct_ty = ctx.module.get_struct_type(name).expect("Vector struct not defined");
+            let data_ptr = ctx.builder.build_struct_gep(struct_ty, address, field("data"), "data").unwrap();
+            let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+            let header = ctx.builder.build_load(ptr_ty, data_ptr, "buffer").unwrap().into_pointer_value();
+            let length_ptr = ctx.builder.build_struct_gep(struct_ty, address, field("length"), "length").unwrap();
+            let len = ctx.builder.build_load(i64_ty, length_ptr, "length").unwrap().into_int_value();
+            (ctx.buffer_data(header), len)
+        }
+        other => panic!("a slice of '{}' reached codegen, sema only makes them of arrays and Vectors", other),
+    };
+    let slice = ctx.slice_type().get_undef();
+    let slice = ctx.builder.build_insert_value(slice, data, 0, "slice").unwrap();
+    ctx.builder.build_insert_value(slice, len, 1, "slice").unwrap().into_struct_value().into()
 }
 
 /// Address of the value of the variable `name`, for accessing its fields or
@@ -547,10 +935,17 @@ fn variable_address<'ctx>(ctx: &mut CodegenContext<'ctx>, name: &str, span: &Spa
 /// result of a call, are stored in a temporary slot first.
 fn object_address<'ctx>(ctx: &mut CodegenContext<'ctx>, object: &Expr, span: &Span) -> PointerValue<'ctx> {
     if let ExprKind::Identifier(name) = &object.kind {
-        return variable_address(ctx, name, span);
+        let address = variable_address(ctx, name, span);
+        // A reference to a string or number holds the address of the value. One to a
+        // class or enum is followed by `variable_address` already
+        if matches!(&object.ty, Type::Ref(inner) if inner.class_name().is_none()) {
+            let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+            return ctx.builder.build_load(ptr_ty, address, "referenced").unwrap().into_pointer_value();
+        }
+        return address;
     }
 
-    let points_elsewhere = matches!(object.ty, Type::Ref(_) | Type::Unique(_) | Type::Buffer(_));
+    let points_elsewhere = matches!(object.ty, Type::Ref(_) | Type::Unique(_) | Type::Shared(_) | Type::Buffer(_));
     if let Some(place) = object.codegen_place(ctx) {
         if points_elsewhere {
             let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
@@ -580,6 +975,17 @@ fn object_address<'ctx>(ctx: &mut CodegenContext<'ctx>, object: &Expr, span: &Sp
 /// Address and LLVM type of the field `field` of the class value `object`,
 /// or of the tag of an enum value for `tag`.
 fn field_address<'ctx>(ctx: &mut CodegenContext<'ctx>, object: &Expr, field: &str, span: &Span) -> (PointerValue<'ctx>, BasicTypeEnum<'ctx>) {
+    // `t.0` of a tuple
+    let tuple = match &object.ty {
+        Type::Ref(inner) | Type::Unique(inner) | Type::Shared(inner) => inner.as_ref().clone(),
+        other => other.clone(),
+    };
+    if let Type::Tuple(items) = &tuple {
+        let index: usize = field.parse().expect("sema checked the tuple value");
+        let object_ptr = object_address(ctx, object, span);
+        let item_ptr = ctx.builder.build_struct_gep(tuple.to_llvm(ctx).into_struct_type(), object_ptr, index as u32, "tuple_item").unwrap();
+        return (item_ptr, items[index].to_llvm(ctx));
+    }
     let class_name = object.ty.class_name()
         .unwrap_or_else(|| panic!("field access on a value of type '{}'", object.ty));
     let object_ptr = object_address(ctx, object, span);
@@ -617,17 +1023,22 @@ fn field_address<'ctx>(ctx: &mut CodegenContext<'ctx>, object: &Expr, field: &st
 fn codegen_buffer_method<'ctx>(ctx: &mut CodegenContext<'ctx>, method: &str, receiver: &Expr, args: &[Expr], span: &Span) -> Option<BasicValueEnum<'ctx>> {
     let element = match &receiver.ty {
         Type::Buffer(element) => element.as_ref().clone(),
-        Type::Ref(inner) | Type::Unique(inner) => match inner.as_ref() {
+        Type::Ref(inner) | Type::Unique(inner) | Type::Shared(inner) => match inner.as_ref() {
             Type::Buffer(element) => element.as_ref().clone(),
             other => panic!("'{}' isn't a Buffer", other),
         },
         other => panic!("'{}' isn't a Buffer", other),
     };
     let element_ty = element.to_llvm(ctx);
-    let header = object_address(ctx, receiver, span);
+    let mut header = object_address(ctx, receiver, span);
+    // A `Shared` or `Unique` points to where the Buffer is
+    if matches!(receiver.ty, Type::Shared(_) | Type::Unique(_)) {
+        let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+        header = ctx.builder.build_load(ptr_ty, header, "buffer").unwrap().into_pointer_value();
+    }
 
     match method {
-        "get" | "set" => {
+        "get" | "take" | "set" => {
             let index = args[0].codegen(ctx).unwrap().into_int_value();
             // The value is computed before the check, like any argument
             let value = if method == "set" { Some(*args[1].codegen(ctx).unwrap()) } else { None };
@@ -642,7 +1053,9 @@ fn codegen_buffer_method<'ctx>(ctx: &mut CodegenContext<'ctx>, method: &str, rec
                     None
                 }
                 // The element stays in the Buffer, the caller gets its own copy
-                None => Some(ctx.deep_clone(ctx.builder.build_load(element_ty, slot, "element").unwrap(), &element)),
+                None if method == "get" => Some(ctx.deep_clone(ctx.builder.build_load(element_ty, slot, "element").unwrap(), &element)),
+                // The element moves out, its slot is left empty
+                None => Some(ctx.move_out(slot, &element)),
             }
         }
         "capacity" => {
@@ -707,7 +1120,116 @@ fn printf_format_for(ty: &BasicTypeEnum<'_>) -> &'static str {
 ///
 /// Ints compare by their signedness, so `uint8` 200 is greater than 100 but
 /// `int8` -56 isn't. Floats use ordered comparisons, which are false if a side is NaN.
-fn build_comparison<'ctx>(ctx: &CodegenContext<'ctx>, op: &Token, lhs: BasicValueEnum<'ctx>, rhs: BasicValueEnum<'ctx>, ty: &Type) -> IntValue<'ctx> {
+/// Builds `lhs && rhs` or `lhs || rhs`. The right side only runs if the left
+/// one doesn't decide the result already.
+fn build_logical<'ctx>(ctx: &mut CodegenContext<'ctx>, op: &Token, lhs: &Expr, rhs: &Expr) -> IntValue<'ctx> {
+    let function = ctx.builder.get_insert_block().and_then(|b| b.get_parent()).expect("expression outside of a function");
+    let lhs_value = lhs.codegen(ctx).unwrap().into_int_value();
+    let lhs_bb = ctx.builder.get_insert_block().unwrap();
+    let rhs_bb = ctx.context.append_basic_block(function, "logic_rhs");
+    let end_bb = ctx.context.append_basic_block(function, "logic_end");
+
+    // `&&` is decided by a false left side, `||` by a true one
+    match op {
+        Token::AndAnd => ctx.builder.build_conditional_branch(lhs_value, rhs_bb, end_bb),
+        _ => ctx.builder.build_conditional_branch(lhs_value, end_bb, rhs_bb),
+    }.unwrap();
+
+    ctx.builder.position_at_end(rhs_bb);
+    let rhs_value = rhs.codegen(ctx).unwrap().into_int_value();
+    let rhs_end_bb = ctx.builder.get_insert_block().unwrap();
+    ctx.builder.build_unconditional_branch(end_bb).unwrap();
+
+    ctx.builder.position_at_end(end_bb);
+    let result = ctx.builder.build_phi(ctx.context.bool_type(), "logic").unwrap();
+    result.add_incoming(&[(&lhs_value, lhs_bb), (&rhs_value, rhs_end_bb)]);
+    result.as_basic_value().into_int_value()
+}
+
+/// The `String` value `expr` gives, for reading it without keeping it. A
+/// variable's, field's or array element's string is used as it is, without a
+/// copy. Anything else, like the result of a call, is freed when the
+/// expression using it ends.
+pub fn borrowed_string<'ctx>(ctx: &mut CodegenContext<'ctx>, expr: &Expr) -> StructValue<'ctx> {
+    let string_ty = Type::string().to_llvm(ctx);
+    let place = match &expr.kind {
+        // Also `self` and a `&String`, which hold the string's address
+        ExprKind::Identifier(name) => Some(variable_address(ctx, name, &expr.span)),
+        ExprKind::FieldAccess { .. } | ExprKind::Index { .. } => expr.codegen_place(ctx),
+        _ => None,
+    };
+    if let Some(place) = place {
+        return ctx.builder.build_load(string_ty, place, "string").unwrap().into_struct_value();
+    }
+    let value = *expr.codegen(ctx).unwrap();
+    if matches!(expr.ty, Type::Ref(_)) {
+        return ctx.builder.build_load(string_ty, value.into_pointer_value(), "string").unwrap().into_struct_value();
+    }
+    ctx.push_temporary(value, &Type::string());
+    value.into_struct_value()
+}
+
+/// The value of type `ty` that `expr` gives, for reading it without taking
+/// it: a variable's, field's or element's value as it is, also through a
+/// reference or `self`. Anything else, like a call's result, is freed when the
+/// expression using it ends.
+fn borrowed_value<'ctx>(ctx: &mut CodegenContext<'ctx>, expr: &Expr, ty: &Type) -> BasicValueEnum<'ctx> {
+    let llvm_ty = ty.to_llvm(ctx);
+    let place = match &expr.kind {
+        ExprKind::Identifier(name) => {
+            let symbol = ctx.scope.get(name).unwrap_or_else(|| CodegenError::UndefinedVariable(name.clone()).throw(&ctx.source, &expr.span));
+            // A variable holding the value itself, else one holding its address like `self` or a `&`
+            if symbol.ty == llvm_ty && !matches!(expr.ty, Type::Ref(_)) {
+                Some(symbol.ptr)
+            } else {
+                let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+                Some(ctx.builder.build_load(ptr_ty, symbol.ptr, "referenced").unwrap().into_pointer_value())
+            }
+        }
+        ExprKind::FieldAccess { .. } | ExprKind::Index { .. } => {
+            let place = expr.codegen_place(ctx);
+            // Through a reference the place holds the address
+            match (place, &expr.ty) {
+                (Some(place), Type::Ref(_)) => {
+                    let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+                    Some(ctx.builder.build_load(ptr_ty, place, "referenced").unwrap().into_pointer_value())
+                }
+                (place, _) => place,
+            }
+        }
+        _ => None,
+    };
+    if let Some(place) = place {
+        return ctx.builder.build_load(llvm_ty, place, "borrowed").unwrap();
+    }
+    let value = *expr.codegen(ctx).unwrap();
+    if let Type::Ref(_) = expr.ty {
+        return ctx.builder.build_load(llvm_ty, value.into_pointer_value(), "borrowed").unwrap();
+    }
+    if ctx.owns_memory(ty) {
+        ctx.push_temporary(value, ty);
+    }
+    value
+}
+
+/// Prints the text of `string`, a `String` value, then `ending`.
+fn print_string<'ctx>(ctx: &CodegenContext<'ctx>, string: StructValue<'ctx>, ending: &str) {
+    let (bytes, length) = ctx.string_parts(string);
+    let format = ctx.builder.build_global_string_ptr(&format!("%.*s{}", ending), "string_format").unwrap();
+    let length = ctx.builder.build_int_truncate(length, ctx.context.i32_type(), "length").unwrap();
+    ctx.builder.build_call(ctx.libc_function("printf"), &[format.as_pointer_value().into(), length.into(), bytes.into()], "").unwrap();
+}
+
+/// Whether the `String`s at the addresses `a` and `b` have the same text, by
+/// the `equals` method of the prelude's `String`.
+pub fn strings_equal<'ctx>(ctx: &CodegenContext<'ctx>, a: PointerValue<'ctx>, b: PointerValue<'ctx>) -> IntValue<'ctx> {
+    let equals = ctx.module.get_function(&function_symbol("String_equals"))
+        .expect("the prelude's String has the method equals");
+    ctx.builder.build_call(equals, &[a.into(), b.into()], "equal").unwrap()
+        .try_as_basic_value().basic().unwrap().into_int_value()
+}
+
+pub fn build_comparison<'ctx>(ctx: &CodegenContext<'ctx>, op: &Token, lhs: BasicValueEnum<'ctx>, rhs: BasicValueEnum<'ctx>, ty: &Type) -> IntValue<'ctx> {
     use inkwell::{FloatPredicate, IntPredicate};
 
     match ty {
@@ -758,9 +1280,14 @@ fn build_comparison<'ctx>(ctx: &CodegenContext<'ctx>, op: &Token, lhs: BasicValu
 fn build_conversion<'ctx>(ctx: &CodegenContext<'ctx>, value: BasicValueEnum<'ctx>, from: &Type, to: &Type) -> BasicValueEnum<'ctx> {
     let target = to.to_llvm(ctx);
 
-    // bool is an unsigned one bit int
+    // bool is an unsigned one bit int, char an unsigned byte
     let from = match from {
         Type::Bool => &Type::Int { bits: 1, signed: false },
+        Type::Char => &Type::Int { bits: 8, signed: false },
+        other => other,
+    };
+    let to = match to {
+        Type::Char => &Type::Int { bits: 8, signed: false },
         other => other,
     };
 
@@ -804,6 +1331,62 @@ fn build_conversion<'ctx>(ctx: &CodegenContext<'ctx>, value: BasicValueEnum<'ctx
         }
         (from, to) => panic!("no conversion from '{}' to '{}', sema must reject it", from, to),
     }
+}
+
+/// Calls `function`, the C function of the `extern func` `mangled`, with
+/// `args`. A `&Buffer` is passed as the address of its elements, a `String`
+/// as a copy of its text ending in a zero byte, like C strings do. The
+/// arguments after the declared ones get C's vararg promotions.
+fn codegen_extern_call<'ctx>(
+    ctx: &mut CodegenContext<'ctx>,
+    function: FunctionValue<'ctx>,
+    fn_type: FunctionType<'ctx>,
+    mangled: &str,
+    args: &[Expr],
+) -> Option<BasicValueEnum<'ctx>> {
+    let declared: Vec<Type> = ctx.load_func_params(mangled).map(|ps| ps.iter().map(|p| p.ty.clone()).collect()).unwrap_or_default();
+    let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+    let mut values: Vec<BasicMetadataValueEnum> = Vec::new();
+    // C gets copies of strings with a zero byte at the end, freed after the call
+    let mut c_strings = Vec::new();
+    for (i, arg) in args.iter().enumerate() {
+        let value = match declared.get(i) {
+            Some(Type::Ref(_)) => {
+                // The address of the variable holding the Buffer, unless it's a reference already
+                let slot = if matches!(arg.ty, Type::Ref(_)) {
+                    arg.codegen(ctx).unwrap().into_pointer_value()
+                } else {
+                    arg.codegen_place(ctx).expect("a Buffer passed to a C function is a variable")
+                };
+                let header = ctx.builder.build_load(ptr_ty, slot, "buffer").unwrap().into_pointer_value();
+                ctx.buffer_data(header).into()
+            }
+            // The address of its first element
+            Some(Type::Slice(_)) => {
+                let slice = arg.codegen(ctx).unwrap().into_struct_value();
+                ctx.builder.build_extract_value(slice, 0, "elements").unwrap()
+            }
+            _ if arg.ty.is_string() => {
+                let string = borrowed_string(ctx, arg);
+                let c_string = ctx.c_string(string);
+                c_strings.push(c_string);
+                c_string.into()
+            }
+            Some(_) => *arg.codegen(ctx).unwrap(),
+            None => {
+                let value = *arg.codegen(ctx).unwrap();
+                let signed = !matches!(arg.ty, Type::Int { signed: false, .. });
+                promote_vararg(ctx, value, signed)
+            }
+        };
+        values.push(value.into());
+    }
+    let address = function.as_global_value().as_pointer_value();
+    let result = ctx.builder.build_indirect_call(fn_type, address, &values, "extern").unwrap().try_as_basic_value().basic();
+    for c_string in c_strings {
+        ctx.builder.build_call(ctx.libc_function("free"), &[c_string.into()], "").unwrap();
+    }
+    result
 }
 
 /// Widens `value` the way C varargs like `printf` expect it: integers narrower
@@ -863,10 +1446,23 @@ fn create_enum_printer<'ctx>(
     }
     ctx.builder.build_switch(tag_val, exit_bb, &cases).unwrap();
 
-    for (bb, (_, payload_ty)) in variant_bbs.iter().zip(variants.iter()) {
+    let payload_types = ctx.enum_variant_types.get(enum_name).cloned().unwrap_or_default();
+    for (i, (bb, (variant_name, payload_ty))) in variant_bbs.iter().zip(variants.iter()).enumerate() {
         ctx.builder.position_at_end(*bb);
+        // A variant without payload prints its name
+        if payload_types.get(i) == Some(&Type::Void) {
+            let fmt_str = ctx.builder.build_global_string_ptr(&format!("{}\n", variant_name), "fmt").unwrap();
+            ctx.builder.build_call(printfn, &[fmt_str.as_pointer_value().into()], "printFn").unwrap();
+            ctx.builder.build_unconditional_branch(exit_bb).unwrap();
+            continue;
+        }
         let payload_ptr = ctx.builder.build_struct_gep(struct_ty, enum_ptr, 1, "payload_ptr").unwrap();
         let payload_val = ctx.builder.build_load(*payload_ty, payload_ptr, "payload").unwrap();
+        if payload_types.get(i).is_some_and(Type::is_string) {
+            print_string(ctx, payload_val.into_struct_value(), "\n");
+            ctx.builder.build_unconditional_branch(exit_bb).unwrap();
+            continue;
+        }
 
         let fmt = printf_format_for(payload_ty).to_string() + "\n";
         let fmt_str = ctx.builder.build_global_string_ptr(&fmt, "fmt").unwrap();

@@ -189,7 +189,7 @@ print(c.capacity());
 let b = Buffer<int32>(2);
 print(b);
 --- error
-a Unique or Buffer can't be printed
+a Unique, Shared or Buffer can't be printed
 
 === parentheses group
 print((2 + 3) * 4);

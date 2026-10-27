@@ -1,0 +1,296 @@
+=== joining strings
+let name = "Lava";
+print("Hello, " + name + "!");
+--- output
+Hello, Lava!
+
+=== comparing strings
+print("abc" == "abc");
+print("abc" != "abd");
+print("abc" < "abd");
+print("b" > "abc");
+--- output
+true
+true
+true
+true
+
+=== length, bytes and slices
+let s = "hello";
+print(s.len());
+print(s.byte(0));
+print(s.byte(4) == 'o');
+print(s.slice(1, 4));
+print(s.slice(5, 5) == "");
+--- output
+5
+104
+true
+ell
+true
+
+=== byte out of bounds stops the program
+let s = "hi";
+print(s.byte(2));
+--- output
+error: index 2 is out of bounds for a String of length 2
+
+=== slice out of bounds stops the program
+let s = "hi";
+print(s.slice(1, 3));
+--- output
+error: slice 1..3 is out of bounds for a String of length 2
+
+=== numbers to strings
+import std::string::{int_to_string, float_to_string, char_to_string};
+print(int_to_string(-42) + "|" + float_to_string(0.5) + "|" + char_to_string('x'));
+--- output
+-42|0.5|x
+
+=== std::string helpers
+import std::string::{trim, starts_with, ends_with, contains, index_of};
+let line = "  let x = 1;  ";
+print(line.trim());
+print(line.trim().starts_with("let"));
+print(line.trim().ends_with(";"));
+print(line.contains("x ="));
+print(line.contains("y"));
+print(index_of("abcabc", "ca").unwrap_or(99));
+print(index_of("abc", "z").is_none());
+--- output
+let x = 1;
+true
+true
+true
+false
+2
+true
+
+=== split and join
+import std::string::{split, join};
+let parts = "a,b,,c".split(',');
+print(parts.len());
+print(parts.join("-"));
+--- output
+4
+a-b--c
+
+=== parse_int
+import std::string::{parse_int};
+print(parse_int("123").unwrap_or(0));
+print(parse_int("-7").unwrap_or(0));
+print(parse_int("").is_none());
+print(parse_int("-").is_none());
+print(parse_int("4x").is_none());
+--- output
+123
+-7
+true
+true
+true
+
+=== byte helpers
+import std::string::{is_digit, is_alpha, is_alphanumeric, is_whitespace};
+print(is_digit('7'));
+print(is_alpha('Q'));
+print(is_alphanumeric('_'));
+print(is_whitespace('\t'));
+--- output
+true
+true
+false
+true
+
+=== numbers and bytes as strings
+import std::string::{int_to_string, float_to_string, char_to_string};
+print(int_to_string(-42) + "|" + float_to_string(2.5) + "|" + char_to_string('x'));
+print(int_to_string(9223372036854775807));
+--- output
+-42|2.5|x
+9223372036854775807
+
+=== copy_bytes is hidden from programs
+mut bytes = Buffer<uint8>(1);
+copy_bytes(bytes, 0, bytes, 0, 1);
+--- error
+unknown function 'copy_bytes'
+
+=== adding a char to a string
+mut word = "ab";
+word = word + 'c';
+word += 'd';
+print(word + "e"[0]);
+--- output
+abcde
+
+=== a string from a Buffer of bytes
+mut bytes = Buffer<uint8>(8);
+bytes.set(0, 'h');
+bytes.set(1, 'i');
+let text = String(bytes, 2);
+print(text);
+print(text.len());
+--- output
+hi
+2
+
+=== a length beyond the Buffer stops the program
+let text = String(Buffer<uint8>(2), 5);
+print(text);
+--- output
+error: a String of 5 bytes doesn't fit into a Buffer of capacity 2
+
+=== the operators are methods
+let a = "abc";
+print(a.concat("def"));
+print(a.equals("abc"));
+print(a.compare("abd") < 0);
+print("b".compare("a") > 0);
+--- output
+abcdef
+true
+true
+true
+
+=== a string before a longer one starting with it
+print("ab" < "abc");
+print("abc" > "ab");
+print("" < "a");
+print("same" <= "same");
+--- output
+true
+true
+true
+true
+
+=== zero bytes are part of a string
+let text = "a\0b";
+print(text.len());
+print(text[2] == 'b');
+print(text == "a\0c");
+--- output
+3
+true
+false
+
+=== strings through references and temporaries
+import std::string::{int_to_string};
+func twice(text: &String) -> String {
+  return text + text;
+}
+func same(a: &String, b: &String) -> bool {
+  return a == b && a <= b;
+}
+let word = "ab";
+print(twice(&word));
+print(twice("cd"));
+print(same(&word, &word));
+print("x" + int_to_string(1) + "y");
+--- output
+abab
+cdcd
+true
+x1y
+
+=== leaving a match on a temporary
+enum Kind {
+  Word => String,
+  End;
+}
+class Token {
+  pub kind: Kind = kind;
+  Constructor(kind: Kind);
+}
+func make(text: String) -> Token {
+  return Token(Kind::Word(text));
+}
+func word_of(text: String) -> String {
+  match make(text).kind {
+    Kind::Word(word) => return word,
+    Kind::End => return "",
+  }
+}
+mut i = 0;
+while i < 3 {
+  match make("w").kind {
+    Kind::Word(w) => {
+      if i == 1 {
+        break;
+      }
+      print(w);
+    }
+    Kind::End => {}
+  }
+  i = i + 1;
+}
+print(word_of("hi"));
+--- output
+w
+hi
+
+=== a string's fields are private
+let text = "abc";
+print(text.length);
+--- error
+private field
+
+=== String can't be declared again
+class String {
+  x: int32 = 0;
+  Constructor();
+}
+--- error
+'String' is part of the language, it can't be declared again
+
+=== slices share the bytes and stay usable
+let text = "hello world";
+let word = text.slice(6, 11);
+let copy = word;
+print(word);
+print(copy.slice(1, 3));
+print(word == "world");
+print(text.byte(6) == word.byte(0));
+print(word + "!");
+print(word < "x");
+--- output
+world
+or
+true
+true
+world!
+true
+
+=== strip_prefix
+import std::string::{strip_prefix};
+let text = "hello world";
+match text.strip_prefix("hello ") {
+  Some(rest) => print(rest),
+  None => print("no"),
+}
+print(text.strip_prefix("x").is_none());
+--- output
+world
+true
+
+=== a free function called on self in a method gets self
+import std::string::{starts_with};
+class Word {
+  pub text: String;
+
+  pub func starts_with_h(&self) -> bool {
+    self.text.starts_with("h")
+  }
+
+  pub func longer(&self, than: uint64) -> bool {
+    self.is_longer(than)
+  }
+}
+func is_longer(word: &Word, than: uint64) -> bool {
+  word.text.len() > than
+}
+let w = Word("hey");
+print(w.starts_with_h());
+print(w.longer(2));
+--- output
+true
+true

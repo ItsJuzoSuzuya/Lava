@@ -1,0 +1,102 @@
+=== main runs after the top-level code
+func main() {
+  print("main");
+}
+print("top level");
+--- output
+top level
+main
+
+=== arguments one after the other
+import std::env;
+import std::string::{ends_with};
+func main() {
+  mut arguments = env::args();
+  print(arguments.len());
+  match arguments.next() {
+    Option::Some(program) => print(program.ends_with("main")),
+    Option::None => print("no program name"),
+  }
+  print(arguments.next().is_none());
+  print(arguments.len());
+}
+--- output
+1
+true
+true
+0
+
+=== collecting the arguments into a list
+import std::env;
+import std::string::{ends_with};
+let all = env::args().collect();
+print(all.len());
+print(all[0].ends_with("main"));
+--- output
+1
+true
+
+=== main returning an exit code
+func main() -> int32 {
+  print("before exit");
+  return 0;
+}
+--- output
+before exit
+
+=== main can call other functions
+func greet(name: String) -> String {
+  return "hi " + name;
+}
+func main() {
+  print(greet("lava"));
+}
+--- output
+hi lava
+
+=== a program without main still runs its top-level code
+print(1);
+--- output
+1
+
+=== main with a parameter is an error
+func main(args: Vector<String>) {
+  print(args.len());
+}
+--- error
+`main` takes no parameters, get the command line arguments with `env::args()`
+
+=== main returning something else is an error
+func main() -> String {
+  return "no";
+}
+--- error
+`main` returns nothing or an `int32` exit code
+
+=== generic main is an error
+func main<T>() {
+  print(1);
+}
+--- error
+`main` can't be generic
+
+=== main is never reported as unused
+func main() {
+  print(1);
+}
+--- lint
+
+=== a method called main is just a method
+class App {
+  pub n: int32 = 0;
+
+  Constructor();
+
+  pub func main(&self) -> int32 {
+    return 7;
+  }
+}
+let app = App();
+print(app.main());
+--- output
+7

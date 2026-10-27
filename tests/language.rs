@@ -17,7 +17,7 @@
 //!
 //! Instead of `--- output` a case can end with `--- error` followed by text the
 //! compiler's error message has to contain, or with `--- lint` followed by the
-//! exact warnings of `Letter lint`, one per line like
+//! exact warnings of `lava lint`, one per line like
 //! `main.lv:3:7 unused_variable: variable 'x' is never used`.
 
 use std::{fs, path::{Path, PathBuf}, process::Command};
@@ -100,8 +100,8 @@ fn run_case(suite: &str, index: usize, case: &Case) -> Result<(), String> {
         fs::write(dir.join(file), source).unwrap();
     }
 
-    let args: &[&str] = if matches!(case.expected, Expected::Lint(_)) { &["lint"] } else { &[] };
-    let result = Command::new(env!("CARGO_BIN_EXE_Letter"))
+    let args: &[&str] = if matches!(case.expected, Expected::Lint(_)) { &["lint"] } else { &["run"] };
+    let result = Command::new(env!("CARGO_BIN_EXE_lava"))
         .args(args)
         .current_dir(&dir)
         .output()
@@ -113,11 +113,10 @@ fn run_case(suite: &str, index: usize, case: &Case) -> Result<(), String> {
 
     match &case.expected {
         Expected::Output(expected) => {
-            if !result.status.success() {
-                return Err(format!("expected the program to run, but compiling failed:\n{}", stderr.trim()));
-            }
+            // A program may stop with an error itself, like a failed bounds check, so
+            // only a mismatching output counts
             if normalize(&stdout) != normalize(expected) {
-                return Err(format!("expected output:\n{}\ngot:\n{}", normalize(expected), normalize(&stdout)));
+                return Err(format!("expected output:\n{}\ngot:\n{}\nerrors:\n{}", normalize(expected), normalize(&stdout), stderr.trim()));
             }
         }
         Expected::Error(expected) => {
@@ -141,7 +140,7 @@ fn run_case(suite: &str, index: usize, case: &Case) -> Result<(), String> {
     Ok(())
 }
 
-/// The warnings in the output of `Letter lint`, one per line like
+/// The warnings in the output of `lava lint`, one per line like
 /// `main.lv:3:7 unused_variable: variable 'x' is never used`.
 fn lint_lines(output: &str) -> String {
     let mut lines = Vec::new();
@@ -181,6 +180,7 @@ fn run_suite(suite: &str) {
 }
 
 #[test] fn arithmetic()  { run_suite("arithmetic"); }
+#[test] fn arrays()      { run_suite("arrays"); }
 #[test] fn basics()      { run_suite("basics"); }
 #[test] fn buffer()      { run_suite("buffer"); }
 #[test] fn casts()       { run_suite("casts"); }
@@ -193,6 +193,12 @@ fn run_suite(suite: &str) {
 #[test] fn generics()    { run_suite("generics"); }
 #[test] fn generic_types() { run_suite("generic_types"); }
 #[test] fn lint()        { run_suite("lint"); }
+#[test] fn list_patterns() { run_suite("list_patterns"); }
+#[test] fn logic()       { run_suite("logic"); }
+#[test] fn main_function() { run_suite("main"); }
+#[test] fn option_result() { run_suite("option_result"); }
+#[test] fn std()         { run_suite("std"); }
+#[test] fn strings()     { run_suite("strings"); }
 #[test] fn matching()    { run_suite("matching"); }
 #[test] fn modules()     { run_suite("modules"); }
 #[test] fn mutability()  { run_suite("mutability"); }
@@ -200,6 +206,8 @@ fn run_suite(suite: &str) {
 #[test] fn numbers()     { run_suite("numbers"); }
 #[test] fn owning_classes() { run_suite("owning_classes"); }
 #[test] fn refs()        { run_suite("refs"); }
+#[test] fn shared()      { run_suite("shared"); }
 #[test] fn traits()      { run_suite("traits"); }
+#[test] fn tuples()      { run_suite("tuples"); }
 #[test] fn unique()      { run_suite("unique"); }
 #[test] fn vector()      { run_suite("vector"); }

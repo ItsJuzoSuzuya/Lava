@@ -1,0 +1,123 @@
+// std::vector: a list that grows as needed.
+//
+//   import std::vector::{Vector};
+//
+//   mut names = Vector<String>();
+//   names.push("ada");
+//   print(names[0]);
+//   print(names.at(5) ?? "nobody");
+
+import std::option::{Option};
+
+// A list that grows as needed, its elements are next to each other in memory.
+pub class Vector<T> {
+  data: Buffer<T> = Buffer<T>(4);
+  length: uint64 = 0;
+
+  Constructor();
+
+  // Adds `item` at the end.
+  pub func push(mut &self, item: T) {
+    self.grow_if_full();
+    self.data.set(self.length, item);
+    self.length = self.length + 1;
+  }
+
+  // Removes the last element and returns it, stops the program if there's none.
+  pub func pop(mut &self) -> T {
+    if self.length == 0 {
+      panic("pop on an empty Vector");
+    }
+    self.length = self.length - 1;
+    return self.data.take(self.length);
+  }
+
+  // A copy of the element at `index`.
+  pub func get(&self, index: uint64) -> T {
+    self.check_index(index);
+    return self.data.get(index);
+  }
+
+  // A copy of the element at `index`, or `None` if there's none:
+  // `args.at(2) ?? "main.lv"`. `v[i]` and `get` stop the program instead.
+  pub func at(&self, index: uint64) -> Option<T> {
+    if index >= self.length {
+      return None;
+    }
+    Some(self.data.get(index))
+  }
+
+  // A copy of the last element, stops the program if there's none.
+  pub func last(&self) -> T {
+    if self.length == 0 {
+      panic("last on an empty Vector");
+    }
+    return self.data.get(self.length - 1);
+  }
+
+  pub func set(mut &self, index: uint64, item: T) {
+    self.check_index(index);
+    self.data.set(index, item);
+  }
+
+  // Puts `item` at `index`, the elements from there on move one back.
+  pub func insert(mut &self, index: uint64, item: T) {
+    if index > self.length {
+      panic("insert index is out of bounds for the Vector");
+    }
+    self.grow_if_full();
+    mut i = self.length;
+    while i > index {
+      self.data.set(i, self.data.take(i - 1));
+      i = i - 1;
+    }
+    self.data.set(index, item);
+    self.length = self.length + 1;
+  }
+
+  // Removes the element at `index` and returns it, the ones after it move one forward.
+  pub func remove(mut &self, index: uint64) -> T {
+    self.check_index(index);
+    let item = self.data.take(index);
+    mut i = index;
+    while i + 1 < self.length {
+      self.data.set(i, self.data.take(i + 1));
+      i = i + 1;
+    }
+    self.length = self.length - 1;
+    return item;
+  }
+
+  pub func clear(mut &self) {
+    self.length = 0;
+  }
+
+  pub func len(&self) -> uint64 {
+    return self.length;
+  }
+
+  pub func is_empty(&self) -> bool {
+    return self.length == 0;
+  }
+
+  func check_index(&self, index: uint64) {
+    if index >= self.length {
+      panic("index " + int_to_string(index as int64) + " is out of bounds for a Vector of length " + int_to_string(self.length as int64));
+    }
+  }
+
+  func grow_if_full(mut &self) {
+    if self.length == self.data.capacity() {
+      self.data.resize(self.data.capacity() * 2);
+    }
+  }
+}
+
+// `value` in decimal, for the messages above.
+func int_to_string(value: int64) -> String {
+  mut digits = Buffer<uint8>(24);
+  let length = c_snprintf(digits, digits.capacity(), "%lld", value);
+  return String(digits, length as uint64);
+}
+
+extern "snprintf" func c_snprintf(into: &Buffer<uint8>, size: uint64, format: String, ..) -> int32;

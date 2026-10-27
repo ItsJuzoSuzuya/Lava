@@ -145,3 +145,184 @@ match x {
 }
 --- error
 is not a valid pattern
+
+=== match gives a value
+let n = 2;
+let name = match n {
+  1 => "one",
+  2 => "two",
+  _ => "many",
+};
+print(name);
+--- output
+two
+
+=== match on an option as a value
+import std::option::{Option};
+let some = Option::Some(5);
+let none: Option<int32> = Option::None;
+let a = match some {
+  Option::Some(v) => v * 2,
+  Option::None => 0,
+};
+let b = match none {
+  Option::Some(v) => v * 2,
+  Option::None => -1,
+};
+print(a);
+print(b);
+--- output
+10
+-1
+
+=== block arm gives its last expression without semicolon
+let n = 3;
+let result = match n {
+  3 => {
+    let doubled = n * 2;
+    print("computing");
+    doubled + 1
+  }
+  _ => 0,
+};
+print(result);
+--- output
+computing
+7
+
+=== match value directly in an expression
+let flag = true;
+print(10 + match flag {
+  true => 1,
+  false => 2,
+});
+--- output
+11
+
+=== match as a return value
+func describe(n: int32) -> String {
+  return match n % 2 {
+    0 => "even",
+    _ => "odd",
+  };
+}
+print(describe(4));
+print(describe(7));
+--- output
+even
+odd
+
+=== arms can leave instead of giving a value
+func first_even(values: int32[3]) -> int32 {
+  mut i = 0;
+  while i < 3 {
+    let v = values[i];
+    let half = match v % 2 {
+      0 => v / 2,
+      _ => {
+        i = i + 1;
+        continue;
+      }
+    };
+    return half;
+  }
+  return -1;
+}
+print(first_even({3, 8, 5}));
+--- output
+4
+
+=== panic leaves an arm too
+import std::option::{Option};
+let value: Option<int32> = Option::Some(3);
+let n = match value {
+  Option::Some(v) => v,
+  Option::None => panic("no value"),
+};
+print(n);
+--- output
+3
+
+=== the expected type adapts literal values
+let big: int64 = match 1 {
+  1 => 3000000000,
+  _ => 0,
+};
+print(big);
+--- output
+3000000000
+
+=== a binding pattern matches any number
+import std::string::{int_to_string};
+let n = 42;
+let text = match n {
+  0 => "zero",
+  other => int_to_string(other as int64),
+};
+print(text);
+--- output
+42
+
+=== match value owning memory
+import std::vector::{Vector};
+let words = match 1 {
+  1 => {
+    mut v = Vector<String>();
+    v.push("a");
+    v
+  }
+  _ => Vector<String>(),
+};
+print(words.len());
+--- output
+1
+
+=== different value types are an error
+let x = match 1 {
+  1 => 5,
+  _ => "five",
+};
+--- error
+type 'String' does not match 'int32' in match arm value
+
+=== missing case is an error
+import std::option::{Option};
+let o: Option<int32> = Option::None;
+let x = match o {
+  Option::Some(v) => v,
+};
+--- error
+a match giving a value has to handle every case
+
+=== number match needs a wildcard
+let x = match 3 {
+  1 => 1,
+  2 => 2,
+};
+--- error
+a match giving a value has to handle every case
+
+=== arm without value is an error
+let x = match 3 {
+  1 => 1,
+  _ => {
+    print(2);
+  }
+};
+--- error
+this arm gives no value
+
+=== match of print calls gives no value
+let x = match 3 {
+  _ => print(1),
+};
+--- error
+this match gives no value
+
+=== match statements still need no value or every case
+match 5 {
+  1 => print("one"),
+}
+print("done");
+--- output
+done

@@ -1,0 +1,12 @@
+// std::io: the terminal.
+//
+//   import std::io;
+//
+//   io::write("name: ");
+
+extern "printf" func c_printf(format: String, ..) -> int32;
+
+// Prints `text` without a newline after it, unlike `print`.
+pub func write(text: String) {
+  c_printf("%s", text);
+}

@@ -307,33 +307,57 @@ print(j);
 10.000000
 
 === sqrt of a float literal
-print(sqrt(2.0));
+import std::math;
+print(math::sqrt(2.0));
 --- output
 1.414214
 
 === sqrt of a perfect square
-print(sqrt(16.0));
+import std::math;
+print(math::sqrt(16.0));
 --- output
 4.000000
 
 === sqrt of a float32 variable
+import std::math;
 let x: float32 = 6.25;
-print(sqrt(x));
+print(math::sqrt(x));
 --- output
 2.500000
 
 === sqrt of an int literal widens to float64
-print(sqrt(4));
+import std::math;
+print(math::sqrt(4));
 --- output
 2.000000
 
 === sqrt result in arithmetic
-let x: float64 = sqrt(9.0) + 1.0;
+import std::math;
+let x: float64 = math::sqrt(9.0) + 1.0;
 print(x);
 --- output
 4.000000
 
 === sqrt result doesn't narrow to float32
-let x: float32 = sqrt(9.0);
+import std::math;
+let x: float32 = math::sqrt(9.0);
 --- error
 type 'float64' does not match 'float32' in variable declaration
+
+=== byte is another name for uint8
+func next(b: byte) -> byte {
+  b + 1
+}
+let b: byte = 65;
+print(b as char);
+let small: uint8 = next(b);
+print(small);
+mut bytes = Buffer<byte>(1);
+bytes.set(0, 'x');
+print(bytes.get(0) as char);
+print("hi".byte(0));
+--- output
+A
+66
+x
+104

@@ -1,0 +1,65 @@
+// std::process: running commands and stopping the program.
+//
+//   import std::process;
+//
+//   match process::run("ls") {
+//     Result::Ok(code) => print(code),
+//     Result::Err(error) => print(error),
+//   }
+
+import std::result::{Result};
+
+extern "exit" func c_exit(code: int32);
+extern "system" func c_system(command: String) -> int32;
+// Takes the stream to flush, 0 flushes all of them
+extern "fflush" func c_fflush(stream: int64) -> int32;
+
+// Stops the program with the exit code `code`.
+pub func exit(code: ExitCode) {
+  c_exit(code.to_int());
+}
+
+// Runs `command` in the shell and gives its exit code, or an error if it
+// couldn't be started.
+pub func run(command: String) -> Result<ExitCode, String> {
+  // Output printed so far comes before the command's
+  c_fflush(0);
+  let status = c_system(command);
+  if status < 0 {
+    return Result::Err("can't run the command '" + command + "'");
+  }
+  // The exit code is in the second lowest byte
+  return Result::Ok(exit_code(status / 256 % 256));
+}
+
+// The exit code with the number `code`: `Success` for 0, `Failed` for 1.
+pub func exit_code(code: int32) -> ExitCode {
+  if code == 0 {
+    return ExitCode::Success;
+  }
+  if code == 1 {
+    return ExitCode::Failed;
+  }
+  return ExitCode::Code(code);
+}
+
+// How a program ended: 0 is success, anything else a failure.
+pub enum ExitCode {
+  Success,
+  Failed,
+  Code => int32;
+
+  // The code as a number, 0 for `Success` and 1 for `Failed`.
+  pub func to_int(&self) -> int32 {
+    match self {
+      ExitCode::Success => return 0,
+      ExitCode::Failed => return 1,
+      ExitCode::Code(code) => return code,
+    }
+  }
+
+  // Whether it's 0, a success.
+  pub func is_success(&self) -> bool {
+    return self.to_int() == 0;
+  }
+}

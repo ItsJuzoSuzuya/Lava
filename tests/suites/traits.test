@@ -741,7 +741,7 @@ print(t.name());
 --- error
 method 'name' of 'Thing' is ambiguous
 
-=== pub on an impl method is an error
+=== an impl method can be marked pub
 trait Get {
   func get(&self) -> int32;
 }
@@ -755,8 +755,9 @@ impl Get for Box {
     return 1;
   }
 }
---- error
-expected 'func' in impl body
+print(Box(5).get());
+--- output
+1
 
 === trait method without body or semicolon is an error
 trait Get {

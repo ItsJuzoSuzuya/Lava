@@ -1,0 +1,234 @@
+import std::vector::{Vector};
+// LLVM's C API (llvm-c/Core.h), linked from libLLVM. Names and parameters
+// are the C ones: LLVMBool is int32, unsigned is uint32, arrays are slices.
+//
+//   import llvm;
+//
+//   let context = LLVMContextCreate();
+//   let module = LLVMModuleCreateWithNameInContext("main", context);
+//   let builder = LLVMCreateBuilderInContext(context);
+//   let i32 = LLVMInt32TypeInContext(context);
+//   let main = LLVMAddFunction(module, "main", LLVMFunctionType(i32, &Vector<LLVMTypeRef>(), 0, 0));
+//   LLVMPositionBuilderAtEnd(builder, LLVMAppendBasicBlockInContext(context, main, "entry"));
+//   LLVMBuildRet(builder, LLVMConstInt(i32, 42, 0));
+//   LLVMWriteBitcodeToFile(module, "main.bc");
+
+extern link "LLVM";
+
+pub extern type LLVMContextRef;
+pub extern type LLVMModuleRef;
+pub extern type LLVMBuilderRef;
+pub extern type LLVMTypeRef;
+pub extern type LLVMValueRef;
+pub extern type LLVMBasicBlockRef;
+
+// AddressSpace
+
+pub class AddressSpace {
+  pub space: uint32;
+
+  pub func default() -> AddressSpace {
+    return AddressSpace(0);
+  }
+}
+
+// Context and module
+
+pub extern func LLVMContextCreate() -> LLVMContextRef;
+pub extern func LLVMContextDispose(context: LLVMContextRef);
+pub extern func LLVMModuleCreateWithNameInContext(name: String, context: LLVMContextRef) -> LLVMModuleRef;
+pub extern func LLVMDisposeModule(module: LLVMModuleRef);
+pub extern func LLVMSetTarget(module: LLVMModuleRef, triple: String);
+pub extern func LLVMGetDefaultTargetTriple() -> String;
+pub extern func LLVMPrintModuleToString(module: LLVMModuleRef) -> String;
+pub extern func LLVMDumpModule(module: LLVMModuleRef);
+// 0 if it worked
+pub extern func LLVMWriteBitcodeToFile(module: LLVMModuleRef, path: String) -> int32;
+// Prints what's wrong to stderr with `action` 1, gives 1 if something is
+pub extern func LLVMVerifyFunction(function: LLVMValueRef, action: int32) -> int32;
+
+pub class Module {
+  name: String;
+
+  Constructor(name: String, context: LLVMContextRef) {
+    LLVMModuleCreateWithNameInContext(name, context);
+  }
+}
+
+pub class Context {
+  ref: LLVMContextRef = LLVMContextCreate();
+
+  pub func create_module(&self, name: String) -> Module {
+    return Module(name, self.ref);
+  }
+
+  // types
+  pub func i32_type(&self) -> IntType {
+    return IntType::new(self.ref, 32);
+  }
+
+  pub func ptr_type(&self, address_space: AddressSpace) -> PointerType {
+    return LLVMPointerTypeInContext(self.ref, address_space.space);
+  }
+}
+
+// Types: kinds of `LLVMTypeRef`, each one can be used where an `LLVMTypeRef`
+// or `Type` is expected, also in `&[...]`
+
+pub extern type Type: LLVMTypeRef;
+pub extern type FunctionType: Type;
+pub extern type PointerType: Type;
+pub extern type IntType: Type {
+  // An integer type of `size` bits, like 32 for `i32`
+  pub func new(context: LLVMContextRef, size: uint32) -> IntType {
+    return LLVMIntTypeInContext(context, size);
+  }
+
+  pub func as_fn_type(&self, params: &[LLVMTypeRef], variadic: bool) -> FunctionType {
+    return LLVMFunctionType(self, params, params.len() as uint32, variadic ? 1 : 0);
+  }
+}
+
+pub extern func LLVMVoidTypeInContext(context: LLVMContextRef) -> LLVMTypeRef;
+pub extern func LLVMInt1TypeInContext(context: LLVMContextRef) -> IntType;
+pub extern func LLVMInt8TypeInContext(context: LLVMContextRef) -> IntType;
+pub extern func LLVMInt16TypeInContext(context: LLVMContextRef) -> IntType;
+pub extern func LLVMInt32TypeInContext(context: LLVMContextRef) -> IntType;
+pub extern func LLVMInt64TypeInContext(context: LLVMContextRef) -> IntType;
+pub extern func LLVMIntTypeInContext(context: LLVMContextRef, bits: uint32) -> IntType;
+pub extern func LLVMFloatTypeInContext(context: LLVMContextRef) -> LLVMTypeRef;
+pub extern func LLVMDoubleTypeInContext(context: LLVMContextRef) -> LLVMTypeRef;
+pub extern func LLVMPointerTypeInContext(context: LLVMContextRef, address_space: uint32) -> PointerType;
+pub extern func LLVMArrayType2(element: LLVMTypeRef, count: uint64) -> LLVMTypeRef;
+pub extern func LLVMFunctionType(ret: LLVMTypeRef, params: &[LLVMTypeRef], count: uint32, variadic: int32) -> FunctionType;
+pub extern func LLVMStructTypeInContext(context: LLVMContextRef, elements: &[LLVMTypeRef], count: uint32, packed: int32) -> LLVMTypeRef;
+pub extern func LLVMStructCreateNamed(context: LLVMContextRef, name: String) -> LLVMTypeRef;
+pub extern func LLVMStructSetBody(ty: LLVMTypeRef, elements: &[LLVMTypeRef], count: uint32, packed: int32);
+pub extern func LLVMTypeOf(value: LLVMValueRef) -> LLVMTypeRef;
+
+// Constants and globals
+
+pub extern func LLVMConstInt(ty: LLVMTypeRef, value: uint64, sign_extend: int32) -> LLVMValueRef;
+pub extern func LLVMConstReal(ty: LLVMTypeRef, value: float64) -> LLVMValueRef;
+pub extern func LLVMConstNull(ty: LLVMTypeRef) -> LLVMValueRef;
+pub extern func LLVMAddGlobal(module: LLVMModuleRef, ty: LLVMTypeRef, name: String) -> LLVMValueRef;
+pub extern func LLVMSetInitializer(global: LLVMValueRef, value: LLVMValueRef);
+
+// Functions and blocks
+
+pub extern func LLVMAddFunction(module: LLVMModuleRef, name: String, ty: LLVMTypeRef) -> LLVMValueRef;
+pub extern func LLVMGetParam(function: LLVMValueRef, index: uint32) -> LLVMValueRef;
+pub extern func LLVMAppendBasicBlockInContext(context: LLVMContextRef, function: LLVMValueRef, name: String) -> LLVMBasicBlockRef;
+
+// Builder
+
+pub extern func LLVMCreateBuilderInContext(context: LLVMContextRef) -> LLVMBuilderRef;
+pub extern func LLVMDisposeBuilder(builder: LLVMBuilderRef);
+pub extern func LLVMPositionBuilderAtEnd(builder: LLVMBuilderRef, block: LLVMBasicBlockRef);
+pub extern func LLVMGetInsertBlock(builder: LLVMBuilderRef) -> LLVMBasicBlockRef;
+
+pub extern func LLVMBuildRet(builder: LLVMBuilderRef, value: LLVMValueRef) -> LLVMValueRef;
+pub extern func LLVMBuildRetVoid(builder: LLVMBuilderRef) -> LLVMValueRef;
+pub extern func LLVMBuildBr(builder: LLVMBuilderRef, block: LLVMBasicBlockRef) -> LLVMValueRef;
+pub extern func LLVMBuildCondBr(builder: LLVMBuilderRef, condition: LLVMValueRef, then_block: LLVMBasicBlockRef, else_block: LLVMBasicBlockRef) -> LLVMValueRef;
+pub extern func LLVMBuildUnreachable(builder: LLVMBuilderRef) -> LLVMValueRef;
+
+pub extern func LLVMBuildAdd(builder: LLVMBuilderRef, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildSub(builder: LLVMBuilderRef, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildMul(builder: LLVMBuilderRef, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildSDiv(builder: LLVMBuilderRef, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildUDiv(builder: LLVMBuilderRef, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildSRem(builder: LLVMBuilderRef, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildURem(builder: LLVMBuilderRef, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildFAdd(builder: LLVMBuilderRef, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildFSub(builder: LLVMBuilderRef, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildFMul(builder: LLVMBuilderRef, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildFDiv(builder: LLVMBuilderRef, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildAnd(builder: LLVMBuilderRef, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildOr(builder: LLVMBuilderRef, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildXor(builder: LLVMBuilderRef, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildNeg(builder: LLVMBuilderRef, value: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildNot(builder: LLVMBuilderRef, value: LLVMValueRef, name: String) -> LLVMValueRef;
+
+// `predicate` like `LLVMIntPredicate::LLVMIntSLT.to_int()`
+pub extern func LLVMBuildICmp(builder: LLVMBuilderRef, predicate: int32, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+// `predicate` like `LLVMRealPredicate::LLVMRealOLT.to_int()`
+pub extern func LLVMBuildFCmp(builder: LLVMBuilderRef, predicate: int32, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef;
+
+pub extern func LLVMBuildAlloca(builder: LLVMBuilderRef, ty: LLVMTypeRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildLoad2(builder: LLVMBuilderRef, ty: LLVMTypeRef, address: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildStore(builder: LLVMBuilderRef, value: LLVMValueRef, address: LLVMValueRef) -> LLVMValueRef;
+pub extern func LLVMBuildGEP2(builder: LLVMBuilderRef, ty: LLVMTypeRef, address: LLVMValueRef, indices: &[LLVMValueRef], count: uint32, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildStructGEP2(builder: LLVMBuilderRef, ty: LLVMTypeRef, address: LLVMValueRef, index: uint32, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildExtractValue(builder: LLVMBuilderRef, aggregate: LLVMValueRef, index: uint32, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildInsertValue(builder: LLVMBuilderRef, aggregate: LLVMValueRef, value: LLVMValueRef, index: uint32, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildGlobalStringPtr(builder: LLVMBuilderRef, text: String, name: String) -> LLVMValueRef;
+
+pub extern func LLVMBuildCall2(builder: LLVMBuilderRef, ty: LLVMTypeRef, function: LLVMValueRef, args: &[LLVMValueRef], count: uint32, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildSelect(builder: LLVMBuilderRef, condition: LLVMValueRef, then_value: LLVMValueRef, else_value: LLVMValueRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildPhi(builder: LLVMBuilderRef, ty: LLVMTypeRef, name: String) -> LLVMValueRef;
+pub extern func LLVMAddIncoming(phi: LLVMValueRef, values: &[LLVMValueRef], blocks: &[LLVMBasicBlockRef], count: uint32);
+
+pub extern func LLVMBuildTrunc(builder: LLVMBuilderRef, value: LLVMValueRef, ty: LLVMTypeRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildZExt(builder: LLVMBuilderRef, value: LLVMValueRef, ty: LLVMTypeRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildSExt(builder: LLVMBuilderRef, value: LLVMValueRef, ty: LLVMTypeRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildFPTrunc(builder: LLVMBuilderRef, value: LLVMValueRef, ty: LLVMTypeRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildFPExt(builder: LLVMBuilderRef, value: LLVMValueRef, ty: LLVMTypeRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildSIToFP(builder: LLVMBuilderRef, value: LLVMValueRef, ty: LLVMTypeRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildUIToFP(builder: LLVMBuilderRef, value: LLVMValueRef, ty: LLVMTypeRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildFPToSI(builder: LLVMBuilderRef, value: LLVMValueRef, ty: LLVMTypeRef, name: String) -> LLVMValueRef;
+pub extern func LLVMBuildFPToUI(builder: LLVMBuilderRef, value: LLVMValueRef, ty: LLVMTypeRef, name: String) -> LLVMValueRef;
+
+// LLVMIntPredicate, how `LLVMBuildICmp` compares.
+pub enum LLVMIntPredicate {
+  LLVMIntEQ,
+  LLVMIntNE,
+  LLVMIntUGT,
+  LLVMIntUGE,
+  LLVMIntULT,
+  LLVMIntULE,
+  LLVMIntSGT,
+  LLVMIntSGE,
+  LLVMIntSLT,
+  LLVMIntSLE;
+
+  // Its value in C.
+  pub func to_int(&self) -> int32 {
+    match self {
+      LLVMIntPredicate::LLVMIntEQ => 32,
+      LLVMIntPredicate::LLVMIntNE => 33,
+      LLVMIntPredicate::LLVMIntUGT => 34,
+      LLVMIntPredicate::LLVMIntUGE => 35,
+      LLVMIntPredicate::LLVMIntULT => 36,
+      LLVMIntPredicate::LLVMIntULE => 37,
+      LLVMIntPredicate::LLVMIntSGT => 38,
+      LLVMIntPredicate::LLVMIntSGE => 39,
+      LLVMIntPredicate::LLVMIntSLT => 40,
+      LLVMIntPredicate::LLVMIntSLE => 41,
+    }
+  }
+}
+
+// LLVMRealPredicate, how `LLVMBuildFCmp` compares. The ordered ones are false for NaN.
+pub enum LLVMRealPredicate {
+  LLVMRealOEQ,
+  LLVMRealOGT,
+  LLVMRealOGE,
+  LLVMRealOLT,
+  LLVMRealOLE,
+  LLVMRealONE,
+  LLVMRealUNE;
+
+  // Its value in C.
+  pub func to_int(&self) -> int32 {
+    match self {
+      LLVMRealPredicate::LLVMRealOEQ => 1,
+      LLVMRealPredicate::LLVMRealOGT => 2,
+      LLVMRealPredicate::LLVMRealOGE => 3,
+      LLVMRealPredicate::LLVMRealOLT => 4,
+      LLVMRealPredicate::LLVMRealOLE => 5,
+      LLVMRealPredicate::LLVMRealONE => 6,
+      LLVMRealPredicate::LLVMRealUNE => 14,
+    }
+  }
+}

@@ -1,0 +1,371 @@
+=== array literal and indexing
+let x: int32[3] = {3, 1, 2};
+print(x[0]);
+print(x[1] + x[2]);
+print(x.len());
+--- output
+3
+3
+3
+
+=== type inferred from the values
+let x = {10, 20, 30};
+print(x[2]);
+--- output
+30
+
+=== literals adapt to the element type
+let x: int64[2] = {3000000000, 1};
+let bytes: uint8[2] = {'a', 255};
+print(x[0]);
+print(bytes[1]);
+--- output
+3000000000
+255
+
+=== assigning an element
+mut x: int32[2] = {1, 2};
+x[0] = 5;
+print(x[0]);
+--- output
+5
+
+=== arrays are copied as a whole
+let a: int32[2] = {1, 2};
+mut b = a;
+b[0] = 9;
+print(a[0]);
+print(b[0]);
+--- output
+1
+9
+
+=== nested arrays
+mut grid: int32[2][3] = {{1, 2, 3}, {4, 5, 6}};
+grid[1][0] = 7;
+print(grid[1][0] + grid[0][2]);
+print(grid.len());
+print(grid[0].len());
+--- output
+10
+2
+3
+
+=== variable index of any integer type
+let x: int32[3] = {4, 5, 6};
+mut i: uint8 = 0;
+mut sum = 0;
+while i < 3 {
+  sum = sum + x[i];
+  i = i + 1;
+}
+print(sum);
+--- output
+15
+
+=== index out of bounds stops the program
+let x: int32[2] = {1, 2};
+mut i = 0;
+while i < 3 {
+  print(x[i]);
+  i = i + 1;
+}
+--- output
+1
+2
+error: index 2 is out of bounds for an array of length 2
+
+=== negative index stops the program
+let x: int32[2] = {1, 2};
+let i = -1;
+print(x[i]);
+--- output
+error: index -1 is out of bounds for an array of length 2
+
+=== constant index out of bounds is an error
+let x: int32[2] = {1, 2};
+print(x[2]);
+--- error
+index 2 is out of bounds for an array of length 2
+
+=== wrong number of values is an error
+let x: int32[3] = {1, 2};
+--- error
+the array needs 3 values, got 2
+
+=== wrong value type is an error
+let x: int32[2] = {1, "two"};
+--- error
+type 'String' does not match 'int32' in array value
+
+=== mixed value types are an error
+let x = {1, true};
+--- error
+type 'bool' does not match 'int32' in array value
+
+=== empty array needs a type
+let x = {};
+--- error
+the type of an empty array can't be inferred
+
+=== empty array with a type
+let x: int32[0] = {};
+print(x.len());
+--- output
+0
+
+=== assigning needs a mut binding
+let x: int32[2] = {1, 2};
+x[0] = 3;
+--- error
+Tried reassigning a value to the unmutable Variable 'x'
+
+=== index must be an integer
+let x: int32[2] = {1, 2};
+print(x[true]);
+--- error
+does not match 'uint64' in array index
+
+=== printing an array is an error
+let x: int32[2] = {1, 2};
+print(x);
+--- error
+an array can't be printed
+
+=== array as a class field
+class Grid {
+  pub cells: int32[3] = {0, 0, 0};
+
+  Constructor();
+}
+mut g = Grid();
+g.cells[1] = 4;
+print(g.cells[1]);
+--- output
+4
+
+=== array of classes
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+let points: Point[2] = {Point(1), Point(2)};
+print(points[1].x);
+--- output
+2
+
+=== array as a parameter and return value
+func reversed(values: int32[3]) -> int32[3] {
+  return {values[2], values[1], values[0]};
+}
+let r = reversed({1, 2, 3});
+print(r[0]);
+--- output
+3
+
+=== array of uniques is freed and copied
+mut owners: Unique<int32>[2] = {unique(1), unique(2)};
+owners[0] = unique(5);
+let copy = owners;
+print(1);
+--- output
+1
+
+=== generic function over arrays
+func first<T>(values: T[2]) -> T {
+  return values[0];
+}
+print(first({7, 8}));
+--- output
+7
+
+=== array inside an enum
+enum Shape {
+  Triangle => int32[3],
+  Dot
+}
+let t = Shape::Triangle({3, 4, 5});
+match t {
+  Shape::Triangle(sides) => print(sides[0] + sides[1] + sides[2]),
+  Shape::Dot => print(0),
+}
+--- output
+12
+
+=== indexing a vector
+import std::vector::{Vector};
+mut v = Vector<String>();
+v.push("a");
+v.push("b");
+v[1] = "c";
+print(v[0] + v[1]);
+let i: int32 = 0;
+print(v[i]);
+--- output
+ac
+a
+
+=== vector index out of bounds stops the program
+import std::vector::{Vector};
+mut v = Vector<int32>();
+v.push(1);
+print(v[3]);
+--- output
+error: index 3 is out of bounds for a Vector of length 1
+
+=== indexing a buffer
+mut b = Buffer<int32>(2);
+b[1] = 4;
+print(b[1]);
+--- output
+4
+
+=== indexing a string gives the char
+let s = "hello";
+print(s[1] == 'e');
+print(s[4]);
+print(s.byte(4));
+--- output
+true
+o
+111
+
+=== assigning to a string index is an error
+mut s = "hello";
+s[0] = 'j';
+--- error
+a String can't be changed
+
+=== indexing a class with get and set
+class Doubler {
+  pub last: uint64 = 0;
+
+  Constructor();
+
+  pub func get(&self, index: uint64) -> uint64 {
+    return index * 2;
+  }
+
+  pub func set(mut &self, index: uint64, value: uint64) {
+    self.last = index + value;
+  }
+}
+mut d = Doubler();
+print(d[21]);
+d[1] = 2;
+print(d.last);
+--- output
+42
+3
+
+=== indexing something without get is an error
+let n = 5;
+print(n[0]);
+--- error
+'int32' can't be indexed
+
+=== missing array length is an error
+let x: int32[] = {1};
+--- error
+expected '0' as array length, got ']'
+
+=== slices of arrays and vectors
+import std::vector::{Vector};
+func sum(values: &[int32]) -> int32 {
+  mut total = 0;
+  mut i: uint64 = 0;
+  while i < values.len() {
+    total += values[i];
+    i += 1;
+  }
+  total
+}
+let numbers: int32[3] = {1, 2, 3};
+print(sum(numbers));
+print(sum(&numbers));
+mut more = Vector<int32>();
+more.push(10);
+more.push(20);
+print(sum(more));
+print(more.len());
+--- output
+6
+6
+30
+2
+
+=== a slice of strings is only borrowed
+import std::vector::{Vector};
+func first(words: &[String]) -> String {
+  words[0].clone()
+}
+mut words = Vector<String>();
+words.push("lava");
+print(first(&words));
+print(words.len());
+--- output
+lava
+1
+
+=== moving out of a slice is an error
+func first(words: &[Unique<int32>]) -> Unique<int32> {
+  words[0]
+}
+--- error
+can't move out of 'words[..]'
+
+=== a slice can't be changed
+func clear(values: &[int32]) {
+  values[0] = 0;
+}
+--- error
+a slice only looks at the elements
+
+=== a slice index out of bounds stops the program
+func at(values: &[int32], i: uint64) -> int32 {
+  values[i]
+}
+let numbers: int32[2] = {1, 2};
+print(at(numbers, 5));
+--- output
+error: index 5 is out of bounds for a slice of length 2
+
+=== a slice of values made right there is passed to a function
+func sum(values: &[int32]) -> int32 {
+  mut total = 0;
+  mut i: uint64 = 0;
+  while i < values.len() {
+    total += values[i];
+    i += 1;
+  }
+  total
+}
+func longest(words: &[String]) -> String {
+  mut best = "";
+  mut i: uint64 = 0;
+  while i < words.len() {
+    if words[i].len() > best.len()
+      best = words[i].clone();
+    i += 1;
+  }
+  best
+}
+print(sum(&[1, 2, 3]));
+print(sum(&[]));
+print(longest(&["a", "abc" + "de", "xy"]));
+--- output
+6
+0
+abcde
+
+=== a slice literal can't be kept
+let s = &[1, 2];
+--- error
+`&[...]` can only be passed straight to a function
+
+=== a slice literal needs a slice parameter
+func f(x: int32) {}
+f(&[1]);
+--- error
+`&[...]` is a slice, but this parameter takes 'int32'

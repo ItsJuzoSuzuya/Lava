@@ -155,8 +155,9 @@ print(a + b);
 3.750000
 
 === uint8 into sqrt
+import std::math;
 let a: uint8 = 196;
-print(sqrt(a));
+print(math::sqrt(a));
 --- output
 14.000000
 

@@ -4,7 +4,8 @@
 --
 --   dofile("/home/nick/Lava/editors/nvim/lava.lua")
 --
--- The server is the compiler binary, build it first with `cargo build --release`.
+-- The server is the `lava` command if it's installed, otherwise the release
+-- build of this repository (`cargo build --release`).
 
 local root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h:h:h")
 
@@ -15,7 +16,7 @@ vim.filetype.add({ extension = { lv = "lava" } })
 local has_cmp, cmp_lsp = pcall(require, "cmp_nvim_lsp")
 
 vim.lsp.config("lava", {
-  cmd = { root .. "/target/release/Letter", "lsp" },
+  cmd = { vim.fn.executable("lava") == 1 and "lava" or root .. "/target/release/lava", "lsp" },
   filetypes = { "lava" },
   root_markers = { "main.lv", ".git" },
   capabilities = has_cmp and cmp_lsp.default_capabilities() or nil,

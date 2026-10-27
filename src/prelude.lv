@@ -1,0 +1,135 @@
+// What the language itself needs: `String`, which string literals are, and
+// `panic`. Everything else is in the standard library, imported like
+// `import std::option::{Option};`.
+//
+// It's built into the compiler. A program's own declaration with the same
+// name replaces the one from here.
+
+// --- String ---
+
+// Text, as its bytes. A string literal like `"hi"` makes a new `String`.
+// A string never changes, `slice` and `+` make new ones. Copies of a string
+// and slices of it share its bytes, they're freed when the last one is gone.
+//
+// The operators are its methods: `a + b` is `a.concat(b)`, `a == b` is
+// `a.equals(b)` and `a < b` is `a.compare(b) < 0`. The compiler relies on its
+// fields: it makes literals with the constructor, and reads `bytes`, `start`
+// and `length` to print a string or pass it to C.
+//
+// More about strings, like `split`, `trim` and `int_to_string`, is in `std::string`.
+pub class String {
+  bytes: Shared<Buffer<byte>> = shared(bytes);
+  start: uint64 = 0;
+  length: uint64 = length;
+
+  // A string of the first `length` bytes of `bytes`.
+  Constructor(bytes: Buffer<byte>, length: uint64) {
+    if self.length > self.bytes.capacity() {
+      panic("a String of " + decimal(self.length) + " bytes doesn't fit into a Buffer of capacity "
+        + decimal(self.bytes.capacity()));
+    }
+  }
+
+  // The length in bytes.
+  pub func len(&self) -> uint64 {
+    return self.length;
+  }
+
+  // The char at `index`, `text[index]` is the same. Stops the program if it's out of bounds.
+  pub func char_at(&self, index: uint64) -> char {
+    return self.byte(index) as char;
+  }
+
+  // The byte at `index`. Stops the program if it's out of bounds.
+  pub func byte(&self, index: uint64) -> byte {
+    if index >= self.length {
+      panic("index " + decimal(index) + " is out of bounds for a String of length " + decimal(self.length));
+    }
+    return self.bytes.get(self.start + index);
+  }
+
+  // The bytes from `start` up to, but not including, `end`. Shares this
+  // string's bytes, nothing is copied. Stops the program if they're out of bounds.
+  pub func slice(&self, start: uint64, end: uint64) -> String {
+    if start > end || end > self.length {
+      panic("slice " + decimal(start) + ".." + decimal(end)
+        + " is out of bounds for a String of length " + decimal(self.length));
+    }
+    mut copy = self;
+    copy.start += start;
+    copy.length = end - start;
+    copy
+  }
+
+  // A new string of this one followed by `other`, `a + b` is the same.
+  pub func concat(&self, other: &String) -> String {
+    let length = self.length + other.length;
+    mut bytes = Buffer<uint8>(length);
+    copy_bytes(bytes, 0, self.bytes, self.start, self.length);
+    copy_bytes(bytes, self.length, other.bytes, other.start, other.length);
+    return String(bytes, length);
+  }
+
+  // A new string of this one followed by `c`, `text + c` is the same.
+  pub func concat_char(&self, c: char) -> String {
+    let length = self.length + 1;
+    mut bytes = Buffer<uint8>(length);
+    copy_bytes(bytes, 0, self.bytes, self.start, self.length);
+    bytes.set(self.length, c as uint8);
+    return String(bytes, length);
+  }
+
+  // Whether `other` has the same bytes, `a == b` is the same.
+  pub func equals(&self, other: &String) -> bool {
+    return self.length == other.length && compare_bytes(self.bytes, self.start, other.bytes, other.start, self.length) == 0;
+  }
+
+  // How this string sorts against `other` byte by byte: below zero if it
+  // comes first, zero if they're the same, above zero if it comes after.
+  // A string comes before a longer one it's the start of. `a < b`, `a >= b`
+  // and the like use it.
+  pub func compare(&self, other: &String) -> int32 {
+    mut common = self.length;
+    if other.length < common {
+      common = other.length;
+    }
+    let order = compare_bytes(self.bytes, self.start, other.bytes, other.start, common);
+    if order != 0 {
+      return order;
+    }
+    if self.length < other.length {
+      return -1;
+    }
+    if self.length > other.length {
+      return 1;
+    }
+    return 0;
+  }
+
+  // A copy, which shares the bytes. Strings never change, so that's safe.
+  pub func clone(&self) -> String {
+    let clone = self;
+    return clone;
+  }
+}
+
+// --- Stopping ---
+
+// Prints `error: ` and `message`, then stops the program with exit code 1.
+pub func panic(message: String) {
+  c_printf("error: %s\n", message);
+  c_exit(1);
+}
+
+// --- Used above ---
+
+// `value` in decimal, for the messages above. `std::string` has `int_to_string`.
+func decimal(value: uint64) -> String {
+  mut digits = Buffer<uint8>(24);
+  let length = c_snprintf(digits, digits.capacity(), "%llu", value);
+  return String(digits, length as uint64);
+}
+
+extern "printf" func c_printf(format: String, ..) -> int32;
+extern "snprintf" func c_snprintf(into: &Buffer<uint8>, size: uint64, format: String, ..) -> int32;
+extern "exit" func c_exit(code: int32);

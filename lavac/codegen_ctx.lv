@@ -1,0 +1,14 @@
+import llvm;
+pub class CodegenContext {
+  pub context: &Context;
+  pub module: Module = context.create_module("mod");
+
+  pub func build_entry(&self) {
+    let i32_type = self.context.i32_type();
+    let ptr_type = self.context.ptr_type(AddressSpace::default());
+    let main_fn_type = i32_type.as_fn_type(&[i32_type, ptr_type], false);
+    let main_fn = self.module.add_function("main", main_fn_type, None);
+    let entry_block = self.context.basic_block(main_fn, "entry_block");
+    self.builder.position_at_end(entry_block);
+  }
+}

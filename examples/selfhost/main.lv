@@ -1,0 +1,92 @@
+// A compiler front end for Lava, written in Lava.
+//
+//   lava run examples/selfhost -- tokens <file.lv>   lexes any Lava file
+//   lava run examples/selfhost -- run <file>         runs a program of the parser's subset
+
+import lexer;
+import parser;
+import interpreter;
+import std::env;
+import std::fs;
+import std::process;
+import std::process::{ExitCode};
+import std::vector::{Vector};
+import std::string::{int_to_string};
+
+func usage() {
+  print("usage: main tokens <file> | main run <file>");
+  process::exit(ExitCode::Code(2));
+}
+
+func fail(message: String) {
+  print("error: " + message);
+  process::exit(ExitCode::Failed);
+}
+
+// Prints how many tokens of each kind `tokens` has and the first ones.
+func summarize(tokens: Vector<Token>) {
+  mut words = 0;
+  mut numbers = 0;
+  mut texts = 0;
+  mut symbols = 0;
+  mut i: uint64 = 0;
+  while i < tokens.len() {
+    match tokens.get(i).kind {
+      TokenKind::Ident => words = words + 1,
+      TokenKind::Keyword => words = words + 1,
+      TokenKind::Int => numbers = numbers + 1,
+      TokenKind::Str => texts = texts + 1,
+      TokenKind::Char => texts = texts + 1,
+      TokenKind::Symbol => symbols = symbols + 1,
+      TokenKind::End => {}
+    }
+    i = i + 1;
+  }
+  print("tokens: " + int_to_string(tokens.len() as int64));
+  print("words: " + int_to_string(words));
+  print("numbers: " + int_to_string(numbers));
+  print("strings and characters: " + int_to_string(texts));
+  print("symbols: " + int_to_string(symbols));
+  i = 0;
+  while i < 8 && i < tokens.len() {
+    let token = tokens.get(i);
+    print(position(token.line, token.col) + describe(token));
+    i = i + 1;
+  }
+}
+
+let arguments = env::args().collect();
+if arguments.len() != 3 {
+  usage();
+}
+let command = arguments[1];
+
+mut source = "";
+match fs::read(arguments[2]) {
+  Result::Ok(text) => source = text,
+  Result::Err(message) => fail(message),
+}
+
+mut tokens = Vector<Token>();
+match lex(source) {
+  Result::Ok(list) => tokens = list,
+  Result::Err(message) => fail(message),
+}
+
+if command == "tokens" {
+  summarize(tokens);
+} else if command == "run" {
+  mut parser = Parser(tokens);
+  match parser.parse_program() {
+    Result::Err(message) => fail(message),
+    Result::Ok(program) => {
+      mut interpreter = Interpreter();
+      match interpreter.run(program) {
+        Result::Err(message) => fail(message),
+        Result::Ok => {}
+      }
+    }
+  }
+} else {
+  usage();
+}

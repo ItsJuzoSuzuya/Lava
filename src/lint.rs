@@ -6,7 +6,7 @@
 //!
 //! A name starting with `_` is never reported as unused.
 
-use crate::{analysis::{DefKind, Index}, expression::{Expr, ExprKind}, program::CheckedModule, span::Span,
+use crate::{analysis::{DefKind, Index}, expression::{Block, Expr, ExprKind}, module, program::CheckedModule, span::Span,
     statement::{Stmt, StmtKind}, declaration::DeclarationKind, token::Token};
 
 /// A lint warning.
@@ -36,15 +36,14 @@ impl Warning {
 ///
 /// Modules that failed to check are skipped, their error comes first.
 pub fn lint(index: &Index, modules: &[CheckedModule]) -> Vec<Warning> {
-    let checked: Vec<usize> = modules.iter()
-        .filter(|m| m.checked)
-        .filter_map(|m| index.file_index(&m.path))
-        .collect();
+    // The prelude and standard library are part of the compiler, not of the program
+    let user_modules = || modules.iter().filter(|m| m.checked && m.path != module::prelude_path() && !m.name.starts_with("std::"));
+    let checked: Vec<usize> = user_modules().filter_map(|m| index.file_index(&m.path)).collect();
 
     let mut warnings = Vec::new();
     lint_names(index, &checked, &mut warnings);
     lint_imports(index, &checked, &mut warnings);
-    for module in modules.iter().filter(|m| m.checked) {
+    for module in user_modules() {
         let Some(file) = index.file_index(&module.path) else { continue };
         let mut walker = CodeLints { file, warnings: &mut warnings };
         walker.block(&module.stmts[..module.own_stmts]);
@@ -78,7 +77,8 @@ fn lint_names(index: &Index, files: &[usize], warnings: &mut Vec<Warning>) {
                     warn("unused_parameter", format!("parameter '{}' is never used", def.name));
                 }
             }
-            DefKind::Function if !ignored && !used && !def.public => {
+            // `main` is called by the program itself
+            DefKind::Function if !ignored && !used && !def.public && def.name != "main" => {
                 warn("unused_function", format!("function '{}' is never used", def.name));
             }
             DefKind::Method if !ignored && !used && !def.public && !def.in_trait => {
@@ -105,6 +105,8 @@ fn lint_names(index: &Index, files: &[usize], warnings: &mut Vec<Warning>) {
         }
 
         let (expected, ok) = match def.kind {
+            // An `extern func` has the C function's name
+            DefKind::Function if !def.has_body => ("", true),
             DefKind::Function | DefKind::Method | DefKind::Field | DefKind::Param | DefKind::Variable =>
                 ("snake_case", is_snake_case(&def.name)),
             DefKind::Class | DefKind::Enum | DefKind::Trait | DefKind::Variant =>
@@ -192,14 +194,27 @@ impl CodeLints<'_> {
     }
 
     fn block(&mut self, stmts: &[Stmt]) {
-        let mut returned = false;
+        let mut jumped_away: Option<&str> = None;
         for stmt in stmts {
-            if returned {
-                self.warn(&stmt.span, "unreachable_code", "this code never runs, it comes after a 'return'");
+            if let Some(keyword) = jumped_away {
+                self.warn(&stmt.span, "unreachable_code", format!("this code never runs, it comes after a '{}'", keyword));
                 break;
             }
             self.stmt(stmt);
-            returned = matches!(stmt.kind, StmtKind::Return(_));
+            jumped_away = match stmt.kind {
+                StmtKind::Return(_) => Some("return"),
+                StmtKind::Break => Some("break"),
+                StmtKind::Continue => Some("continue"),
+                _ => None,
+            };
+        }
+    }
+
+    /// A match arm or branch of an `if`: its statements, then its value.
+    fn value_block(&mut self, block: &Block) {
+        self.block(&block.stmts);
+        if let Some(value) = &block.value {
+            self.expr(value);
         }
     }
 
@@ -207,8 +222,8 @@ impl CodeLints<'_> {
         match &stmt.kind {
             StmtKind::Declaration(decl) => match &decl.kind {
                 DeclarationKind::Function { body: Some(body), .. } => self.block(body),
-                DeclarationKind::Class { methods, .. } | DeclarationKind::Trait { methods, .. }
-                | DeclarationKind::Impl { methods, .. } => {
+                DeclarationKind::Class { methods, .. } | DeclarationKind::Enum { methods, .. }
+                | DeclarationKind::Trait { methods, .. } | DeclarationKind::Impl { methods, .. } => {
                     for method in methods {
                         if let DeclarationKind::Function { body: Some(body), .. } = &method.kind {
                             self.block(body);
@@ -224,29 +239,8 @@ impl CodeLints<'_> {
                 self.expr(expr);
             }
             StmtKind::Return(expr) => self.expr(expr),
-            StmtKind::Instantiation { value, .. } => self.expr(value),
+            StmtKind::Instantiation { value, .. } | StmtKind::Destructure { value, .. } => self.expr(value),
             StmtKind::Import(_) => {}
-            StmtKind::Match { scrutinee, arms } => {
-                self.expr(scrutinee);
-                for arm in arms {
-                    self.block(&arm.body);
-                }
-            }
-            StmtKind::If { condition, then_body, else_body } => {
-                if let ExprKind::Boolean(value) = condition.kind {
-                    let message = match (value, else_body.is_some()) {
-                        (true, true) => "the condition is always true, the else branch never runs",
-                        (true, false) => "the condition is always true, the 'if' isn't needed",
-                        (false, _) => "the condition is always false, the if branch never runs",
-                    };
-                    self.warn(&condition.span, "constant_condition", message);
-                }
-                self.expr(condition);
-                self.block(then_body);
-                if let Some(else_body) = else_body {
-                    self.block(else_body);
-                }
-            }
             StmtKind::While { condition, body } => {
                 if let ExprKind::Boolean(false) = condition.kind {
                     self.warn(&condition.span, "constant_condition", "the condition is always false, the loop never runs");
@@ -254,6 +248,7 @@ impl CodeLints<'_> {
                 self.expr(condition);
                 self.block(body);
             }
+            StmtKind::Break | StmtKind::Continue => {}
         }
     }
 
@@ -282,12 +277,48 @@ impl CodeLints<'_> {
                     self.expr(param);
                 }
             }
-            ExprKind::FieldAccess { object: inner, .. } | ExprKind::Convert { value: inner, .. }
-            | ExprKind::Negation(inner) | ExprKind::Unique(inner) | ExprKind::NewBuffer(inner)
-            | ExprKind::Print(inner) | ExprKind::Ref(inner) | ExprKind::EnumInit { value: inner, .. } => self.expr(inner),
+            ExprKind::FieldAccess { object: inner, .. } | ExprKind::Convert { value: inner, .. } | ExprKind::SliceOf(inner)
+            | ExprKind::Negation(inner) | ExprKind::Unique(inner) | ExprKind::Shared(inner) | ExprKind::Deref(inner) | ExprKind::NewBuffer(inner)
+            | ExprKind::Print(inner) | ExprKind::Ref(inner) | ExprKind::EnumInit { value: inner, .. }
+            | ExprKind::Not(inner) => self.expr(inner),
             ExprKind::StructInit { fields, .. } => {
                 for (_, value) in fields {
                     self.expr(value);
+                }
+            }
+            ExprKind::ArrayLiteral(values) | ExprKind::Tuple(values) | ExprKind::SliceLiteral(values) => {
+                for value in values {
+                    self.expr(value);
+                }
+            }
+            ExprKind::Index { object, index } => {
+                self.expr(object);
+                self.expr(index);
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                self.expr(scrutinee);
+                for arm in arms {
+                    self.value_block(&arm.block);
+                }
+            }
+            ExprKind::Ternary { condition, then_value, else_value } => {
+                self.expr(condition);
+                self.expr(then_value);
+                self.expr(else_value);
+            }
+            ExprKind::If { condition, then_block, else_block } => {
+                if let ExprKind::Boolean(value) = condition.kind {
+                    let message = match (value, else_block.is_some()) {
+                        (true, true) => "the condition is always true, the else branch never runs",
+                        (true, false) => "the condition is always true, the 'if' isn't needed",
+                        (false, _) => "the condition is always false, the if branch never runs",
+                    };
+                    self.warn(&condition.span, "constant_condition", message);
+                }
+                self.expr(condition);
+                self.value_block(then_block);
+                if let Some(else_block) = else_block {
+                    self.value_block(else_block);
                 }
             }
             _ => {}
@@ -310,7 +341,8 @@ fn has_no_effect(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Identifier(_) | ExprKind::IntLiteral(_) | ExprKind::FloatLiteral(_) | ExprKind::Boolean(_)
         | ExprKind::StringLiteral(_) | ExprKind::ColonAccess { .. } => true,
-        ExprKind::BinaryExpr { lhs, rhs, .. } => has_no_effect(lhs) && has_no_effect(rhs),
+        ExprKind::BinaryExpr { lhs, rhs, .. } | ExprKind::Index { object: lhs, index: rhs } => has_no_effect(lhs) && has_no_effect(rhs),
+        ExprKind::ArrayLiteral(values) | ExprKind::Tuple(values) => values.iter().all(has_no_effect),
         ExprKind::FieldAccess { object, .. } | ExprKind::Negation(object) | ExprKind::Convert { value: object, .. } =>
             has_no_effect(object),
         _ => false,

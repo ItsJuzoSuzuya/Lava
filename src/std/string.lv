@@ -1,0 +1,164 @@
+// std::string: working with text. `String` itself is part of the language.
+//
+//   import std::string::{split, trim, int_to_string};
+//
+//   let parts = split("a,b", ',');
+//   print(trim("  hi  "));
+//   print("count: " + int_to_string(3));
+//
+// Functions taking the text first also work like methods: `text.trim()`.
+
+import std::option::{Option};
+import std::vector::{Vector};
+
+pub func is_digit(byte: uint8) -> bool {
+  return byte >= '0' && byte <= '9';
+}
+
+pub func is_alpha(byte: uint8) -> bool {
+  return byte >= 'a' && byte <= 'z' || byte >= 'A' && byte <= 'Z';
+}
+
+pub func is_alphanumeric(byte: uint8) -> bool {
+  return is_alpha(byte) || is_digit(byte);
+}
+
+pub func is_whitespace(byte: uint8) -> bool {
+  return byte == ' ' || byte == '\n' || byte == '\t' || byte == '\r';
+}
+
+pub func starts_with(text: &String, prefix: &String) -> bool {
+  if prefix.len() > text.len() {
+    return false;
+  }
+  return text.slice(0, prefix.len()) == prefix;
+}
+
+pub func ends_with(text: &String, suffix: &String) -> bool {
+  if suffix.len() > text.len() {
+    return false;
+  }
+  return text.slice(text.len() - suffix.len(), text.len()) == suffix;
+}
+
+// `text` without `prefix` at its start, if it starts with it.
+pub func strip_prefix(text: &String, prefix: &String) -> Option<String> {
+  if !starts_with(text, prefix) {
+    return None;
+  }
+  Some(text.slice(prefix.len(), text.len()))
+}
+
+// The position of the first `needle` in `text`, if there's one.
+pub func index_of(text: &String, needle: &String) -> Option<uint64> {
+  if needle.len() > text.len() {
+    return Option::None;
+  }
+  mut i: uint64 = 0;
+  while i + needle.len() <= text.len() {
+    if text.slice(i, i + needle.len()) == needle {
+      return Option::Some(i);
+    }
+    i = i + 1;
+  }
+  return Option::None;
+}
+
+pub func contains(text: &String, needle: &String) -> bool {
+  return index_of(text, needle).is_some();
+}
+
+// `text` without whitespace at its start and end.
+pub func trim(text: &String) -> String {
+  mut start: uint64 = 0;
+  mut end = text.len();
+  while start < end && is_whitespace(text.byte(start)) {
+    start = start + 1;
+  }
+  while end > start && is_whitespace(text.byte(end - 1)) {
+    end = end - 1;
+  }
+  return text.slice(start, end);
+}
+
+// The parts of `text` between the `separator` bytes.
+pub func split(text: &String, separator: uint8) -> Vector<String> {
+  mut parts = Vector<String>();
+  mut start: uint64 = 0;
+  mut i: uint64 = 0;
+  while i < text.len() {
+    if text.byte(i) == separator {
+      parts.push(text.slice(start, i));
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  parts.push(text.slice(start, text.len()));
+  return parts;
+}
+
+// The strings of `parts` with `separator` between them.
+pub func join(parts: &Vector<String>, separator: &String) -> String {
+  mut joined = "";
+  mut i: uint64 = 0;
+  while i < parts.len() {
+    if i > 0 {
+      joined = joined + separator;
+    }
+    joined = joined + parts.get(i);
+    i = i + 1;
+  }
+  return joined;
+}
+
+// The decimal number in `text`, like `-42`, if it is one.
+pub func parse_int(text: &String) -> Option<int64> {
+  if text.len() == 0 {
+    return Option::None;
+  }
+  mut negative = false;
+  mut i: uint64 = 0;
+  if text.byte(0) == '-' {
+    negative = true;
+    i = 1;
+    if text.len() == 1 {
+      return Option::None;
+    }
+  }
+  mut value: int64 = 0;
+  while i < text.len() {
+    let byte = text.byte(i);
+    if !is_digit(byte) {
+      return Option::None;
+    }
+    value = value * 10 + (byte - '0') as int64;
+    i = i + 1;
+  }
+  if negative {
+    return Option::Some(-value);
+  }
+  return Option::Some(value);
+}
+
+// The text of `c`, like `"a"` for `'a'`.
+pub func char_to_string(c: char) -> String {
+  mut bytes = Buffer<uint8>(1);
+  bytes.set(0, c as uint8);
+  return String(bytes, 1);
+}
+
+// `value` in decimal, like `"-42"`.
+pub func int_to_string(value: int64) -> String {
+  mut digits = Buffer<uint8>(24);
+  let length = c_snprintf(digits, digits.capacity(), "%lld", value);
+  return String(digits, length as uint64);
+}
+
+// `value` in decimal, like `"2.5"`.
+pub func float_to_string(value: float64) -> String {
+  mut digits = Buffer<uint8>(32);
+  let length = c_snprintf(digits, digits.capacity(), "%g", value);
+  return String(digits, length as uint64);
+}
+
+extern "snprintf" func c_snprintf(into: &Buffer<uint8>, size: uint64, format: String, ..) -> int32;

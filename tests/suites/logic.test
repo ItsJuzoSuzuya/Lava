@@ -1,0 +1,211 @@
+=== and, or and not
+print(true && false);
+print(true || false);
+print(!true);
+print(!(1 > 2) && 3 >= 3);
+--- output
+false
+true
+false
+true
+
+=== and binds tighter than or
+print(true || false && false);
+print((true || false) && false);
+--- output
+true
+false
+
+=== the right side only runs when needed
+func loud(value: bool) -> bool {
+  print("ran");
+  return value;
+}
+print(false && loud(true));
+print(true || loud(true));
+print(true && loud(false));
+--- output
+false
+true
+ran
+false
+
+=== logic needs bools
+print(1 && 2);
+--- error
+'&&' can't be used on values of type 'int32'
+
+=== not needs a bool
+print(!5);
+--- error
+does not match 'bool'
+
+=== modulo
+print(17 % 5);
+print(-17 % 5);
+let a: uint8 = 250;
+print(a % 7);
+print(7.5 % 2.0);
+--- output
+2
+-2
+5
+1.500000
+
+=== break leaves the loop
+mut i = 0;
+while true {
+  if i == 3 {
+    break;
+  }
+  print(i);
+  i = i + 1;
+}
+print(9);
+--- output
+0
+1
+2
+9
+
+=== continue skips the rest of the round
+mut i = 0;
+while i < 5 {
+  i = i + 1;
+  if i % 2 == 0 {
+    continue;
+  }
+  print(i);
+}
+--- output
+1
+3
+5
+
+=== break in a nested loop only leaves the inner one
+mut i = 0;
+while i < 2 {
+  mut j = 0;
+  while true {
+    if j == 2 {
+      break;
+    }
+    print(i * 10 + j);
+    j = j + 1;
+  }
+  i = i + 1;
+}
+--- output
+0
+1
+10
+11
+
+=== break inside a match arm
+mut i = 0;
+while true {
+  i = i + 1;
+  match i {
+    3 => break,
+    _ => print(i),
+  }
+}
+--- output
+1
+2
+
+=== break frees what the round owns
+mut i = 0;
+while true {
+  let v = unique(i);
+  if i == 2 {
+    break;
+  }
+  i = i + 1;
+}
+print(i);
+--- output
+2
+
+=== break outside a loop is an error
+break;
+--- error
+'break' can only be used inside a loop
+
+=== continue in a function inside a loop is an error
+while false {
+  print(1);
+}
+func f() {
+  continue;
+}
+--- error
+'continue' can only be used inside a loop
+
+=== character literals are chars
+let a = 'a';
+print(a);
+print(a as uint8);
+print('z' as uint8 - 'a');
+print('\n' as uint8 == 10);
+print(65 as char);
+--- output
+a
+97
+25
+true
+A
+
+=== a char literal can be a byte
+import std::string::{is_digit};
+let b: uint8 = 'b';
+print(b == 'b');
+print(is_digit('7'));
+--- output
+true
+true
+
+=== chars compare and match
+let c = 'm';
+print(c > 'a' && c < 'z');
+match c {
+  'm' => print("m"),
+  _ => print("other"),
+}
+--- output
+true
+m
+
+=== chars aren't numbers
+print('a' + 'b');
+--- error
+'+' can't be used on values of type 'char'
+
+=== match on characters
+let c = 'x';
+match c {
+  'a' => print(1),
+  'x' => print(2),
+  _ => print(3),
+}
+--- output
+2
+
+=== invalid character literal
+let c = 'ab';
+--- error
+a character literal is one ASCII character or escape
+
+=== escapes in strings
+print("a\tb");
+print("quote: \"hi\"");
+print("back\\slash");
+--- output
+a	b
+quote: "hi"
+back\slash
+
+=== unknown escape is an error
+print("\q");
+--- error
+unknown escape '\q'

@@ -639,3 +639,112 @@ let o = Outer { inner: Inner { v: 7 } };
 print(o.inner.v);
 --- error
 Tried accessing a private field 'v'
+
+=== without a Constructor the fields without default are the parameters
+class Point {
+  pub x: int32;
+  pub y: int32;
+  pub label: String = "point";
+}
+let p = Point(1, 2);
+print(p.x + p.y);
+print(p.label);
+let q = Point { y: 5, x: 4 };
+print(q.x * q.y);
+--- output
+3
+point
+20
+
+=== a Constructor without parameters runs after the fields are set
+class Range {
+  pub start: uint64;
+  pub end: uint64;
+  pub size: uint64 = 0;
+
+  Constructor {
+    if self.start > self.end {
+      panic("start after end");
+    }
+    self.size = self.end - self.start;
+  }
+}
+let r = Range(3, 10);
+print(r.size);
+--- output
+7
+
+=== a generic class gets a constructor from its fields too
+class Box<T> {
+  pub value: T;
+}
+let b = Box(7);
+print(b.value);
+let s = Box<String>("text");
+print(s.value);
+--- output
+7
+text
+
+=== a class without fields is made with no arguments
+class Empty {
+}
+let e = Empty();
+print(1);
+--- output
+1
+
+=== a missing field value is an error
+class P {
+  pub x: int32;
+  pub y: int32;
+}
+let p = P(1);
+--- error
+missing argument 1 for 'P'
+
+=== a function without self is called on the type
+class Block {
+  pub name: String;
+
+  pub func create(name: String) -> Block {
+    Block(name)
+  }
+
+  pub func empty() -> Block {
+    Block("")
+  }
+
+  pub func named(first: String, second: String) -> Block {
+    Block(first + second)
+  }
+}
+print(Block::create("entry").name);
+print(Block::empty().name.len());
+print(Block::named("a", "b").name);
+--- output
+entry
+0
+ab
+
+=== an enum's function without self is called on the enum, its variants stay variants
+enum Color {
+  Red,
+  Green;
+
+  pub func default() -> Color {
+    Color::Green
+  }
+
+  pub func is_red(&self) -> bool {
+    match self {
+      Color::Red => true,
+      Color::Green => false,
+    }
+  }
+}
+print(Color::default().is_red());
+print(Color::Red.is_red());
+--- output
+false
+true

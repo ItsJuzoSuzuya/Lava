@@ -9,6 +9,10 @@ pub enum LexErrorKind {
     UnterminatedString,
     /// An integer literal that doesn't fit into an `i64`.
     NumberOutOfRange(String),
+    /// A `\` followed by a character that isn't a known escape.
+    InvalidEscape(char),
+    /// A character literal that isn't one ASCII character or escape in `'...'`.
+    InvalidChar,
 }
 
 /// An error produced by the [`Lexer`], with the [`Span`] where it occurred.
@@ -55,6 +59,28 @@ impl Lexer {
     /// The character at index `pos`, `None` past the end.
     fn char_at(&self, pos: usize) -> Option<char> {
         self.chars.get(pos).copied()
+    }
+
+    /// Reads the escape sequence at the current position, like `\n`, and
+    /// returns the character it stands for.
+    fn escape(&mut self) -> Result<char, LexError> {
+        let escaped = self.char_at(self.pos + 1);
+        let c = match escaped {
+            Some('n') => '\n',
+            Some('t') => '\t',
+            Some('r') => '\r',
+            Some('0') => '\0',
+            Some('\\') => '\\',
+            Some('"') => '"',
+            Some('\'') => '\'',
+            other => {
+                let span = Span { line: self.line, col: self.col, len: 2 };
+                return Err(LexError { kind: LexErrorKind::InvalidEscape(other.unwrap_or(' ')), span });
+            }
+        };
+        self.pos += 2;
+        self.col += 2;
+        Ok(c)
     }
 
     /// Lexes the next token without advancing the lexer.
@@ -148,7 +174,7 @@ impl Lexer {
             return Ok((t, span));
         }
 
-        // Create [`Token::StringLiteral`] from "my_string" 
+        // Create [`Token::StringLiteral`] from "my_string"
         let mut token = String::from("");
         if c == '"' {
             self.pos += 1;
@@ -156,33 +182,64 @@ impl Lexer {
             loop {
                 c = match self.char_at(self.pos) {
                     Some('"') => break,
-                    Some(c) => c,
+                    Some('\\') => self.escape()?,
+                    Some(c) => {
+                        self.pos += 1;
+                        // col gets reset when a newline char occurs
+                        self.col += 1;
+                        if c == '\n' {
+                            self.line += 1;
+                            self.col = 0;
+                        }
+                        c
+                    }
                     None => {
                         let span = Span { line: start_line, col: start_col, len: token.len() + 1 };
                         return Err(LexError { kind: LexErrorKind::UnterminatedString, span });
                     }
                 };
-                token += &c.to_string();
-                self.pos += 1;
-                // col gets reset when a newline char occurs
-                self.col += 1;
-
-                if c == '\n' {
-                    self.line += 1;
-                    self.col = 0;
-                }
+                token.push(c);
             }
             // skip the closing " char
             self.pos += 1;
             self.col += 1;
 
-            let t = Token::StringLiteral(token);
-            let span = Span { line: start_line, col: start_col, len: t.len() };
-            return Ok((t, span));
+            let len = if self.line == start_line { self.col - start_col } else { 1 };
+            let span = Span { line: start_line, col: start_col, len };
+            return Ok((Token::StringLiteral(token), span));
+        }
+
+        // Create [`Token::CharLiteral`] from 'a' or '\n'
+        if c == '\'' {
+            self.pos += 1;
+            self.col += 1;
+            let value = match self.char_at(self.pos) {
+                Some('\\') => self.escape()?,
+                Some(c) if c != '\'' && c != '\n' => {
+                    self.pos += 1;
+                    self.col += 1;
+                    c
+                }
+                _ => {
+                    let span = Span { line: start_line, col: start_col, len: 1 };
+                    return Err(LexError { kind: LexErrorKind::InvalidChar, span });
+                }
+            };
+            if self.char_at(self.pos) != Some('\'') || !value.is_ascii() {
+                let span = Span { line: start_line, col: start_col, len: self.col - start_col };
+                return Err(LexError { kind: LexErrorKind::InvalidChar, span });
+            }
+            self.pos += 1;
+            self.col += 1;
+            let span = Span { line: start_line, col: start_col, len: self.col - start_col };
+            return Ok((Token::CharLiteral(value as u8), span));
         }
 
         // Create [`Token::IntLiteral`] or [`Token::FloatLiteral`] from digits
         if c.is_digit(10) {
+            // Right after a single '.' it's a tuple position, `t.1.0` is `(t.1).0`
+            let tuple_position = self.pos > 0 && self.char_at(self.pos - 1) == Some('.')
+                && (self.pos < 2 || self.char_at(self.pos - 2) != Some('.'));
             while c.is_digit(10){
                 token += &c.to_string();
                 self.pos += 1;
@@ -192,7 +249,7 @@ impl Lexer {
 
             // A '.' followed by a digit continues the number as a float
             let next_is_digit = self.char_at(self.pos + 1).is_some_and(|n| n.is_digit(10));
-            if c == '.' && next_is_digit {
+            if c == '.' && next_is_digit && !tuple_position {
                 token += ".";
                 self.pos += 1;
                 self.col += 1;
@@ -428,6 +485,45 @@ mod tests {
     }
 
     #[test]
+    fn string_escapes() {
+        assert_eq!(lex_all(r#""a\nb\t\"q\"\\""#), vec![Token::StringLiteral("a\nb\t\"q\"\\".to_string())]);
+        assert!(matches!(lex_error(r#""bad \x""#).kind, LexErrorKind::InvalidEscape('x')));
+    }
+
+    #[test]
+    fn string_span_covers_the_source() {
+        let mut lexer = Lexer::new(r#""a\n" x"#.to_string());
+        assert_eq!(lexer.get_next_token().unwrap().1.len, 5);
+        assert_eq!(lexer.get_next_token().unwrap().1.col, 6);
+    }
+
+    #[test]
+    fn char_literals() {
+        assert_eq!(lex_all(r"'a' '\n' '\'' '0'"), vec![
+            Token::CharLiteral(b'a'), Token::CharLiteral(b'\n'), Token::CharLiteral(b'\''), Token::CharLiteral(b'0'),
+        ]);
+        assert!(matches!(lex_error("'ab'").kind, LexErrorKind::InvalidChar));
+        assert!(matches!(lex_error("''").kind, LexErrorKind::InvalidChar));
+    }
+
+    #[test]
+    fn logic_and_modulo_tokens() {
+        assert_eq!(lex_all("a && !b || c % 2 != 0"), vec![
+            ident("a"), Token::AndAnd, Token::Bang, ident("b"), Token::OrOr, ident("c"), Token::Percent,
+            Token::IntLiteral(2), Token::NotEq, Token::IntLiteral(0),
+        ]);
+        assert_eq!(lex_all("break continue"), vec![Token::Break, Token::Continue]);
+    }
+
+    #[test]
+    fn rest_pattern_tokens() {
+        assert_eq!(lex_all("[a, ..rest]"), vec![
+            Token::LBracket, ident("a"), Token::Comma, Token::DotDot, ident("rest"), Token::RBracket,
+        ]);
+        assert_eq!(lex_all("a.b"), vec![ident("a"), Token::Dot, ident("b")]);
+    }
+
+    #[test]
     fn string_keeps_keywords_and_symbols() {
         assert_eq!(lex_all("\"let x = 5;\""), vec![Token::StringLiteral("let x = 5;".to_string())]);
     }
@@ -476,7 +572,7 @@ mod tests {
 
     #[test]
     fn unexpected_chars() {
-        for c in ['$', '#', '!', '?', '%', '|', '^', '~', '\''] {
+        for c in ['$', '#', '|', '~', '@'] {
             let error = lex_error(&format!("a {} b", c));
             assert!(matches!(error.kind, LexErrorKind::UnexpectedChar(got) if got == c), "for {:?}", c);
         }

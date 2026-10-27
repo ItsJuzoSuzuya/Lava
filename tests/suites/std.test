@@ -1,0 +1,448 @@
+=== io::write prints without a newline
+import std::io;
+io::write("a");
+io::write("b");
+print("c");
+--- output
+abc
+
+=== writing and reading files
+import std::fs;
+import std::string::{split};
+match fs::write("note.txt", "first line\nsecond") {
+  Result::Ok(count) => print(count),
+  Result::Err(message) => print(message),
+}
+print(fs::exists("note.txt"));
+print(fs::exists("other.txt"));
+match fs::read("note.txt") {
+  Result::Ok(text) => print(text.split('\n').get(1)),
+  Result::Err(message) => print(message),
+}
+match fs::read("other.txt") {
+  Result::Ok(content) => print(content),
+  Result::Err(message) => print(message),
+}
+--- output
+17
+true
+false
+second
+can't open the file 'other.txt'
+
+=== reading a file bigger than one chunk
+import std::fs;
+mut line = "0123456789abcdef";
+mut i = 0;
+while i < 13 {
+  line = line + line;
+  i = i + 1;
+}
+match fs::write("big.txt", line + "end") {
+  Result::Ok(count) => print(count),
+  Result::Err(message) => print(message),
+}
+match fs::read("big.txt") {
+  Result::Ok(text) => print(text.len()),
+  Result::Err(message) => print(message),
+}
+--- output
+131075
+131075
+
+=== reading through a reference to a path
+import std::fs;
+import std::path::{Path};
+func load(path: &Path) -> String {
+  match fs::read(path) {
+    Ok(text) => return text,
+    Err(error) => return error,
+  }
+}
+match fs::write("note.txt", "hi") {
+  Ok => print(load(Path("note.txt"))),
+  Err(error) => print(error),
+}
+--- output
+hi
+
+=== creating directories
+import std::fs;
+import std::path::{Path};
+match fs::create_dir(Path("made")) {
+  Result::Ok => print("made"),
+  Result::Err(error) => print(error),
+}
+match fs::create_dir(Path("made")) {
+  Result::Ok => print("made twice"),
+  Result::Err(error) => print(error),
+}
+match fs::create_dir_all(Path("deep/er/est")) {
+  Result::Ok => print(fs::exists("deep/er/est")),
+  Result::Err(error) => print(error),
+}
+match fs::create_dir(Path("missing/parent")) {
+  Result::Ok => print("made"),
+  Result::Err(error) => print(error),
+}
+--- output
+made
+can't create the directory 'made'
+true
+can't create the directory 'missing/parent'
+
+=== writing into a missing directory is an error
+import std::fs;
+match fs::write("missing/note.txt", "x") {
+  Result::Ok(count) => print(count),
+  Result::Err(message) => print(message),
+}
+--- output
+can't open the file 'missing/note.txt'
+
+=== items imported by name
+import std::fs::{write, read};
+match write("a.txt", "hi") {
+  Result::Ok(count) => print(count),
+  Result::Err(message) => print(message),
+}
+match read("a.txt") {
+  Result::Ok(text) => print(text),
+  Result::Err(message) => print(message),
+}
+--- output
+2
+hi
+
+=== a single imported item
+import std::math::sqrt;
+print(sqrt(25.0));
+--- output
+5.000000
+
+=== an own function beats an imported one
+import std::math::{sqrt};
+func sqrt(x: float64) -> float64 {
+  return x;
+}
+print(sqrt(25.0));
+--- output
+25.000000
+
+=== math
+import std::math;
+print(math::pow(2.0, 10.0));
+print(math::floor(math::pi() * 100.0));
+print(math::abs(-3.5));
+print(math::max(math::sin(0.0), math::cos(0.0)));
+print(math::round(2.5));
+--- output
+1024.000000
+314.000000
+3.500000
+1.000000
+3.000000
+
+=== running a command
+import std::process;
+match process::run("exit 4") {
+  Ok(code) => print(code.to_int()),
+  Err(message) => print(message),
+}
+match process::run("true") {
+  Ok(code) => print(code.is_success()),
+  Err(message) => print(message),
+}
+--- output
+4
+true
+
+=== exit codes
+import std::process::{ExitCode, exit_code};
+print(exit_code(0));
+print(exit_code(1));
+print(exit_code(7).to_int());
+match exit_code(1) {
+  ExitCode::Failed => print("failed"),
+  _ => print("other"),
+}
+--- output
+Success
+Failed
+7
+failed
+
+=== output printed before a command comes first
+import std::process;
+print("before");
+match process::run("echo during") {
+  Ok(code) => print(code.to_int()),
+  Err(message) => print(message),
+}
+--- output
+before
+during
+0
+
+=== exit stops with a code
+import std::process::{ExitCode};
+import std::process;
+print(1);
+process::exit(ExitCode::Success);
+print(2);
+--- output
+1
+
+=== exit leaves a function returning a value
+import std::process;
+import std::process::{ExitCode};
+func pick(n: int32) -> int32 {
+  if n > 0 {
+    return n;
+  }
+  process::exit(ExitCode::Code(3));
+}
+print(pick(5));
+--- output
+5
+
+=== command line arguments
+import std::env;
+print(env::args().len());
+--- output
+1
+
+=== a type of a module
+import std::env;
+mut arguments: env::Args = env::args();
+print(arguments.next().is_some());
+--- output
+true
+
+=== an imported type
+import std::env::{Args, args};
+mut arguments: Args = args();
+print(arguments.collect().len());
+--- output
+1
+
+=== a module has to be imported
+print(fs::exists("x"));
+--- error
+module 'fs' isn't imported, add 'import std::fs;'
+
+=== a module function with several arguments has to be imported
+print(math::pow(2.0, 3.0));
+--- error
+module 'math' isn't imported, add 'import std::math;'
+
+=== a missing module is an error
+import std::nothing;
+print(1);
+--- error
+there's no module 'std::nothing'
+
+=== a missing item is an error
+import std::fs::{remove};
+print(1);
+--- error
+module 'std::fs' has no 'remove'
+
+=== a module's private functions can't be called
+import std::fs;
+print(fs::c_access("x", 0));
+--- error
+Tried calling a private function 'fs::c_access'
+
+=== an unknown function of a module is an error
+import std::fs;
+print(fs::nothing("x"));
+--- error
+unknown function 'fs::nothing'
+
+=== arg is hidden from programs
+print(arg(0));
+--- error
+unknown function 'arg'
+
+=== arg_count is hidden from programs
+print(arg_count());
+--- error
+unknown function 'arg_count'
+
+=== a program's own extern function
+extern func strlen(text: String) -> uint64;
+extern "abs" func absolute(value: int32) -> int32;
+print(strlen("four"));
+print(absolute(-9));
+--- output
+4
+9
+
+=== a variadic extern function
+extern func printf(format: String, ..) -> int32;
+let width: uint8 = 5;
+printf("%d|%s|%.1f|%d\n", 42, "text", 1.25, width);
+--- output
+42|text|1.2|5
+
+=== too many arguments for a non-variadic extern function
+extern func abs(value: int32) -> int32;
+print(abs(1, 2));
+--- error
+Too many arguments provided for function 'abs'
+
+=== a class can't be passed to C
+class Point {
+  x: int32 = 0;
+  Constructor();
+}
+extern func takes(point: Point);
+--- error
+'Class(Point)' can't be passed to a C function
+
+=== a C string returned becomes a String
+extern func getenv(name: String) -> String;
+let home = getenv("LAVA_TEST_UNSET_VARIABLE");
+print(home.len());
+print(getenv("PATH").len() > 0);
+--- output
+0
+true
+
+=== C can't return a class
+class Point {
+  x: int32 = 0;
+  Constructor();
+}
+extern func make() -> Point;
+--- error
+a C function can't return 'Class(Point)', only a number, String, extern type or nothing
+
+=== extern types are C pointers passed through
+extern link "m";
+extern type FILE;
+extern func fopen(path: String, mode: String) -> FILE;
+extern func fputs(text: String, file: FILE) -> int32;
+extern func fclose(file: FILE) -> int32;
+let file = fopen("/dev/null", "w");
+let copy = file;
+print(fputs("hi", copy) >= 0);
+print(fclose(file));
+--- output
+true
+0
+
+=== an extern type has methods and functions
+extern func fopen(path: String, mode: String) -> FILE;
+extern func fputs(text: String, file: FILE) -> int32;
+extern func fclose(file: FILE) -> int32;
+extern type FILE {
+  pub func open(path: String) -> FILE {
+    fopen(path, "w")
+  }
+
+  pub func write(&self, text: String) -> bool {
+    fputs(text, self) >= 0
+  }
+
+  pub func close(&self) -> int32 {
+    fclose(self)
+  }
+}
+let file = FILE::open("/dev/null");
+print(file.write("hi"));
+print(file.close());
+--- output
+true
+0
+
+=== an extern type can be a kind of another one and has its methods
+extern func fopen(path: String, mode: String) -> LogFile;
+extern func fputs(text: String, file: File) -> int32;
+extern func fclose(file: File) -> int32;
+extern type File {
+  pub func write(&self, text: String) -> bool {
+    fputs(text, self) >= 0
+  }
+
+  pub func close(&self) -> int32 {
+    fclose(self)
+  }
+
+  pub func kind() -> String {
+    "a file"
+  }
+}
+extern type LogFile: File {
+  pub func open() -> LogFile {
+    fopen("/dev/null", "w")
+  }
+
+  pub func log(&self, line: String) -> bool {
+    self.write(line + "\n")
+  }
+}
+func close_any(file: File) -> int32 {
+  file.close()
+}
+let log = LogFile::open();
+print(log.log("started"));
+print(log.write("raw"));
+print(LogFile::kind());
+let files: File = log;
+print(close_any(files));
+--- output
+true
+true
+a file
+0
+
+=== a kind of extern type isn't its base the other way round
+extern type Type;
+extern type IntType: Type;
+extern func make() -> Type;
+let t = make();
+let i: IntType = t;
+--- error
+type 'Type' does not match 'IntType' in variable declaration
+
+=== an extern type can only be a kind of an extern type
+class Thing {}
+extern type IntType: Thing;
+--- error
+'IntType' can only be a kind of an extern type, 'Thing' isn't one
+
+=== extern types can't be kinds of each other
+extern type A: B;
+extern type B: A;
+--- error
+can't be kinds of each other
+
+=== slices are passed to C as their elements
+extern func memcmp(a: &[uint8], b: &[uint8], count: uint64) -> int32;
+let a: uint8[3] = {1, 2, 3};
+let b: uint8[3] = {1, 2, 4};
+print(memcmp(&a, &a, 3));
+print(memcmp(&a, &b, 3) < 0);
+--- output
+0
+true
+
+=== a Buffer passed to C stays usable
+extern func snprintf(into: &Buffer<uint8>, size: uint64, format: String, ..) -> int32;
+mut text = Buffer<uint8>(16);
+let length = snprintf(text, 16, "%d", 1234);
+print(length);
+print(text.get(0) == '1');
+print(text.get(3) == '4');
+--- output
+4
+true
+true
+
+=== a top-level return ends the program
+print(1);
+return 0;
+--- output
+1

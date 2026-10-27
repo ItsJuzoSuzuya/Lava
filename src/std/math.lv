@@ -1,0 +1,60 @@
+// std::math: math functions on float64, from the C math library.
+//
+//   import std::math;
+//
+//   print(math::sqrt(2.0));
+
+// The ratio of a circle's circumference to its diameter.
+pub func pi() -> float64 {
+  return 3.141592653589793;
+}
+
+// Euler's number, the base of `exp` and `log`.
+pub func e() -> float64 {
+  return 2.718281828459045;
+}
+
+// The square root of `x`.
+pub extern "sqrt" func sqrt(x: float64) -> float64;
+// The cube root of `x`.
+pub extern "cbrt" func cbrt(x: float64) -> float64;
+// `base` to the power of `exponent`.
+pub extern "pow" func pow(base: float64, exponent: float64) -> float64;
+// e to the power of `x`.
+pub extern "exp" func exp(x: float64) -> float64;
+// The natural logarithm of `x`.
+pub extern "log" func log(x: float64) -> float64;
+// The base 2 logarithm of `x`.
+pub extern "log2" func log2(x: float64) -> float64;
+// The base 10 logarithm of `x`.
+pub extern "log10" func log10(x: float64) -> float64;
+
+// `x` without its sign.
+pub extern "fabs" func abs(x: float64) -> float64;
+// The smaller of `a` and `b`.
+pub extern "fmin" func min(a: float64, b: float64) -> float64;
+// The bigger of `a` and `b`.
+pub extern "fmax" func max(a: float64, b: float64) -> float64;
+// The biggest whole number not above `x`.
+pub extern "floor" func floor(x: float64) -> float64;
+// The smallest whole number not below `x`.
+pub extern "ceil" func ceil(x: float64) -> float64;
+// The nearest whole number, halfway cases away from zero.
+pub extern "round" func round(x: float64) -> float64;
+// `x` without its fractional part.
+pub extern "trunc" func trunc(x: float64) -> float64;
+
+// The sine of `x` radians.
+pub extern "sin" func sin(x: float64) -> float64;
+// The cosine of `x` radians.
+pub extern "cos" func cos(x: float64) -> float64;
+// The tangent of `x` radians.
+pub extern "tan" func tan(x: float64) -> float64;
+// The angle in radians whose sine is `x`.
+pub extern "asin" func asin(x: float64) -> float64;
+// The angle in radians whose cosine is `x`.
+pub extern "acos" func acos(x: float64) -> float64;
+// The angle in radians whose tangent is `x`.
+pub extern "atan" func atan(x: float64) -> float64;
+// The angle in radians of the point (`x`, `y`), between -pi and pi.
+pub extern "atan2" func atan2(y: float64, x: float64) -> float64;

@@ -1,0 +1,7 @@
+
+pub class Span {
+    pub line: uint32;
+    pub col: uint32;
+    pub len: uint32;
+    Constructor(line: uint32, col: uint32, len: uint32);
+}

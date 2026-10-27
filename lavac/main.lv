@@ -1,0 +1,75 @@
+import std::env::{args};
+import std::fs::{read, write, create_dir_all};
+import std::path::{Path};
+import std::process::{ExitCode};
+import std::option::{Option};
+import std::result::{Result};
+import std::vector::{Vector};
+import llvm;
+import modules;
+import program;
+import codegen_ctx;
+
+func main() -> int32 {
+  let args = args().collect();
+  match args[1] {
+    "run" => {
+      let main = main_file(args.at(2) ?? "main.lv");
+      run(main);
+    },
+    "build" => build_command(&args)
+  }
+
+  ExitCode::Success.to_int()
+}
+
+func main_file(file: String) -> Path {
+  let path = Path(file);
+  
+  if path.is_dir() 
+    return path.join("main.lv");
+
+  if !path.is_file() 
+    panic("Path is not a file!");
+
+  path
+}
+
+
+/// `lava build [file] [-o path]`
+func build_command(args: &Vector<String>) -> Result<ExitCode, String> {
+    let (files, output) = match args {
+        [..rest, "-o", output] => (rest.clone(), Some(Path(output.clone()))),
+        rest => (rest.clone(), None),
+    };
+
+    let file = files.len() > 2 ? files[2] : "main.lv";
+    let main = main_file(file);
+
+    let executable = build(&main, output);
+    Ok(ExitCode::Success)
+}
+
+func build(main: &Path, output: Option<Path>) -> Result<String,String> {
+  let dir = main.parent();
+  let name = main.file_name();
+  let build_dir = dir.join("build");
+
+  match create_dir_all(&build_dir) {
+    Err(err) => return Err(err)
+  }
+
+  let object = build_dir.join(name + ".0");
+  let executable = output ?? build_dir.join(name);
+
+  let context = Context();
+  mut graph = ModuleGraph(main);
+  mut program = Program(CodegenContext(context), &graph);
+  let compiled = program.build(&object);
+
+  Ok(executable)
+}
+
+func run(file: Path) {
+  let executable = build(file, None);
+}

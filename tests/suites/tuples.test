@@ -1,0 +1,133 @@
+=== a tuple and its values
+let pair = (1, "one");
+print(pair.0);
+print(pair.1);
+--- output
+1
+one
+
+=== returning two values
+func min_max(values: &[int32]) -> (int32, int32) {
+  mut low = values[0];
+  mut high = values[0];
+  mut i: uint64 = 1;
+  while i < values.len() {
+    if values[i] < low {
+      low = values[i];
+    }
+    if values[i] > high {
+      high = values[i];
+    }
+    i += 1;
+  }
+  (low, high)
+}
+let numbers: int32[4] = {4, 9, 1, 7};
+let (low, high) = min_max(numbers);
+print(low);
+print(high);
+--- output
+1
+9
+
+=== a declared tuple type adapts literals
+let pair: (int64, uint8) = (5000000000, 7);
+print(pair.0);
+print(pair.1);
+--- output
+5000000000
+7
+
+=== matching a tuple
+import std::string::{int_to_string};
+func describe(point: (int32, int32)) -> String {
+  match point {
+    (0, 0) => "origin",
+    (0, _) => "on the y axis",
+    (x, 0) => "on the x axis at " + int_to_string(x as int64),
+    _ => "somewhere",
+  }
+}
+print(describe((0, 0)));
+print(describe((0, 5)));
+print(describe((3, 0)));
+print(describe((1, 1)));
+--- output
+origin
+on the y axis
+on the x axis at 3
+somewhere
+
+=== values move out one by one
+let pair = ("left", "right");
+let left = pair.0;
+let right = pair.1;
+print(left + right);
+--- output
+leftright
+
+=== a moved value can't be used
+let pair = (unique(1), unique(2));
+let left = pair.0;
+let again = pair.0;
+--- error
+use of moved value 'pair.0'
+
+=== strings in a tuple are copied
+let pair = ("left", "right");
+let left = pair.0;
+print(pair.0 + left);
+--- output
+leftleft
+
+=== cloning a tuple
+let pair = ("a", 1);
+let copy = pair.clone();
+print(pair.0 + copy.0);
+--- output
+aa
+
+=== _ drops a value
+let (_, keep) = ("dropped", "kept");
+print(keep);
+--- output
+kept
+
+=== destructuring needs as many names as values
+let (a, b, c) = (1, 2);
+--- error
+can't take 3 values out of '(int32, int32)'
+
+=== a tuple has no value past its end
+let pair = (1, 2);
+print(pair.2);
+--- error
+'(int32, int32)' has no value '2'
+
+=== an array of tuples
+let pairs: (String, int32)[2] = {("a", 1), ("b", 2)};
+print(pairs[1].0);
+print(pairs[0].1 + pairs[1].1);
+--- output
+b
+3
+
+=== a tuple type as a type argument
+import std::vector::{Vector};
+mut list = Vector<(String, int32)>();
+list.push(("c", 3));
+print(list[0].0);
+print(list[0].1);
+--- output
+c
+3
+
+=== a tuple in a tuple
+let nested = (1, (true, 'x'));
+print(nested.1.1);
+print(nested.1.0);
+print(1.5 + 0.5);
+--- output
+x
+true
+2.000000

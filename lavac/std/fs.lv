@@ -1,0 +1,99 @@
+import std::path::{Path, AsPath};
+import std::result::{Result};
+import std::string::{starts_with};
+// std::fs: reading and writing files.
+//
+//   import std::fs;
+//
+//   match fs::read("notes.txt") {
+//     Result::Ok(text) => print(text),
+//     Result::Err(error) => print(error),
+//   }
+
+extern "open" func c_open(path: String, flags: int32, ..) -> int32;
+extern "read" func c_read(file: int32, into: &Buffer<uint8>, count: uint64) -> int64;
+extern "write" func c_write(file: int32, text: String, count: uint64) -> int64;
+extern "close" func c_close(file: int32) -> int32;
+extern "access" func c_access(path: String, mode: int32) -> int32;
+extern "mkdir" func c_mkdir(path: String, mode: int32) -> int32;
+
+
+// The content of the file at `path`, or why it can't be read.
+pub func read(file_path: impl AsPath) -> Result<String, String> {
+  let path = file_path.as_path();
+  // O_RDONLY
+  let file = c_open(path.to_string(), 0);
+  if file < 0 {
+    return Result::Err("can't open the file '" + path.to_string() + "'");
+  }
+  // Read in chunks, collected in `content`, which grows as needed
+  mut content = Buffer<uint8>(65536);
+  mut length: uint64 = 0;
+  mut chunk = Buffer<uint8>(65536);
+  while true {
+    let count = c_read(file, chunk, chunk.capacity());
+    if count < 0 {
+      c_close(file);
+      return Result::Err("can't read the file '" + path.to_string() + "'");
+    }
+    if count == 0 {
+      break;
+    }
+    while length + count as uint64 > content.capacity() {
+      content.resize(content.capacity() * 2);
+    }
+    copy_bytes(content, length, chunk, 0, count as uint64);
+    length = length + count as uint64;
+  }
+  c_close(file);
+  return Result::Ok(String(content, length));
+}
+
+// Replaces the file at `path` with `text`, creating it if it doesn't exist.
+// Gives the number of bytes written, or why it couldn't be written.
+pub func write(file_path: impl AsPath, text: String) -> Result<uint64, String> {
+  let path = file_path.as_path().to_string();
+  // O_WRONLY | O_CREAT | O_TRUNC on Linux, a new file gets the mode 0644
+  let file = c_open(path, 577, 420);
+  if file < 0 {
+    return Result::Err("can't open the file '" + path + "'");
+  }
+  let written = c_write(file, text, text.len());
+  let closed = c_close(file);
+  if written < 0 || closed != 0 {
+    return Result::Err("can't write the file '" + path + "'");
+  }
+  return Result::Ok(written as uint64);
+}
+
+// Creates the directory at `path`, its parent has to exist already.
+pub func create_dir(dir_path: impl AsPath) -> Result<bool, String> {
+  let path = dir_path.as_path().to_string();
+  // A new directory gets the mode 0755
+  if c_mkdir(path, 493) != 0 {
+    return Result::Err("can't create the directory '" + path + "'");
+  }
+  return Result::Ok(true);
+}
+
+// Creates the directory at `path` and every missing parent, like `mkdir -p`.
+// Directories that exist already are fine.
+pub func create_dir_all(dir_path: impl AsPath) -> Result<bool, String> {
+  let text = dir_path.as_path().to_string();
+  mut i: uint64 = 1;
+  while i <= text.len() {
+    if i == text.len() || text[i] == '/' {
+      let part = text.slice(0, i);
+      if c_access(part, 0) != 0 && c_mkdir(part, 493) != 0 {
+        return Result::Err("can't create the directory '" + part + "'");
+      }
+    }
+    i += 1;
+  }
+  return Result::Ok(true);
+}
+
+// Whether there's a file or directory at `path`.
+pub func exists(path: impl AsPath) -> bool {
+  return c_access(path.as_path().to_string(), 0) == 0;
+}

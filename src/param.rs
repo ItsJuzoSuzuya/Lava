@@ -1,8 +1,6 @@
-use serde::Serialize;
-
 use crate::{expression::Expr, span::Span, r#type::Type};
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct Param {
     pub name: String,
     pub ty: Type,

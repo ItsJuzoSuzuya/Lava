@@ -1,0 +1,263 @@
+// The lexer of a Lava compiler, written in Lava: turns source text into tokens.
+//
+// It knows every token of the real language: keywords, identifiers, numbers,
+// strings and characters with escapes, symbols and `//` comments.
+
+import std::option::{Option};
+import std::result::{Result};
+import std::vector::{Vector};
+import std::string::{is_digit, is_alpha, is_alphanumeric, is_whitespace, split, parse_int, char_to_string, int_to_string};
+
+pub enum TokenKind {
+  Ident => String,
+  Keyword => String,
+  Int => int64,
+  Str => String,
+  Char => uint8,
+  Symbol => String,
+  End
+}
+
+pub class Token {
+  pub kind: TokenKind = kind;
+  pub line: int32 = line;
+  pub col: int32 = col;
+
+  Constructor(kind: TokenKind, line: int32, col: int32);
+}
+
+// The token as text for messages, like `keyword 'let'`.
+pub func describe(token: &Token) -> String {
+  match token.kind {
+    TokenKind::Ident(name) => return "identifier '" + name + "'",
+    TokenKind::Keyword(word) => return "keyword '" + word + "'",
+    TokenKind::Int(value) => return "number " + int_to_string(value),
+    TokenKind::Str(text) => return "string \"" + text + "\"",
+    TokenKind::Char(byte) => return "character '" + char_to_string(byte as char) + "'",
+    TokenKind::Symbol(symbol) => return "'" + symbol + "'",
+    TokenKind::End => return "end of file",
+  }
+}
+
+pub func is_end(token: &Token) -> bool {
+  match token.kind {
+    TokenKind::End => return true,
+    _ => return false,
+  }
+}
+
+func is_keyword(word: &String) -> bool {
+  let keywords = "as break class Constructor continue else enum false for func if impl import let match mut print pub return self trait true while";
+  return keywords.split(' ').contains_word(word);
+}
+
+func contains_word(words: &Vector<String>, word: &String) -> bool {
+  mut i: uint64 = 0;
+  while i < words.len() {
+    if words.get(i) == word {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+func is_pair(pair: &String) -> bool {
+  return pair == "->" || pair == "::" || pair == "==" || pair == "!=" || pair == "<="
+    || pair == ">=" || pair == "=>" || pair == "&&" || pair == "||";
+}
+
+func is_single(byte: uint8) -> bool {
+  let symbols = "(){};,:=+-*/.&<>!%";
+  mut i: uint64 = 0;
+  while i < symbols.len() {
+    if symbols.byte(i) == byte {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+// The byte an escape like `\n` stands for, given the byte after the `\`.
+func escaped(byte: uint8) -> Option<uint8> {
+  match byte {
+    'n' => return Option::Some('\n'),
+    't' => return Option::Some('\t'),
+    'r' => return Option::Some('\r'),
+    '0' => return Option::Some('\0'),
+    '\\' => return Option::Some('\\'),
+    '"' => return Option::Some('"'),
+    '\'' => return Option::Some('\''),
+    _ => return Option::None,
+  }
+}
+
+pub class Lexer {
+  source: String = source;
+  pos: uint64 = 0;
+  line: int32 = 1;
+  col: int32 = 1;
+
+  Constructor(source: String);
+
+  // The next token, or why there can't be one.
+  pub func next_token(mut &self) -> Result<Token, String> {
+    self.skip_blank();
+    let line = self.line;
+    let col = self.col;
+    if self.at_end() {
+      return Result::Ok(Token(TokenKind::End, line, col));
+    }
+    let byte = self.current();
+    let start = self.pos;
+
+    if is_alpha(byte) || byte == '_' {
+      while !self.at_end() && (is_alphanumeric(self.current()) || self.current() == '_') {
+        self.advance();
+      }
+      let word = self.source.slice(start, self.pos);
+      if is_keyword(word) {
+        return Result::Ok(Token(TokenKind::Keyword(word), line, col));
+      }
+      return Result::Ok(Token(TokenKind::Ident(word), line, col));
+    }
+
+    if is_digit(byte) {
+      while !self.at_end() && is_digit(self.current()) {
+        self.advance();
+      }
+      match parse_int(self.source.slice(start, self.pos)) {
+        Option::Some(value) => return Result::Ok(Token(TokenKind::Int(value), line, col)),
+        Option::None => return Result::Err(position(line, col) + "number doesn't fit into int64"),
+      }
+    }
+
+    if byte == '"' {
+      self.advance();
+      mut text = "";
+      while !self.at_end() && self.current() != '"' {
+        if self.current() == '\\' {
+          self.advance();
+          if self.at_end() {
+            break;
+          }
+          match escaped(self.current()) {
+            Option::Some(c) => text = text + char_to_string(c as char),
+            Option::None => return Result::Err(position(self.line, self.col) + "unknown escape"),
+          }
+        } else {
+          text = text + char_to_string(self.current() as char);
+        }
+        self.advance();
+      }
+      if self.at_end() {
+        return Result::Err(position(line, col) + "unterminated string literal");
+      }
+      self.advance();
+      return Result::Ok(Token(TokenKind::Str(text), line, col));
+    }
+
+    if byte == '\'' {
+      self.advance();
+      if self.at_end() {
+        return Result::Err(position(line, col) + "unterminated character literal");
+      }
+      mut value = self.current();
+      if value == '\\' {
+        self.advance();
+        if self.at_end() {
+          return Result::Err(position(line, col) + "unterminated character literal");
+        }
+        match escaped(self.current()) {
+          Option::Some(c) => value = c,
+          Option::None => return Result::Err(position(self.line, self.col) + "unknown escape"),
+        }
+      }
+      self.advance();
+      if self.at_end() || self.current() != '\'' {
+        return Result::Err(position(line, col) + "a character literal is one character");
+      }
+      self.advance();
+      return Result::Ok(Token(TokenKind::Char(value), line, col));
+    }
+
+    if self.pos + 1 < self.source.len() {
+      let pair = self.source.slice(self.pos, self.pos + 2);
+      if is_pair(pair) {
+        self.advance();
+        self.advance();
+        return Result::Ok(Token(TokenKind::Symbol(pair), line, col));
+      }
+    }
+    if is_single(byte) {
+      self.advance();
+      return Result::Ok(Token(TokenKind::Symbol(char_to_string(byte as char)), line, col));
+    }
+    return Result::Err(position(line, col) + "unexpected character '" + char_to_string(byte as char) + "'");
+  }
+
+  func at_end(&self) -> bool {
+    return self.pos >= self.source.len();
+  }
+
+  func current(&self) -> uint8 {
+    return self.source.byte(self.pos);
+  }
+
+  func following(&self) -> uint8 {
+    if self.pos + 1 >= self.source.len() {
+      return 0;
+    }
+    return self.source.byte(self.pos + 1);
+  }
+
+  func advance(mut &self) {
+    if self.current() == '\n' {
+      self.line = self.line + 1;
+      self.col = 1;
+    } else {
+      self.col = self.col + 1;
+    }
+    self.pos = self.pos + 1;
+  }
+
+  // Skips whitespace and comments.
+  func skip_blank(mut &self) {
+    while !self.at_end() {
+      if is_whitespace(self.current()) {
+        self.advance();
+      } else if self.current() == '/' && self.following() == '/' {
+        while !self.at_end() && self.current() != '\n' {
+          self.advance();
+        }
+      } else {
+        break;
+      }
+    }
+  }
+}
+
+// `line:col: ` for the start of an error message.
+pub func position(line: int32, col: int32) -> String {
+  return int_to_string(line as int64) + ":" + int_to_string(col as int64) + ": ";
+}
+
+// Every token of `source`, the last one is `TokenKind::End`.
+pub func lex(source: String) -> Result<Vector<Token>, String> {
+  mut lexer = Lexer(source);
+  mut tokens = Vector<Token>();
+  while true {
+    match lexer.next_token() {
+      Result::Err(message) => return Result::Err(message),
+      Result::Ok(token) => {
+        let end = is_end(token);
+        tokens.push(token);
+        if end {
+          return Result::Ok(tokens);
+        }
+      }
+    }
+  }
+  return Result::Ok(tokens);
+}

@@ -1,0 +1,31 @@
+
+// --- HashMaps ---
+//
+// A draft moved here from the prelude, as it was there. It doesn't compile
+// yet, so it's commented out until it's finished:
+
+pub trait Hash {
+  pub func hash(&self) -> int32;
+}
+
+class Bucket<T> {
+  pairs: Vector<(int32, T)>;
+}
+
+pub class HashMap<Key: Hashable, Value> {
+  buckets: Bucket<V>[16] = Bucket[16];
+
+  Constructor {}
+
+
+  pub func set(key: Key, value: Value) {
+    let hash: int32 = key.hash();
+
+  }
+}
+
+impl Hash for String {
+  pub func hash(&self) -> int32 {
+    return 20;
+  }
+}

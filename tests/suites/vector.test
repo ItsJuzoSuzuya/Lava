@@ -129,7 +129,7 @@ print(v.get(0));
 1
 9.000000
 
-=== copying a vector copies its elements
+=== cloning a vector copies its elements
 class Vector<T> {
   data: Buffer<T> = Buffer<T>(4);
   length: uint64 = 0;
@@ -154,7 +154,7 @@ class Vector<T> {
 }
 mut a = Vector<int32>();
 a.push(1);
-mut b = a;
+mut b = a.clone();
 b.set(0, 2);
 print(a.get(0));
 print(b.get(0));
@@ -223,17 +223,26 @@ while i < 6 {
   v.push(unique(Point { x: i }));
   i = i + 1;
 }
-mut w = v;
+mut w = v.clone();
 print(v.get(5).x);
 print(w.get(0).x);
 --- output
 5
 0
 
-=== vector without its import is an unknown type
-mut v = Vector<int32>();
+=== unknown generic class is an unknown function
+mut v = Vectr<int32>();
 --- error
-unknown function 'Vector'
+unknown function 'Vectr'
+
+=== the vector of std::vector
+import std::vector::{Vector};
+mut v = Vector<int32>();
+v.push(3);
+v.push(4);
+print(v.pop() + v.len() as int32);
+--- output
+5
 
 === insert, remove and clear
 import vector;
@@ -376,3 +385,23 @@ let v = Vector<int32>();
 v.push(1);
 --- error
 method 'push' changes 'self', so 'v' has to be mutable
+
+=== at gives None past the end instead of stopping
+import std::vector::{Vector};
+mut v = Vector<String>();
+v.push("first");
+print(v.at(0) ?? "none");
+print(v.at(5) ?? "none");
+print(v.at(1).is_none());
+--- output
+first
+none
+true
+
+=== indexing past the end stops the program
+import std::vector::{Vector};
+mut v = Vector<int32>();
+v.push(1);
+print(v[3]);
+--- output
+error: index 3 is out of bounds for a Vector of length 1

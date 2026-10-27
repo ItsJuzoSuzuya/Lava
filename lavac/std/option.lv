@@ -1,0 +1,43 @@
+// std::option: a value that might be missing.
+//
+//   import std::option::{Option};
+//
+//   let name: Option<String> = None;
+//   match name {
+//     Some(name) => print(name),
+//     None => print("no name"),
+//   }
+//   print(name ?? "anonymous");
+//
+// With `Option` imported, `Some(x)` and `None` need no `Option::`.
+// Errors are handled explicitly: there's no `unwrap` that stops the program
+// on a missing value, `match` on it instead, or give a default with `??` or
+// `unwrap_or`.
+
+// A value that might be missing.
+pub enum Option<T> {
+  Some => T,
+  None;
+
+  pub func is_some(&self) -> bool {
+    match self {
+      Option::Some => return true,
+      Option::None => return false,
+    }
+  }
+
+  pub func is_none(&self) -> bool {
+    match self {
+      Option::Some => return false,
+      Option::None => return true,
+    }
+  }
+
+  // A copy of the value, or `default` if there's none.
+  pub func unwrap_or(&self, default: T) -> T {
+    match self {
+      Option::Some(value) => return value.clone(),
+      Option::None => return default,
+    }
+  }
+}

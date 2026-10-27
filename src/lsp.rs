@@ -15,8 +15,9 @@ use std::{collections::{HashMap, HashSet}, io::{self, BufRead, Write}, path::{Pa
 
 use serde_json::{Value, json};
 
-use crate::{analysis::{DefKind, Index, RefKind, show_type, template_name}, diagnostic::{self, CompileError},
-    lint::{self, Warning}, module::{self, ModuleGraph}, program::check_modules, span::Span, r#type::Type};
+use crate::{analysis::{DefKind, Index, RefKind, show_type, template_name}, declaration::{DeclarationKind, ExternItem, Visibility},
+    diagnostic::{self, CompileError}, lint::{self, Warning}, module::{self, ModuleGraph}, parser::Parser, program::check_modules,
+    span::Span, statement::StmtKind, r#type::Type};
 
 /// Runs the server until the client sends `exit`.
 pub fn run() -> ExitCode {
@@ -240,24 +241,98 @@ impl Server {
 
     /// Checks the program starting at `root`, with the open documents' text.
     fn analyze(&self, root: &Path) -> Analysis {
-        let overlay = self.documents.clone();
+        let mut overlay = self.documents.clone();
         let mut errors = Vec::new();
-        let graph = match diagnostic::catch(|| ModuleGraph::with_overlay(root, overlay)) {
-            Ok(graph) => graph,
-            Err(mut error) => {
-                error.file.get_or_insert_with(|| root.to_path_buf());
+        // Files with lines blanked out because they don't parse, and those lines
+        let mut recovered: HashSet<PathBuf> = HashSet::new();
+        let mut blanked_lines: Vec<String> = Vec::new();
+        // Whether a blanked line opened or closed a block, so the code after it doesn't fit anymore
+        let mut unbalanced = false;
+        let (graph, modules) = loop {
+            let graph = match diagnostic::catch(|| ModuleGraph::with_overlay(root, overlay.clone())) {
+                Ok(graph) => graph,
+                Err(mut error) => {
+                    error.file.get_or_insert_with(|| root.to_path_buf());
+                    errors.push(error);
+                    break (ModuleGraph::empty(), vec![]);
+                }
+            };
+            let (modules, mut found) = check_modules(&graph);
+            // Checking stops at a syntax error, it's the last one
+            let syntax_error = found.last().is_some_and(|error| {
+                error.file.as_ref().is_some_and(|file| !modules.iter().any(|m| &m.path == file))
+            });
+            if !syntax_error {
+                // Leaving lines out can take away a declaration, the code using
+                // it then has an unknown name. Other errors are real
+                let from_blanked = |error: &CompileError| {
+                    error.message.to_lowercase().contains("unknown") && quoted_name(&error.message)
+                        .is_some_and(|name| blanked_lines.iter().any(|line| contains_word(line, name)))
+                };
+                errors.extend(found.into_iter().filter(|e| !from_blanked(e)));
+                break (graph, modules);
+            }
+            let error = found.pop().expect("a syntax error was found");
+            // Later syntax errors are real too, unless a blanked line opened or closed a block
+            let report = !unbalanced;
+
+            // A syntax error, like in a line being typed, would leave the whole file
+            // without types. Its line is left out and the rest checked again, the
+            // error is still reported as it is
+            let unparsed = error.file.clone().filter(|file| !modules.iter().any(|m| &m.path == file));
+            let retry = match (unparsed, &error.span) {
+                (Some(file), Some(span)) if blanked_lines.len() < 20 => {
+                    let text = overlay.get(&file).cloned().unwrap_or_else(|| self.text_of(&file));
+                    let mut lines: Vec<&str> = text.lines().collect();
+                    // An error at the end of the file, like after a `words.` being typed,
+                    // is after the line causing it
+                    let mut at = span.line.min(lines.len().saturating_sub(1));
+                    while at > 0 && lines.get(at).is_some_and(|line| line.trim().is_empty()) {
+                        at -= 1;
+                    }
+                    // So is an error at the start of a line after an unfinished one, like `text.`
+                    let starts_line = lines.get(at).is_some_and(|line| line.len() - line.trim_start().len() >= span.col);
+                    let previous = (0..at).rev().find(|&i| !lines[i].trim().is_empty());
+                    if let (true, Some(previous)) = (starts_line && at == span.line, previous) {
+                        let end = lines[previous].trim_end();
+                        if !(end.ends_with(';') || end.ends_with('{') || end.ends_with('}') || end.ends_with(',') || end.trim_start().starts_with("//")) {
+                            at = previous;
+                        }
+                    }
+                    match lines.get_mut(at) {
+                        Some(line) if !line.trim().is_empty() => {
+                            let count = |c: char| line.chars().filter(|&x| x == c).count();
+                            unbalanced |= count('{') != count('}') || count('(') != count(')') || count('[') != count(']');
+                            blanked_lines.push(line.to_string());
+                            *line = "";
+                            let blanked = lines.join("\n");
+                            overlay.insert(file.clone(), blanked);
+                            recovered.insert(file);
+                            true
+                        }
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
+            if report {
                 errors.push(error);
-                ModuleGraph::empty()
+            }
+            if !retry {
+                // The modules checked before the one that doesn't parse
+                errors.extend(found);
+                break (graph, modules);
             }
         };
-
-        let (modules, error) = check_modules(&graph);
-        errors.extend(error);
-        let parsed = modules.iter().map(|m| m.path.clone()).collect();
+        // A file only parsed after leaving lines out counts as not parsed
+        let parsed = modules.iter().map(|m| m.path.clone()).filter(|path| !recovered.contains(path)).collect();
 
         let built = diagnostic::catch(|| {
             let index = Index::build(&graph, &modules);
-            let warnings = lint::lint(&index, &modules);
+            let mut warnings = lint::lint(&index, &modules);
+            // What's used in lines left out isn't unused
+            warnings.retain(|w| !(w.code.starts_with("unused") && quoted_name(&w.message)
+                .is_some_and(|name| blanked_lines.iter().any(|line| contains_word(line, name)))));
             (index, warnings)
         });
         let (index, warnings) = match built {
@@ -339,15 +414,17 @@ impl Server {
             .unwrap_or_default()
     }
 
-    /// The analysis to answer requests about `path` with: one where it parsed
-    /// if possible, so a syntax error while typing doesn't lose everything.
+    /// The analysis to answer requests about `path` with: the current one,
+    /// which leaves out lines with syntax errors and has everything else.
+    /// One from when every file parsed only if the current one lost the file.
     fn analysis_for(&self, path: &Path) -> Option<(&Analysis, usize)> {
-        let current = self.analyses.iter().filter(|a| a.contains(path));
-        let parsed = current.clone().find(|a| a.parsed.contains(path))
-            .or_else(|| self.fallbacks.iter().find(|a| a.parsed.contains(path)));
-        let analysis = parsed.or_else(|| current.clone().next())?;
-        let file = analysis.index.file_index(&path.to_path_buf())?;
-        Some((analysis, file))
+        let path = path.to_path_buf();
+        let current = self.analyses.iter()
+            .filter(|a| a.contains(&path))
+            .find_map(|a| a.index.file_index(&path).map(|file| (a, file)));
+        current.or_else(|| self.fallbacks.iter()
+            .filter(|a| a.parsed.contains(&path))
+            .find_map(|a| a.index.file_index(&path).map(|file| (a, file))))
     }
 
     /// The document, position and analysis a request is about, with the
@@ -562,8 +639,22 @@ impl Server {
         let word_start = before.iter().rposition(|c| !(c.is_alphanumeric() || *c == '_')).map_or(0, |p| p + 1);
         let prefix: String = before[..word_start].iter().collect();
 
+        // `import std::` lists the modules of the standard library. The
+        // unfinished import keeps the program from loading, so it's done first
+        if prefix.trim() == "import std::" {
+            let modules: Vec<Value> = module::STD.iter()
+                .map(|(module, _)| json!({ "label": module, "kind": 9, "detail": format!("module std::{}", module) }))
+                .collect();
+            return json!(modules);
+        }
+
         let Some((analysis, file)) = self.analysis_for(&path) else { return json!(keyword_items()) };
         let index = &analysis.index;
+        // From the text as it is now, the analysis can be older while typing
+        let imports = module::imports_of(&text);
+        let imported: Vec<String> = imports.iter().map(|i| i.name.clone()).collect();
+        // A new import goes after the last one
+        let import_line = imports.iter().map(|i| i.span.line + 1).max().unwrap_or(0);
 
         if let Some(receiver) = prefix.strip_suffix('.') {
             let chain = trailing_chain(receiver);
@@ -571,6 +662,10 @@ impl Server {
             let class_here = index.function_at(file, line).and_then(|f| index.defs[f].container);
             let items: Vec<Value> = resolve_chain(index, file, line, &chain)
                 .map(|ty| index.members(&ty).into_iter()
+                    // After `.` come fields and methods, an enum's variants and the
+                    // functions without `self` come after `::`
+                    .filter(|&m| index.defs[m].kind != DefKind::Variant)
+                    .filter(|&m| index.defs[m].kind != DefKind::Method || index.defs[m].takes_self)
                     .filter(|&m| index.defs[m].public || index.defs[m].container == class_here && class_here.is_some())
                     .map(|m| item(index, m))
                     .collect())
@@ -580,23 +675,145 @@ impl Server {
         if let Some(owner) = prefix.strip_suffix("::") {
             let chain = trailing_chain(owner);
             let Some(name) = chain.last() else { return json!([]) };
+            // The items of a standard library module, which is imported if it isn't yet
+            if index.key(&format!("enum:{}", name)).is_none() && module::std_source(name).is_some() {
+                let module_name = format!("std::{}", name);
+                let edit = (!imported.contains(&module_name))
+                    .then(|| insertion(import_line, 0, format!("import {};\n", module_name)));
+                let items: Vec<Value> = self.importables(&path, &index.files[file].name).iter()
+                    .filter(|i| i.module == module_name)
+                    .map(|i| importable_item(i, edit.clone()))
+                    .collect();
+                return json!(items);
+            }
+            // After `Name::` the variants and the functions without `self`, methods are called on values
             let items: Vec<Value> = index.key(&format!("enum:{}", name))
-                .map(|e| index.members(&index.defs[e].name).into_iter().map(|m| item(index, m)).collect())
+                .or_else(|| index.key(&format!("class:{}", name)))
+                .map(|owner| index.members(&index.defs[owner].name).into_iter()
+                    .filter(|&m| index.defs[m].kind == DefKind::Variant
+                        || index.defs[m].kind == DefKind::Method && !index.defs[m].takes_self)
+                    .map(|m| item(index, m))
+                    .collect())
                 .unwrap_or_default();
             return json!(items);
         }
 
         let mut items = keyword_items();
-        let mut names = HashSet::new();
-        // Inner variables shadow outer ones, the latest declaration wins
-        let mut locals = index.locals_at(file, line);
+        // Inner variables shadow outer ones, the latest declaration wins. One
+        // declared on this line doesn't exist yet in its own value, like the
+        // first `args` in `let args = args();`
+        let mut locals: Vec<usize> = index.locals_at(file, line).into_iter()
+            .filter(|&d| index.defs[d].span.line < line || index.defs[d].kind == DefKind::Param)
+            .collect();
         locals.sort_by_key(|&d| std::cmp::Reverse((index.defs[d].span.line, index.defs[d].span.col)));
-        for def in locals.into_iter().chain(index.globals_for(file)) {
+        let mut local_names = HashSet::new();
+        for def in locals {
+            if local_names.insert(index.defs[def].name.clone()) {
+                items.push(item(index, def));
+            }
+        }
+        // Functions and types are looked up apart from variables, so a variable
+        // doesn't hide a function with its name
+        let mut names = HashSet::new();
+        for def in index.globals_for(file) {
+            // Standard library items like `fs::read` come below, written by their own name
+            if index.defs[def].name.contains("::") {
+                continue;
+            }
             if names.insert(index.defs[def].name.clone()) {
                 items.push(item(index, def));
             }
         }
+        // `Ok`, `Err`, `Some` and `None` need no `Result::` or `Option::`, of a program's
+        // own enum or the one of `std::result` and `std::option`
+        for (enum_name, variant) in [("Result", "Ok"), ("Result", "Err"), ("Option", "Some"), ("Option", "None")] {
+            let std_name = format!("{}::{}", enum_name.to_lowercase(), enum_name);
+            let def = index.key(&format!("variant:{}::{}", enum_name, variant))
+                .or_else(|| index.key(&format!("variant:{}::{}", std_name, variant)));
+            if let Some(def) = def {
+                if names.insert(variant.to_string()) {
+                    items.push(item(index, def));
+                }
+            }
+        }
+        // What other modules have. Picking it adds its import if needed: the
+        // item itself for the standard library, like `import std::env::{args};`,
+        // the whole module for the program's own modules
+        for importable in self.importables(&path, &index.files[file].name) {
+            let edit = if importable.module.starts_with("std::") {
+                item_import(&text, &imports, &importable, import_line)
+            } else if imported.contains(&importable.module) {
+                // Its items are offered above already
+                continue;
+            } else {
+                Some(insertion(import_line, 0, format!("import {};\n", importable.module)))
+            };
+            if names.insert(short_name(&importable.name).to_string()) {
+                items.push(importable_item(&importable, edit));
+            }
+        }
         json!(items)
+    }
+
+    /// The public top-level declarations of the modules the file at `path`,
+    /// the module `own`, could import: the standard library modules and the
+    /// other `.lv` files in its directory.
+    ///
+    /// They're only parsed, not checked, so they can be suggested without
+    /// becoming part of the program before they're imported.
+    fn importables(&self, path: &Path, own: &str) -> Vec<Importable> {
+        let mut modules: Vec<module::Module> = module::STD.iter()
+            .map(|(name, source)| module::Module {
+                imports: vec![],
+                name: format!("std::{}", name),
+                path: module::std_path(name),
+                source: source.to_string(),
+            })
+            .collect();
+        let builtin = |p: &Path| {
+            let canonical = module::canonical(p);
+            canonical.is_some() && (canonical == module::canonical(module::prelude_path())
+                || module::STD.iter().any(|(name, _)| canonical == module::canonical(module::std_path(name))))
+        };
+        let siblings = path.parent().and_then(|dir| std::fs::read_dir(dir).ok()).into_iter().flatten().flatten();
+        for sibling in siblings.map(|entry| entry.path()) {
+            let Some(stem) = sibling.file_stem().map(|s| s.to_string_lossy().into_owned()) else { continue };
+            // `main` is the program itself, nothing imports it
+            if sibling.extension().is_none_or(|e| e != "lv") || sibling == path || stem == "main" || builtin(&sibling) {
+                continue;
+            }
+            modules.push(module::Module { imports: vec![], name: stem, source: self.text_of(&sibling), path: sibling });
+        }
+
+        modules.into_iter()
+            .filter(|m| m.name != own)
+            .flat_map(|m| {
+                let parsed = diagnostic::catch(|| Parser::with_renames(m.source.clone(), m.renames()).parse_file());
+                // A file being written may not parse yet, its declarations are still found by name
+                let Ok(stmts) = parsed else { return scanned_importables(&m) };
+                stmts.into_iter().filter_map(|stmt| {
+                    let StmtKind::Declaration(decl) = stmt.kind else { return None };
+                    if !matches!(decl.visibility, Visibility::Public) {
+                        return None;
+                    }
+                    let (name, kind, signature) = match decl.kind {
+                        DeclarationKind::Function { name, params, return_type, .. } => {
+                            let params: Vec<String> = params.iter().map(|p| format!("{}: {}", p.name, show_type(&p.ty))).collect();
+                            let ret = return_type.filter(|t| *t != Type::Void).map(|t| format!(" -> {}", show_type(&t))).unwrap_or_default();
+                            let signature = format!("{}({}){}", short_name(&name), params.join(", "), ret);
+                            (name, DefKind::Function, signature)
+                        }
+                        DeclarationKind::Class { name, .. } => (name.clone(), DefKind::Class, format!("class {}", short_name(&name))),
+                        DeclarationKind::Enum { name, .. } => (name.clone(), DefKind::Enum, format!("enum {}", short_name(&name))),
+                        DeclarationKind::Trait { name, .. } => (name.clone(), DefKind::Trait, format!("trait {}", short_name(&name))),
+                        DeclarationKind::Extern(ExternItem::Type { name, .. }) =>
+                            (name.clone(), DefKind::Class, format!("extern type {}", short_name(&name))),
+                        DeclarationKind::Impl { .. } | DeclarationKind::Extern(ExternItem::Link(_)) => return None,
+                    };
+                    Some(Importable { name, kind, signature, module: m.name.clone() })
+                }).collect()
+            })
+            .collect()
     }
 
     fn signature_help(&self, params: &Value) -> Value {
@@ -759,6 +976,141 @@ fn completion_kind(kind: DefKind) -> u32 {
 }
 
 /// A completion item for `def`. Functions get a snippet with parentheses.
+/// A public declaration of a module a file doesn't import yet, see
+/// [`Server::importables`].
+struct Importable {
+    /// How it's written: `fs::read` for an item of the standard library,
+    /// `add` for one of the program's own modules.
+    name: String,
+    kind: DefKind,
+    /// Like `read(path: String) -> Result<String, String>`.
+    signature: String,
+    /// The module to import, like `std::fs` or `math`.
+    module: String,
+}
+
+/// The completion item of `importable`, written by its own name like `read`.
+/// Picking it also applies `import`, the edit importing it, if given.
+fn importable_item(importable: &Importable, import: Option<Value>) -> Value {
+    let short = short_name(&importable.name);
+    let mut item = json!({
+        "label": short,
+        "kind": completion_kind(importable.kind),
+        "detail": importable.signature,
+        "labelDetails": { "description": importable.module },
+        "insertText": short,
+    });
+    if importable.kind == DefKind::Function {
+        item["insertText"] = json!(format!("{}($0)", short));
+        item["insertTextFormat"] = json!(2);
+    }
+    if let Some(import) = import {
+        item["labelDetails"]["description"] = json!(format!("import {}", importable.module));
+        item["additionalTextEdits"] = json!([import]);
+    }
+    item
+}
+
+/// The edit importing the standard library item `importable` by its name,
+/// or `None` if one of `imports`, those of `text`, does already.
+///
+/// An import list of its module on one line, like `import std::env::{Args};`,
+/// gets it added: `import std::env::{Args, args};`. Otherwise a new import
+/// like `import std::env::{args};` goes to `import_line`.
+fn item_import(text: &str, imports: &[module::Import], importable: &Importable, import_line: usize) -> Option<Value> {
+    let short = short_name(&importable.name);
+    let of_module: Vec<&module::Import> = imports.iter().filter(|i| i.name == importable.module).collect();
+    if of_module.iter().any(|i| i.items.iter().any(|(item, _)| item == short)) {
+        return None;
+    }
+    for import in &of_module {
+        let Some((_, last)) = import.items.last() else { continue };
+        let line = text.lines().nth(last.line).unwrap_or("");
+        let end = last.col + last.len;
+        let rest: String = line.chars().skip(end).collect();
+        if rest.trim_start().trim_start_matches(',').trim_start().starts_with('}') {
+            let character = line.chars().take(end).map(char::len_utf16).sum();
+            return Some(insertion(last.line, character, format!(", {}", short)));
+        }
+    }
+    Some(insertion(import_line, 0, format!("import {}::{{{}}};\n", importable.module, short)))
+}
+
+/// An edit inserting `text` at `line` and the UTF-16 `character`.
+fn insertion(line: usize, character: usize, text: String) -> Value {
+    let position = json!({ "line": line, "character": character });
+    json!({ "range": { "start": position, "end": position }, "newText": text })
+}
+
+/// The public top-level declarations of `module`, which doesn't parse, found
+/// by their `pub class Name`, `pub func name` and the like.
+fn scanned_importables(module: &module::Module) -> Vec<Importable> {
+    use crate::token::Token;
+    let mut lexer = crate::lexer::Lexer::new(module.source.clone());
+    let mut found = Vec::new();
+    let mut depth = 0usize;
+    // The tokens since the last one that can't be part of a declaration's start
+    let mut pending: Vec<Token> = Vec::new();
+    let mut errors = 0;
+    loop {
+        // Characters Lava doesn't have, like in code copied from elsewhere, are skipped
+        let token = match lexer.get_next_token() {
+            Ok((token, _)) => token,
+            Err(_) if errors < 1000 => {
+                errors += 1;
+                pending.clear();
+                continue;
+            }
+            Err(_) => break,
+        };
+        match token {
+            Token::EOF => break,
+            Token::LBrace => depth += 1,
+            Token::RBrace => depth = depth.saturating_sub(1),
+            Token::Identifier(name) if depth == 0 => {
+                let kind = match pending.as_slice() {
+                    [.., Token::Pub, Token::Class] => Some((DefKind::Class, "class")),
+                    [.., Token::Pub, Token::Enum] => Some((DefKind::Enum, "enum")),
+                    [.., Token::Pub, Token::Trait] => Some((DefKind::Trait, "trait")),
+                    [.., Token::Pub, Token::Func] => Some((DefKind::Function, "func")),
+                    _ => None,
+                };
+                if let Some((kind, keyword)) = kind {
+                    let signature = if keyword == "func" { format!("{}(…)", name) } else { format!("{} {}", keyword, name) };
+                    found.push(Importable { name, kind, signature, module: module.name.clone() });
+                }
+                pending.clear();
+                continue;
+            }
+            token @ (Token::Pub | Token::Class | Token::Enum | Token::Trait | Token::Func) => {
+                pending.push(token);
+                continue;
+            }
+            _ => {}
+        }
+        pending.clear();
+    }
+    found
+}
+
+/// The first name in quotes in `message`, `x` of "unknown identifier 'x'".
+fn quoted_name(message: &str) -> Option<&str> {
+    let (_, rest) = message.split_once('\'')?;
+    let (name, _) = rest.split_once('\'')?;
+    Some(short_name(name))
+}
+
+/// Whether `line` contains `word` on its own, not as part of a longer name.
+fn contains_word(line: &str, word: &str) -> bool {
+    let is_name = |c: char| c.is_alphanumeric() || c == '_';
+    line.split(|c: char| !is_name(c)).any(|part| part == word)
+}
+
+/// `name` without its module, `read` for `fs::read`.
+fn short_name(name: &str) -> &str {
+    name.rsplit("::").next().unwrap_or(name)
+}
+
 fn item(index: &Index, def: usize) -> Value {
     let d = &index.defs[def];
     let detail = match d.kind {
@@ -767,11 +1119,23 @@ fn item(index: &Index, def: usize) -> Value {
     };
     let callable = matches!(d.kind, DefKind::Function | DefKind::Method)
         || d.kind == DefKind::Builtin && d.signature.contains('(');
+    // Editors show `detail` above the documentation, a one line signature would be there twice
+    let documentation = if d.kind == DefKind::Builtin {
+        let docs = d.signature.split_once("\n\n").map(|(_, docs)| docs).unwrap_or("");
+        format!("{}\n\n*built in*", docs)
+    } else if d.signature.lines().count() > 1 {
+        // A class or trait shows its members
+        index.describe(def)
+    } else {
+        d.file.filter(|_| !matches!(d.kind, DefKind::Variable | DefKind::Param))
+            .map(|f| format!("*in module `{}`*", index.files[f].name))
+            .unwrap_or_default()
+    };
     let mut item = json!({
         "label": d.name,
         "kind": completion_kind(d.kind),
         "detail": detail,
-        "documentation": { "kind": "markdown", "value": index.describe(def) },
+        "documentation": { "kind": "markdown", "value": documentation },
     });
     if callable {
         item["insertText"] = json!(format!("{}($0)", d.name));
@@ -781,13 +1145,13 @@ fn item(index: &Index, def: usize) -> Value {
 }
 
 const KEYWORDS: &[&str] = &[
-    "as", "class", "Constructor", "else", "enum", "false", "for", "func", "if", "impl", "import", "let",
+    "as", "break", "class", "Constructor", "continue", "else", "enum", "extern", "false", "for", "func", "if", "impl", "import", "let",
     "match", "mut", "print", "pub", "return", "self", "trait", "true", "while",
 ];
 
 const TYPES: &[&str] = &[
-    "bool", "String", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
-    "float32", "float64", "Unique", "Buffer",
+    "bool", "char", "byte", "String", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+    "float32", "float64", "Unique", "Shared", "Buffer",
 ];
 
 fn keyword_items() -> Vec<Value> {
@@ -837,6 +1201,13 @@ fn trailing_chain(text: &str) -> Vec<String> {
 
 /// The name of the type the access chain `chain` evaluates to at `line` of `file`.
 fn resolve_chain(index: &Index, file: usize, line: usize, chain: &[String]) -> Option<String> {
+    // `fs::read(path).` starts with the qualified name `fs::read`
+    let qualified = (chain.len() > 1).then(|| format!("{}::{}", chain[0], chain[1]));
+    let chain: Vec<String> = match qualified {
+        Some(name) if index.globals_for(file).into_iter().any(|d| index.defs[d].name == name) =>
+            std::iter::once(name).chain(chain[2..].iter().cloned()).collect(),
+        _ => chain.to_vec(),
+    };
     let (first, rest) = chain.split_first()?;
 
     // A local variable, the latest declaration before the line wins
@@ -844,9 +1215,13 @@ fn resolve_chain(index: &Index, file: usize, line: usize, chain: &[String]) -> O
     locals.sort_by_key(|&d| std::cmp::Reverse((index.defs[d].span.line, index.defs[d].span.col)));
     let mut ty = match locals.into_iter().find(|&d| &index.defs[d].name == first) {
         Some(def) => index.defs[def].ty.clone(),
+        // A function's result, like `half(4).` or `fs::read(path).`, has the type it returns.
+        // `Point.` isn't valid, an enum's name before `::` is handled by the caller
         None => {
-            // `Point.` isn't valid, but an enum's name before `::` is handled by the caller
-            return None;
+            let suffix = format!("::{}", first);
+            let function = index.globals_for(file).into_iter()
+                .find(|&d| index.defs[d].kind == DefKind::Function && (index.defs[d].name == *first || index.defs[d].name.ends_with(&suffix)))?;
+            index.defs[function].ty.clone()
         }
     };
     if first == "self" && ty == Type::Unknown {
@@ -865,10 +1240,13 @@ fn resolve_chain(index: &Index, file: usize, line: usize, chain: &[String]) -> O
 /// Name of the type whose members a value of type `ty` has.
 fn type_owner(ty: &Type) -> Option<String> {
     match ty {
-        Type::Ref(inner) | Type::Unique(inner) => type_owner(inner),
+        Type::Ref(inner) | Type::Unique(inner) | Type::Shared(inner) => type_owner(inner),
         Type::Buffer(_) => Some("Buffer".to_string()),
+        // Their built-in `len`, see `Index::members`
+        Type::Array(..) => Some("Array".to_string()),
+        Type::Slice(_) => Some("Slice".to_string()),
         Type::Generic { name, .. } => Some(match name.as_str() {
-            "Unique" => return None,
+            "Unique" | "Shared" => return None,
             other => other.to_string(),
         }),
         other => other.class_name().or_else(|| other.owner_name()).map(|n| template_name(&n)),

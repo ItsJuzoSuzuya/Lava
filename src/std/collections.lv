@@ -1,0 +1,108 @@
+// std::collections: values found by a key.
+//
+//   import std::collections::{Map};
+//
+//   mut ages = Map<int32>();
+//   ages.put("ada", 36);
+//   print(ages.find("ada") ?? 0);
+
+import std::option::{Option};
+import std::vector::{Vector};
+
+// Values by `String` keys.
+pub class Map<V> {
+  keys: Vector<String> = Vector<String>();
+  values: Vector<V> = Vector<V>();
+
+  Constructor();
+
+  // Sets the value of `key`, replacing the old one.
+  pub func put(mut &self, key: String, value: V) {
+    let index = self.index_of(key);
+    if index < 0 {
+      self.keys.push(key);
+      self.values.push(value);
+    } else {
+      self.values.set(index as uint64, value);
+    }
+  }
+
+  // A copy of the value of `key`, if there's one.
+  pub func find(&self, key: &String) -> Option<V> {
+    let index = self.index_of(key);
+    if index < 0 {
+      return Option::None;
+    }
+    return Option::Some(self.values.get(index as uint64));
+  }
+
+  pub func has(&self, key: &String) -> bool {
+    return self.index_of(key) >= 0;
+  }
+
+  // Removes `key` and its value. Returns whether it was there.
+  pub func delete(mut &self, key: &String) -> bool {
+    let index = self.index_of(key);
+    if index < 0 {
+      return false;
+    }
+    self.keys.remove(index as uint64);
+    self.values.remove(index as uint64);
+    return true;
+  }
+
+  pub func len(&self) -> uint64 {
+    return self.keys.len();
+  }
+
+  // The key at `index`, to go through all entries in the order they were added.
+  pub func key_at(&self, index: uint64) -> String {
+    return self.keys.get(index);
+  }
+
+  // The value at `index`, see `key_at`.
+  pub func value_at(&self, index: uint64) -> V {
+    return self.values.get(index);
+  }
+
+  func index_of(&self, key: &String) -> int64 {
+    mut i: uint64 = 0;
+    while i < self.keys.len() {
+      if self.keys.get(i) == key {
+        return i as int64;
+      }
+      i = i + 1;
+    }
+    return -1;
+  }
+}
+
+// --- HashMaps ---
+//
+// A draft moved here from the prelude, as it was there. It doesn't compile
+// yet, so it's commented out until it's finished:
+//
+// pub trait Hashable {
+//   pub func hash(&self) -> int32;
+// }
+//
+// impl Hash for String {
+//
+// }
+//
+// class Bucket<T> {
+//   pairs: Vector<(int32, T)>;
+// }
+//
+// pub class HashMap<Key: Hashable, Value> {
+//   buckets: Bucket<V>[16] = Bucket<V>[16];
+//
+//   Constructor {
+//
+//   }
+//
+//   pub func set(key: Key, value: Value) {
+//     let hash: int32 = key.hash();
+//
+//   }
+// }

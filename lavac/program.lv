@@ -1,0 +1,13 @@
+import llvm;
+import modules;
+import std::path::{Path};
+import codegen_ctx;
+pub class Program {
+  pub context: CodegenContext;
+  module_graph: &ModuleGraph;
+
+  pub func build(&self, path: &Path){
+    self.context.build_entry();
+
+  }
+}

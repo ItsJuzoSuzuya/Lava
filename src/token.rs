@@ -15,6 +15,7 @@ use crate::r#type::Type;
 #[serde(tag = "type", content = "value")]
 pub enum Token {
   BoolTy,
+  CharTy,
   Float32Ty,
   Float64Ty,
   Int8Ty,
@@ -27,10 +28,13 @@ pub enum Token {
   UInt32Ty,
   UInt64Ty,
 
+  Break,
   Class,
   Constructor,
+  Continue,
   Else,
   Enum,
+  Extern,
   False,
   For,
   Func,
@@ -49,31 +53,49 @@ pub enum Token {
   Import,
   As,
 
+  AndAnd,
   Arrow,
+  CaretEq,
   ColonColon,
+  DivideEq,
+  DotDot,
   EqEq,
   GtEq,
   LtEq,
+  MinusEq,
+  MultiplyEq,
   NotEq,
+  OrOr,
+  PercentEq,
+  PlusEq,
+  QuestionQuestion,
   ThickArrow,
 
-  Assign, 
+  Assign,
   BAnd,
+  Bang,
+  Caret,
   Colon,
   Comma,
   Divide,
   Dot,
   Gt,
   LBrace,
+  LBracket,
   LParen,
   Lt,
   Minus,
   Multiply,
+  Percent,
   Plus,
+  Question,
   RBrace,
+  RBracket,
   RParen,
   Semicolon,
 
+  /// A byte like `'a'` or `'\n'`, an integer literal of its value.
+  CharLiteral(u8),
   FloatLiteral(f64),
   Identifier(String),
   IntLiteral(i64),
@@ -86,6 +108,7 @@ impl Display for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Token::BoolTy    => write!(f, "bool"),
+            Token::CharTy    => write!(f, "char"),
             Token::Float32Ty => write!(f, "float32"),
             Token::Float64Ty => write!(f, "float64"),
             Token::Int8Ty    => write!(f, "int8"),
@@ -98,6 +121,8 @@ impl Display for Token {
             Token::UInt32Ty  => write!(f, "uint32"),
             Token::UInt64Ty  => write!(f, "uint64"),
 
+            Token::Break        => write!(f, "break"),
+            Token::Continue     => write!(f, "continue"),
             Token::Print        => write!(f, "print"),
             Token::Func         => write!(f, "func"),
             Token::If           => write!(f, "if"),
@@ -116,22 +141,35 @@ impl Display for Token {
             Token::Mut          => write!(f, "mut"),
             Token::Pub          => write!(f, "pub"),
             Token::Enum         => write!(f, "enum"),
+            Token::Extern       => write!(f, "extern"),
             Token::True         => write!(f, "true"),
             Token::Import       => write!(f, "import"),
             Token::As           => write!(f, "as"),
 
+            Token::AndAnd       => write!(f, "&&"),
+            Token::OrOr         => write!(f, "||"),
+            Token::QuestionQuestion => write!(f, "??"),
             Token::Arrow        => write!(f, "->"),
             Token::ColonColon   => write!(f, "::"),
+            Token::DotDot       => write!(f, ".."),
             Token::ThickArrow   => write!(f, "=>"),
             Token::EqEq         => write!(f, "=="),
             Token::NotEq        => write!(f, "!="),
             Token::LtEq         => write!(f, "<="),
             Token::GtEq         => write!(f, ">="),
+            Token::PlusEq       => write!(f, "+="),
+            Token::MinusEq      => write!(f, "-="),
+            Token::MultiplyEq   => write!(f, "*="),
+            Token::DivideEq     => write!(f, "/="),
+            Token::PercentEq    => write!(f, "%="),
+            Token::CaretEq      => write!(f, "^="),
 
             Token::LParen       => write!(f, "("),
             Token::RParen       => write!(f, ")"),
             Token::LBrace       => write!(f, "{{"),
             Token::RBrace       => write!(f, "}}"),
+            Token::LBracket     => write!(f, "["),
+            Token::RBracket     => write!(f, "]"),
             Token::Assign       => write!(f, "="),
             Token::Colon        => write!(f, ":"),
             Token::Comma        => write!(f, ","),
@@ -144,7 +182,11 @@ impl Display for Token {
             Token::BAnd         => write!(f, "&"),
             Token::Lt           => write!(f, "<"),
             Token::Gt           => write!(f, ">"),
-
+            Token::Bang         => write!(f, "!"),
+            Token::Caret        => write!(f, "^"),
+            Token::Question     => write!(f, "?"),
+            Token::Percent      => write!(f, "%"),
+            Token::CharLiteral(value)       => write!(f, "'{}'", (*value as char).escape_default()),
             Token::FloatLiteral(value)      => write!(f, "{:?}", value),
             Token::Identifier(name)         => write!(f, "{}", name),
             Token::IntLiteral(value)        => write!(f, "{}", value),
@@ -160,10 +202,29 @@ impl Token {
         matches!(self, Token::EqEq | Token::NotEq | Token::Lt | Token::LtEq | Token::Gt | Token::GtEq)
     }
 
+    /// The operator of a compound assignment like `+=`, `+` for `a += b`,
+    /// which is `a = a + b`. `None` for every other token.
+    pub fn compound_operator(&self) -> Option<Token> {
+        match self {
+            Token::PlusEq => Some(Token::Plus),
+            Token::MinusEq => Some(Token::Minus),
+            Token::MultiplyEq => Some(Token::Multiply),
+            Token::DivideEq => Some(Token::Divide),
+            Token::PercentEq => Some(Token::Percent),
+            Token::CaretEq => Some(Token::Caret),
+            _ => None,
+        }
+    }
+
+    /// Whether this is `&&` or `||`, which combine `bool`s.
+    pub fn is_logical(&self) -> bool {
+        matches!(self, Token::AndAnd | Token::OrOr)
+    }
+
     /// Whether this is a built-in type keyword like `int32` or `String`.
     pub fn is_type_keyword(&self) -> bool {
         matches!(self,
-            Token::BoolTy | Token::Float32Ty | Token::Float64Ty
+            Token::BoolTy | Token::CharTy | Token::Float32Ty | Token::Float64Ty
             | Token::Int8Ty | Token::Int16Ty | Token::Int32Ty | Token::Int64Ty | Token::StringTy
             | Token::UInt8Ty | Token::UInt16Ty | Token::UInt32Ty | Token::UInt64Ty)
     }
@@ -176,13 +237,14 @@ impl Token {
     pub fn to_type(&self) -> Type {
         match self {
             Token::BoolTy    => Type::Bool,
+            Token::CharTy    => Type::Char,
             Token::Float32Ty => Type::Float { bits: 32 },
             Token::Float64Ty => Type::Float { bits: 64 },
             Token::Int8Ty    => Type::Int { bits: 8,  signed: true },
             Token::Int16Ty   => Type::Int { bits: 16, signed: true },
             Token::Int32Ty   => Type::Int { bits: 32, signed: true },
             Token::Int64Ty   => Type::Int { bits: 64, signed: true },
-            Token::StringTy  => Type::String,
+            Token::StringTy  => Type::string(),
             Token::UInt8Ty   => Type::Int { bits: 8,  signed: false },
             Token::UInt16Ty  => Type::Int { bits: 16, signed: false },
             Token::UInt32Ty  => Type::Int { bits: 32, signed: false },
@@ -199,13 +261,23 @@ impl Token {
     /// character doesn't belong to a pair.
     pub fn from_two_chars(c1: char, c2: char) -> Option<Token> {
         match (c1, c2) {
+            ('&', '&') => Some(Token::AndAnd),
+            ('|', '|') => Some(Token::OrOr),
+            ('?', '?') => Some(Token::QuestionQuestion),
             ('-', '>') => Some(Token::Arrow),
             (':', ':') => Some(Token::ColonColon),
+            ('.', '.') => Some(Token::DotDot),
             ('=', '=') => Some(Token::EqEq),
             ('>', '=') => Some(Token::GtEq),
             ('<', '=') => Some(Token::LtEq),
             ('!', '=') => Some(Token::NotEq),
             ('=', '>') => Some(Token::ThickArrow),
+            ('+', '=') => Some(Token::PlusEq),
+            ('-', '=') => Some(Token::MinusEq),
+            ('*', '=') => Some(Token::MultiplyEq),
+            ('/', '=') => Some(Token::DivideEq),
+            ('%', '=') => Some(Token::PercentEq),
+            ('^', '=') => Some(Token::CaretEq),
             _ => None,
         }
     }
@@ -223,6 +295,8 @@ impl Token {
             '=' => { Some(Token::Assign) }
             '{' => { Some(Token::LBrace) }
             '}' => { Some(Token::RBrace) }
+            '[' => { Some(Token::LBracket) }
+            ']' => { Some(Token::RBracket) }
             '+' => { Some(Token::Plus) }
             '-' => { Some(Token::Minus) }
             '*' => { Some(Token::Multiply) }
@@ -231,7 +305,10 @@ impl Token {
             '&' => { Some(Token::BAnd) }
             '<' => { Some(Token::Lt) }
             '>' => { Some(Token::Gt) }
-            _ => None
+            '!' => { Some(Token::Bang) }
+            '^' => { Some(Token::Caret) }
+            '?' => { Some(Token::Question) }
+            '%' => { Some(Token::Percent) }            _ => None
         }
     }
 
@@ -242,6 +319,7 @@ impl Token {
     pub fn from_string(token: &str) -> Token {
         match token {
             "bool"          => Token::BoolTy,
+            "char"          => Token::CharTy,
             "float32"       => Token::Float32Ty,
             "float64"       => Token::Float64Ty,
             "int8"          => Token::Int8Ty,
@@ -254,8 +332,10 @@ impl Token {
             "uint32"        => Token::UInt32Ty,
             "uint64"        => Token::UInt64Ty,
 
+            "break"         => Token::Break,
             "class"         => Token::Class,
             "Constructor"   => Token::Constructor,
+            "continue"      => Token::Continue,
             "func"          => Token::Func,
             "if"            => Token::If,
             "else"          => Token::Else,
@@ -273,6 +353,7 @@ impl Token {
             "match"         => Token::Match,
             "pub"           => Token::Pub,
             "enum"          => Token::Enum,
+            "extern"        => Token::Extern,
             "import"        => Token::Import,
             "as"            => Token::As,
             _               => Token::Identifier(token.to_string())

@@ -1,9 +1,9 @@
-use std::{panic, path::PathBuf, process::Command};
+use std::path::{Path, PathBuf};
 
 use inkwell::context::Context;
 
-use crate::{codegen_ctx::CodegenContext, declaration::{Declaration, DeclarationKind}, diagnostic::{self, CompileError},
-    module::ModuleGraph, parser::Parser, sema::Sema, statement::{Stmt, StmtKind}, traits::codegen::{Codegen, Declare},
+use crate::{codegen_ctx::CodegenContext, declaration::{Declaration, DeclarationKind, ExternItem}, diagnostic::{self, CompileError},
+    expression::{Expr, ExprKind}, module::ModuleGraph, parser::Parser, sema::Sema, statement::{Stmt, StmtKind}, traits::codegen::{Codegen, Declare},
     r#type::Type};
 
 /// A module after parsing and checking its semantics.
@@ -24,27 +24,46 @@ pub struct CheckedModule {
 
 /// Parses and checks every module of `graph`, imports first.
 ///
-/// Stops at the first error and returns it together with the modules done so
-/// far. A module whose check failed is included, checked up to the error.
-pub fn check_modules(graph: &ModuleGraph) -> (Vec<CheckedModule>, Option<CompileError>) {
+/// Returns the modules with every error found in them. Checking goes on
+/// after a semantic error, but stops at a syntax error, the module with it
+/// isn't included then.
+pub fn check_modules(graph: &ModuleGraph) -> (Vec<CheckedModule>, Vec<CompileError>) {
     // Shared across modules, so declarations of imported modules stay known.
     let mut sema = Sema::new();
     let mut done: Vec<CheckedModule> = Vec::new();
+    // Imports that couldn't be loaded come first, the rest is checked without them
+    let mut errors: Vec<CompileError> = graph.errors.clone();
 
     for module in &graph.modules {
-        let parsed = diagnostic::catch(|| Parser::new(module.source.clone()).parse_file());
+        let parsed = diagnostic::catch(|| Parser::with_renames(module.source.clone(), module.renames()).parse_file());
         let mut stmts = match parsed {
             Ok(stmts) => stmts,
-            Err(error) => return (done, Some(locate(error, &module.path, graph))),
+            Err(error) => {
+                errors.push(locate(error, &module.path, graph));
+                return (done, errors);
+            }
         };
 
-        sema.enter_module(module.name.clone(), module.source.clone());
+        sema.enter_module(module.name.clone(), module.source.clone(), &module.imports);
         let own_stmts = stmts.len();
-        let result = diagnostic::catch(|| sema.check(&mut stmts));
+        // The program's main file is last, its `main` runs after its top-level code
+        let is_root = graph.modules.last().is_some_and(|root| root.path == module.path);
+        let result = diagnostic::catch(|| {
+            if is_root {
+                add_main_call(&mut stmts, &module.source);
+            }
+            sema.check(&mut stmts)
+        });
 
-        // Instances of generic functions, classes and enums used by this module are generated with it
-        if result.is_ok() {
-            for decl in sema.take_instances() {
+        let mut module_errors = sema.take_errors();
+        if let Err(error) = &result {
+            module_errors.push(error.clone());
+        }
+        // Instances of generic functions, classes and enums used by this module are
+        // generated with it. With errors there's no code to generate, they can be half done
+        let instances = sema.take_instances();
+        if module_errors.is_empty() {
+            for decl in instances {
                 let span = decl.span.clone();
                 stmts.push(Stmt::new(StmtKind::Declaration(decl), span, Type::Unknown));
             }
@@ -58,11 +77,113 @@ pub fn check_modules(graph: &ModuleGraph) -> (Vec<CheckedModule>, Option<Compile
             own_stmts,
             checked: result.is_ok(),
         });
-        if let Err(error) = result {
-            return (done, Some(locate(error, &module.path, graph)));
+        for error in module_errors {
+            let error = locate(error, &module.path, graph);
+            // The same instance can be checked from several places
+            let duplicate = errors.iter().any(|e| e.message == error.message && e.file == error.file
+                && e.span.as_ref().map(|s| (s.line, s.col)) == error.span.as_ref().map(|s| (s.line, s.col)));
+            if !duplicate {
+                errors.push(error);
+            }
         }
     }
-    (done, None)
+
+    (done, errors)
+}
+
+/// Adds the call of the program's `func main` after its top-level code:
+/// `main();`, or `return main();` if it returns an `int32` exit code, which
+/// a `return` at the top level ends the program with. Like in Rust, `main`
+/// takes no parameters, the command line arguments come from `env::args()`.
+/// Does nothing if there's no `main`.
+///
+/// # Panics
+///
+/// Panics if `main` has another signature.
+fn add_main_call(stmts: &mut Vec<Stmt>, source: &str) {
+    let main = stmts.iter().find_map(|stmt| match &stmt.kind {
+        StmtKind::Declaration(decl) => match &decl.kind {
+            DeclarationKind::Function { name, type_params, params, return_type, .. } if name == "main" =>
+                Some((decl.span.clone(), type_params.is_empty(), params.clone(), return_type.clone())),
+            _ => None,
+        },
+        _ => None,
+    });
+    let Some((span, not_generic, params, return_type)) = main else { return };
+
+    let wrong = |message: &str| diagnostic::throw(message, Some(span.clone()), source);
+    if !not_generic {
+        wrong("`main` can't be generic");
+    }
+    if !params.is_empty() {
+        wrong("`main` takes no parameters, get the command line arguments with `env::args()` of `std::env`");
+    }
+    let returns_code = match &return_type {
+        None | Some(Type::Void) => false,
+        Some(ty) if *ty == Type::INT32 => true,
+        Some(_) => wrong("`main` returns nothing or an `int32` exit code"),
+    };
+
+    let main_call = Expr::new(
+        ExprKind::FunctionCall { name: "main".to_string(), type_args: vec![], params: vec![], receiver: None, mangled: None },
+        span.clone(),
+    );
+    let kind = if returns_code { StmtKind::Return(main_call) } else { StmtKind::Expression(main_call) };
+    stmts.push(Stmt::new(kind, span.clone(), Type::Unknown));
+}
+
+/// The class and enum declarations `types` ordered so each comes after the
+/// ones it holds directly, like a class after the enum of one of its fields.
+///
+/// A `Unique`, `Buffer` or reference is a pointer, so holding one doesn't
+/// need the pointed to type's layout. That's how types can contain themselves.
+fn layout_order<'a>(types: &[&'a Declaration]) -> Vec<&'a Declaration> {
+    fn direct_types(ty: &Type, into: &mut Vec<String>) {
+        match ty {
+            Type::Class(name) | Type::Enum(name) => into.push(name.clone()),
+            // An array holds its elements directly
+            Type::Array(element, _) => direct_types(element, into),
+            _ => {}
+        }
+    }
+    let name_of = |decl: &Declaration| match &decl.kind {
+        DeclarationKind::Class { name, .. } | DeclarationKind::Enum { name, .. } => name.clone(),
+        _ => String::new(),
+    };
+    let held = |decl: &Declaration| {
+        let mut names = Vec::new();
+        match &decl.kind {
+            DeclarationKind::Class { fields, .. } => fields.iter().for_each(|f| direct_types(&f.ty, &mut names)),
+            DeclarationKind::Enum { fields, .. } => fields.iter().for_each(|f| direct_types(&f.2, &mut names)),
+            _ => {}
+        }
+        names
+    };
+
+    fn visit<'a>(i: usize, types: &[&'a Declaration], deps: &[Vec<usize>], state: &mut [u8], order: &mut Vec<&'a Declaration>) {
+        // 1 while visiting, 2 when done. A type holding itself directly can't
+        // have a layout, it's simply ordered somewhere in the cycle.
+        if state[i] != 0 {
+            return;
+        }
+        state[i] = 1;
+        for &dep in &deps[i] {
+            visit(dep, types, deps, state, order);
+        }
+        state[i] = 2;
+        order.push(types[i]);
+    }
+
+    let names: Vec<String> = types.iter().map(|d| name_of(d)).collect();
+    let deps: Vec<Vec<usize>> = types.iter()
+        .map(|d| held(d).iter().filter_map(|n| names.iter().position(|m| m == n)).collect())
+        .collect();
+    let mut state = vec![0u8; types.len()];
+    let mut order = Vec::with_capacity(types.len());
+    for i in 0..types.len() {
+        visit(i, types, &deps, &mut state, &mut order);
+    }
+    order
 }
 
 /// Gives `error` the file it's in, if it doesn't know it yet.
@@ -79,7 +200,7 @@ fn locate(mut error: CompileError, current: &PathBuf, graph: &ModuleGraph) -> Co
     error
 }
 
-/// Parses, checks semantics and runs the code.
+/// Parses, checks semantics and generates the code of a program.
 ///
 /// Built by [`Program::new`] from a [`ModuleGraph`].
 pub struct Program<'ctx> {
@@ -97,20 +218,29 @@ impl<'ctx> Program<'ctx> {
         }
     }
 
-    // Generates and runs the code from each module by parsing, semantic checking and then
-    // generating the llvm code.
-    pub fn run(&mut self) {
+    /// Checks every module and writes the program's object file to `object`.
+    /// Returns the C libraries to link it with, from `extern link "name";`.
+    ///
+    /// Returns every error in the program instead if there are any.
+    pub fn build(&mut self, object: &Path) -> Result<Vec<String>, Vec<CompileError>> {
         self.context.build_entry();
 
-        let (modules, error) = check_modules(self.module_graph);
-        if let Some(error) = error {
-            // Already printed by the panic hook when it was thrown
-            panic::resume_unwind(Box::new(error));
+        let (modules, errors) = check_modules(self.module_graph);
+        if !errors.is_empty() {
+            return Err(errors);
         }
 
+        let mut libraries: Vec<String> = Vec::new();
         for module in modules {
             self.context.source = module.source.clone();
             let stmts = module.stmts;
+            for stmt in &stmts {
+                if let StmtKind::Declaration(Declaration { kind: DeclarationKind::Extern(ExternItem::Link(library)), .. }) = &stmt.kind {
+                    if !libraries.contains(library) {
+                        libraries.push(library.clone());
+                    }
+                }
+            }
 
             // Instances like `Box<int32>` come after the functions using them, so every
             // struct type is created first. Classes are declared before enums, since
@@ -126,15 +256,13 @@ impl<'ctx> Program<'ctx> {
                     self.context.struct_type(name);
                 }
             }
-            let is_class = |decl: &&&Declaration| matches!(decl.kind, DeclarationKind::Class { .. });
-            let is_enum = |decl: &&&Declaration| matches!(decl.kind, DeclarationKind::Enum { .. });
-            for decl in decls.iter().filter(is_class) {
+            // A class or enum holding another one directly needs that one's layout first
+            let is_type = |decl: &&&Declaration| matches!(decl.kind, DeclarationKind::Class { .. } | DeclarationKind::Enum { .. });
+            let types: Vec<&Declaration> = decls.iter().filter(is_type).copied().collect();
+            for decl in layout_order(&types) {
                 decl.declare(&mut self.context);
             }
-            for decl in decls.iter().filter(is_enum) {
-                decl.declare(&mut self.context);
-            }
-            for decl in decls.iter().filter(|d| !is_class(d) && !is_enum(d)) {
+            for decl in decls.iter().filter(|d| !is_type(d)) {
                 decl.declare(&mut self.context);
             }
 
@@ -145,9 +273,7 @@ impl<'ctx> Program<'ctx> {
             self.ast.extend(stmts);
         }
 
-        self.context.compile();
-
-        Command::new("cc").arg("main.o").status().unwrap();
-        Command::new("./a.out").status().unwrap();
+        self.context.compile(object);
+        Ok(libraries)
     }
 }

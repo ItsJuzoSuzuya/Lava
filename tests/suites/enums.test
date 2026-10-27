@@ -232,3 +232,131 @@ func show(v: Value) {
 show(Value::Text("passed"));
 --- output
 passed
+
+=== enum methods
+enum Shape {
+  Circle => int32,
+  Square => int32;
+
+  pub func area(&self) -> int32 {
+    match self {
+      Shape::Circle(r) => return 3 * r * r,
+      Shape::Square(side) => return side * side,
+    }
+  }
+
+  pub func name(&self) -> String {
+    match self {
+      Shape::Circle => return "circle",
+      Shape::Square => return "square",
+    }
+  }
+}
+let c = Shape::Circle(2);
+print(c.area());
+print(Shape::Square(3).area());
+print(c.name());
+--- output
+12
+9
+circle
+
+=== enum method calls another one without receiver
+enum Light {
+  Red,
+  Green;
+
+  pub func can_go(&self) -> bool {
+    return !self.is_red();
+  }
+
+  func is_red(&self) -> bool {
+    match self {
+      Light::Red => return true,
+      _ => return false,
+    }
+  }
+}
+print(Light::Green.can_go());
+print(Light::Red.can_go());
+--- output
+true
+false
+
+=== enum method changing self
+enum Light {
+  Red,
+  Green;
+
+  pub func switch(mut &self) {
+    match self {
+      Light::Red => self = Light::Green,
+      Light::Green => self = Light::Red,
+    }
+  }
+}
+mut light = Light::Red;
+light.switch();
+print(light);
+--- output
+Green
+
+=== methods of a generic enum
+enum Pair<T> {
+  Both => T,
+  Neither;
+
+  pub func or(&self, other: T) -> T {
+    match self {
+      Pair::Both(value) => return value.clone(),
+      Pair::Neither => return other,
+    }
+  }
+}
+let a = Pair::Both(5);
+let b: Pair<String> = Pair::Neither;
+print(a.or(1));
+print(b.or("none"));
+--- output
+5
+none
+
+=== private enum method is an error outside
+enum Light {
+  Red;
+
+  func secret(&self) -> int32 {
+    return 1;
+  }
+}
+print(Light::Red.secret());
+--- error
+Tried calling a private function 'secret'
+
+=== variants after methods are an error
+enum Light {
+  Red;
+
+  func f(&self) {
+    print(1);
+  }
+
+  Green
+}
+--- error
+variants come before the methods
+
+=== option and result methods
+import std::option::{Option};
+import std::result::{Result};
+let some = Option::Some(1);
+let ok: Result<int32, String> = Result::Ok(2);
+print(some.is_some());
+print(some.is_none());
+print(ok.is_ok());
+print(ok.ok_or(0));
+--- output
+true
+false
+true
+2

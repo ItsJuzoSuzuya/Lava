@@ -333,18 +333,25 @@ print(1);
 --- output
 1
 
-=== unique as an enum payload is an error
+=== unique as an enum payload
 enum Value {
-  Boxed => Unique<int32>
+  Boxed => Unique<int32>,
+  Empty
 }
---- error
-a Unique, Buffer or class owning one can't be an enum payload
+let a = Value::Boxed(unique(5));
+let b = a;
+match b {
+  Value::Boxed(u) => print(1),
+  Value::Empty => print(0),
+}
+--- output
+1
 
 === printing a unique is an error
 let u = unique(5);
 print(u);
 --- error
-a Unique or Buffer can't be printed
+a Unique, Shared or Buffer can't be printed
 
 === unique without an argument is an error
 let u = unique();

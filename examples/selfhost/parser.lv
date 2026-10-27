@@ -1,0 +1,327 @@
+// The parser of a small Lava subset, written in Lava: turns tokens into a
+// syntax tree of statements and expressions.
+//
+// Supported: `let` and `mut` variables, assignments, `print(...)`, `while`,
+// `if` with `else`, and int and bool expressions with the operators
+// `|| && == != < <= > >= + - * / %`, `-`, `!` and parentheses.
+
+import lexer;
+import std::result::{Result};
+import std::vector::{Vector};
+
+pub enum Expr {
+  Int => int64,
+  Bool => bool,
+  Var => String,
+  Unary => Unique<UnaryExpr>,
+  Binary => Unique<BinaryExpr>
+}
+
+pub class UnaryExpr {
+  pub op: String = op;
+  pub operand: Expr = operand;
+
+  Constructor(op: String, operand: Expr);
+}
+
+pub class BinaryExpr {
+  pub op: String = op;
+  pub left: Expr = left;
+  pub right: Expr = right;
+
+  Constructor(op: String, left: Expr, right: Expr);
+}
+
+pub enum Stmt {
+  Let => Unique<Assign>,
+  Set => Unique<Assign>,
+  Print => Expr,
+  While => Unique<Loop>,
+  If => Unique<Branch>
+}
+
+pub class Assign {
+  pub name: String = name;
+  pub value: Expr = value;
+
+  Constructor(name: String, value: Expr);
+}
+
+pub class Loop {
+  pub condition: Expr = condition;
+  pub body: Vector<Stmt> = body;
+
+  Constructor(condition: Expr, body: Vector<Stmt>);
+}
+
+pub class Branch {
+  pub condition: Expr = condition;
+  pub then_body: Vector<Stmt> = then_body;
+  pub else_body: Vector<Stmt> = else_body;
+
+  Constructor(condition: Expr, then_body: Vector<Stmt>, else_body: Vector<Stmt>);
+}
+
+// How tightly the binary operator `op` binds, 0 if it isn't one.
+func precedence(op: &String) -> int32 {
+  if op == "||" {
+    return 1;
+  }
+  if op == "&&" {
+    return 2;
+  }
+  if op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" {
+    return 3;
+  }
+  if op == "+" || op == "-" {
+    return 4;
+  }
+  if op == "*" || op == "/" || op == "%" {
+    return 5;
+  }
+  return 0;
+}
+
+pub class Parser {
+  tokens: Vector<Token> = tokens;
+  pos: uint64 = 0;
+
+  Constructor(tokens: Vector<Token>);
+
+  // Every statement up to the end of the tokens.
+  pub func parse_program(mut &self) -> Result<Vector<Stmt>, String> {
+    mut program = Vector<Stmt>();
+    while !is_end(self.peek()) {
+      match self.parse_stmt() {
+        Result::Err(message) => return Result::Err(message),
+        Result::Ok(stmt) => program.push(stmt),
+      }
+    }
+    return Result::Ok(program);
+  }
+
+  func parse_stmt(mut &self) -> Result<Stmt, String> {
+    let keyword = self.keyword();
+    if keyword == "let" || keyword == "mut" {
+      self.advance();
+      return self.parse_assign(true);
+    }
+    if keyword == "print" {
+      self.advance();
+      match self.expect("(") {
+        Result::Err(message) => return Result::Err(message),
+        Result::Ok => {}
+      }
+      mut value = Expr::Int(0);
+      match self.parse_expr(1) {
+        Result::Err(message) => return Result::Err(message),
+        Result::Ok(expr) => value = expr,
+      }
+      match self.expect(")") {
+        Result::Err(message) => return Result::Err(message),
+        Result::Ok => {}
+      }
+      match self.expect(";") {
+        Result::Err(message) => return Result::Err(message),
+        Result::Ok => {}
+      }
+      return Result::Ok(Stmt::Print(value));
+    }
+    if keyword == "while" {
+      self.advance();
+      mut condition = Expr::Int(0);
+      match self.parse_expr(1) {
+        Result::Err(message) => return Result::Err(message),
+        Result::Ok(expr) => condition = expr,
+      }
+      mut body = Vector<Stmt>();
+      match self.parse_block() {
+        Result::Err(message) => return Result::Err(message),
+        Result::Ok(stmts) => body = stmts,
+      }
+      return Result::Ok(Stmt::While(unique(Loop(condition, body))));
+    }
+    if keyword == "if" {
+      self.advance();
+      mut condition = Expr::Int(0);
+      match self.parse_expr(1) {
+        Result::Err(message) => return Result::Err(message),
+        Result::Ok(expr) => condition = expr,
+      }
+      mut then_body = Vector<Stmt>();
+      match self.parse_block() {
+        Result::Err(message) => return Result::Err(message),
+        Result::Ok(stmts) => then_body = stmts,
+      }
+      mut else_body = Vector<Stmt>();
+      if self.keyword() == "else" {
+        self.advance();
+        match self.parse_block() {
+          Result::Err(message) => return Result::Err(message),
+          Result::Ok(stmts) => else_body = stmts,
+        }
+      }
+      return Result::Ok(Stmt::If(unique(Branch(condition, then_body, else_body))));
+    }
+    return self.parse_assign(false);
+  }
+
+  // `name = value;`, the `let` or `mut` before it is consumed already if `declares`.
+  func parse_assign(mut &self, declares: bool) -> Result<Stmt, String> {
+    mut name = "";
+    match self.peek().kind {
+      TokenKind::Ident(word) => name = word,
+      _ => return Result::Err(self.error("a variable name")),
+    }
+    self.advance();
+    match self.expect("=") {
+      Result::Err(message) => return Result::Err(message),
+      Result::Ok => {}
+    }
+    mut value = Expr::Int(0);
+    match self.parse_expr(1) {
+      Result::Err(message) => return Result::Err(message),
+      Result::Ok(expr) => value = expr,
+    }
+    match self.expect(";") {
+      Result::Err(message) => return Result::Err(message),
+      Result::Ok => {}
+    }
+    if declares {
+      return Result::Ok(Stmt::Let(unique(Assign(name, value))));
+    }
+    return Result::Ok(Stmt::Set(unique(Assign(name, value))));
+  }
+
+  func parse_block(mut &self) -> Result<Vector<Stmt>, String> {
+    match self.expect("{") {
+      Result::Err(message) => return Result::Err(message),
+      Result::Ok => {}
+    }
+    mut stmts = Vector<Stmt>();
+    while self.symbol() != "}" {
+      if is_end(self.peek()) {
+        return Result::Err(self.error("'}'"));
+      }
+      match self.parse_stmt() {
+        Result::Err(message) => return Result::Err(message),
+        Result::Ok(stmt) => stmts.push(stmt),
+      }
+    }
+    self.advance();
+    return Result::Ok(stmts);
+  }
+
+  // An expression of operators binding at least as tightly as `min`, by precedence climbing.
+  func parse_expr(mut &self, min: int32) -> Result<Expr, String> {
+    mut lhs = Expr::Int(0);
+    match self.parse_unary() {
+      Result::Err(message) => return Result::Err(message),
+      Result::Ok(expr) => lhs = expr,
+    }
+    while true {
+      let op = self.symbol();
+      let binds = precedence(op);
+      if binds == 0 || binds < min {
+        break;
+      }
+      self.advance();
+      mut rhs = Expr::Int(0);
+      match self.parse_expr(binds + 1) {
+        Result::Err(message) => return Result::Err(message),
+        Result::Ok(expr) => rhs = expr,
+      }
+      lhs = Expr::Binary(unique(BinaryExpr(op, lhs, rhs)));
+    }
+    return Result::Ok(lhs);
+  }
+
+  func parse_unary(mut &self) -> Result<Expr, String> {
+    let op = self.symbol();
+    if op == "-" || op == "!" {
+      self.advance();
+      match self.parse_unary() {
+        Result::Err(message) => return Result::Err(message),
+        Result::Ok(operand) => return Result::Ok(Expr::Unary(unique(UnaryExpr(op, operand)))),
+      }
+    }
+    return self.parse_primary();
+  }
+
+  func parse_primary(mut &self) -> Result<Expr, String> {
+    let token = self.peek();
+    match token.kind {
+      TokenKind::Int(value) => {
+        self.advance();
+        return Result::Ok(Expr::Int(value));
+      }
+      TokenKind::Ident(name) => {
+        self.advance();
+        return Result::Ok(Expr::Var(name));
+      }
+      TokenKind::Keyword(word) => {
+        if word == "true" || word == "false" {
+          self.advance();
+          return Result::Ok(Expr::Bool(word == "true"));
+        }
+      }
+      TokenKind::Symbol(symbol) => {
+        if symbol == "(" {
+          self.advance();
+          mut inner = Expr::Int(0);
+          match self.parse_expr(1) {
+            Result::Err(message) => return Result::Err(message),
+            Result::Ok(expr) => inner = expr,
+          }
+          match self.expect(")") {
+            Result::Err(message) => return Result::Err(message),
+            Result::Ok => {}
+          }
+          return Result::Ok(inner);
+        }
+      }
+      _ => {}
+    }
+    return Result::Err(self.error("an expression"));
+  }
+
+  func peek(&self) -> Token {
+    return self.tokens.get(self.pos);
+  }
+
+  func advance(mut &self) {
+    if self.pos + 1 < self.tokens.len() {
+      self.pos = self.pos + 1;
+    }
+  }
+
+  // The current token if it's a symbol, "" otherwise.
+  func symbol(&self) -> String {
+    match self.peek().kind {
+      TokenKind::Symbol(symbol) => return symbol,
+      _ => return "",
+    }
+  }
+
+  // The current token if it's a keyword, "" otherwise.
+  func keyword(&self) -> String {
+    match self.peek().kind {
+      TokenKind::Keyword(word) => return word,
+      _ => return "",
+    }
+  }
+
+  // Consumes the symbol `symbol`, or fails if it isn't next.
+  func expect(mut &self, symbol: String) -> Result<bool, String> {
+    if self.symbol() != symbol {
+      return Result::Err(self.error("'" + symbol + "'"));
+    }
+    self.advance();
+    return Result::Ok(true);
+  }
+
+  func error(&self, expected: String) -> String {
+    let token = self.peek();
+    return position(token.line, token.col) + "expected " + expected + ", got " + describe(token);
+  }
+}

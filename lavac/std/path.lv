@@ -1,0 +1,90 @@
+import std::string::{starts_with};
+
+extern "open" func c_open(path: String, flags: int32, ..) -> int32;
+extern "close" func c_close(file: int32) -> int32;
+extern "access" func c_access(path: String, mode: int32) -> int32;
+
+pub class Path {
+  buffer: String = start;
+
+  Constructor(start: String = "");
+
+  pub func to_string(&self) -> String {
+    return self.buffer.clone();
+  }
+
+  pub func join(&self, add: String) -> Path {
+    // A `/` between the two, unless there's one already or nothing to join onto
+    let ends_with_slash = self.buffer.len() > 0 && self.buffer[self.buffer.len() - 1] == '/';
+    mut joined = self.buffer.clone();
+    if self.buffer.len() > 0 && !ends_with_slash && !starts_with(add, "/") {
+      joined += "/";
+    }
+    joined += add;
+
+    return Path(joined);
+  }
+
+  // Whether there's a directory at this path.
+  pub func is_dir(&self) -> bool {
+    // O_RDONLY | O_DIRECTORY on Linux, opening only works for a directory
+    let file = c_open(self.buffer, 65536);
+    if file < 0 {
+      return false;
+    }
+    c_close(file);
+    return true;
+  }
+
+  // Whether there's something at this path that isn't a directory, like a file.
+  pub func is_file(&self) -> bool {
+    return c_access(self.buffer, 0) == 0 && !self.is_dir();
+  }
+
+  // The path without its last part: `a/b` of `a/b/c.txt`, `/` of `/a`, `` of `a`.
+  pub func parent(&self) -> Path {
+    mut i = self.buffer.len();
+    while i > 0 && self.buffer[i - 1] != '/' {
+      i -= 1;
+    }
+    // Without the `/` before the last part, except the root's
+    if i > 1 {
+      i -= 1;
+    }
+    return Path(self.buffer.slice(0, i));
+  }
+
+  pub func file_name(&self) -> String {
+    mut i = self.buffer.len();
+    while i > 0 && self.buffer[i - 1] != '/' {
+      i -= 1;
+    }
+    return self.buffer.slice(i, self.buffer.len());
+  }
+
+  pub func extention(&self) -> String {
+    mut i = self.buffer.len();
+    while i > 0 && self.buffer[i - 1] != '.' {
+      i -= 1;
+    }
+    return self.buffer.slice(i, self.buffer.len());
+  }
+
+}
+
+// Anything naming a path, so functions like `fs::read` take a String or a Path.
+pub trait AsPath {
+  func as_path(&self) -> Path;
+}
+
+impl AsPath for String {
+  func as_path(&self) -> Path {
+    return Path(self.clone());
+  }
+}
+
+impl AsPath for Path {
+  func as_path(&self) -> Path {
+    return self.clone();
+  }
+}

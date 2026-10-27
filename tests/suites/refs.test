@@ -63,4 +63,4 @@ type 'Ref(int64)' does not match 'Ref(int32)' in function argument
 === reference of a literal is an error
 let r = &5;
 --- error
-'&' operand must be a place expression
+'&' only refers to a variable or field

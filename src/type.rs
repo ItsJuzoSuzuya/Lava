@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use inkwell::{AddressSpace, types::{BasicMetadataTypeEnum, BasicTypeEnum, FunctionType, IntType}};
+use inkwell::{AddressSpace, types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, IntType}};
 use serde::Serialize;
 
 use crate::{codegen_ctx::CodegenContext, expression::ExprKind};
@@ -8,7 +8,8 @@ use crate::{codegen_ctx::CodegenContext, expression::ExprKind};
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Bool,
-    String,
+    /// `char`: one byte of text, like `'a'`. Converts to and from numbers with `as`.
+    Char,
     Unknown,
     Void,
 
@@ -30,18 +31,34 @@ pub enum Type {
     /// `Unique<T>`: a `T` on the heap, owned by one variable at a time and freed
     /// when its owner goes out of scope. Created with `unique(value)`.
     Unique(Box<Type>),
+    /// `Shared<T>`: a `T` on the heap used by any number of variables, freed
+    /// when the last one goes away. Copying one only counts one more user.
+    /// Created with `shared(value)`.
+    Shared(Box<Type>),
     /// `Buffer<T>`: a block of `T`s on the heap with a fixed but resizable
     /// capacity, the building block for growable containers. Owned like a
     /// `Unique`. Created with `Buffer<T>(capacity)`.
     Buffer(Box<Type>),
+    /// `T[N]`: `N` values of `T` next to each other, held directly like a
+    /// class's fields. Copying an array copies all of them.
+    Array(Box<Type>, u64),
+    /// `(T, U)`: values of different types together, used like `t.0` and
+    /// `t.1`. Owns what its values own, like a class.
+    Tuple(Vec<Type>),
+    /// `&[T]`: a borrowed view of `T`s next to each other, of any length,
+    /// like an array or the elements of a `Vector`. Its address and length.
+    Slice(Box<Type>),
     Ref(Box<Type>),
+    /// A C pointer declared with `extern type Name;`, only passed to and
+    /// returned from `extern func`s. Copied like a number, C frees it.
+    Handle(String),
 }
 
 impl Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::Bool          => write!(f, "bool"),
-            Type::String        => write!(f, "String"),
+            Type::Char          => write!(f, "char"),
             Type::Unknown       => write!(f, "Unknown"),
             Type::Void          => write!(f, "Void"),
 
@@ -50,6 +67,7 @@ impl Display for Type {
 
             Type::Object(name)  => write!(f, "Object({})", name),
             Type::Enum(name)    => write!(f, "Enum({})", name),
+            _ if self.is_string() => write!(f, "String"),
             Type::Class(name)   => write!(f, "Class({})", name),
             Type::Param(name)   => write!(f, "{}", name),
             Type::Generic { name, args } => {
@@ -57,8 +75,16 @@ impl Display for Type {
                 write!(f, "{}<{}>", name, args.join(", "))
             }
             Type::Unique(inner) => write!(f, "Unique<{}>", inner),
+            Type::Shared(inner) => write!(f, "Shared<{}>", inner),
             Type::Buffer(inner) => write!(f, "Buffer<{}>", inner),
+            Type::Array(element, len) => write!(f, "{}[{}]", element, len),
+            Type::Slice(element) => write!(f, "&[{}]", element),
+            Type::Tuple(items) => {
+                let items: Vec<String> = items.iter().map(|t| t.to_string()).collect();
+                write!(f, "({})", items.join(", "))
+            }
             Type::Ref(inner)    => write!(f, "Ref({})", inner),
+            Type::Handle(name)  => write!(f, "{}", name),
         }
     }
 }
@@ -71,12 +97,23 @@ impl<'ctx> Type {
     /// The type of sizes and indices, like a `Buffer`'s capacity.
     pub const UINT64: Type = Type::Int { bits: 64, signed: false };
 
+    /// `String`, the class of the prelude holding text. String literals are its
+    /// values, and its methods implement the operators on them.
+    pub fn string() -> Type {
+        Type::Class("String".to_string())
+    }
+
+    /// Whether this is `String`, see [`Type::string`].
+    pub fn is_string(&self) -> bool {
+        matches!(self, Type::Class(name) if name == "String")
+    }
+
     /// Name of the class or enum this type refers to, also through a reference
     /// or a `Unique`. `None` for every other type.
     pub fn class_name(&self) -> Option<String> {
         match self {
             Type::Class(name) | Type::Enum(name) => Some(name.clone()),
-            Type::Ref(inner) | Type::Unique(inner) => inner.class_name(),
+            Type::Ref(inner) | Type::Unique(inner) | Type::Shared(inner) => inner.class_name(),
             _ => None,
         }
     }
@@ -92,8 +129,8 @@ impl<'ctx> Type {
     /// `None` for types that can't have methods.
     pub fn owner_name(&self) -> Option<String> {
         match self {
-            Type::Class(name) | Type::Enum(name) => Some(name.clone()),
-            Type::Int { .. } | Type::Float { .. } | Type::Bool | Type::String => Some(self.to_string()),
+            Type::Class(name) | Type::Enum(name) | Type::Handle(name) => Some(name.clone()),
+            Type::Int { .. } | Type::Float { .. } | Type::Bool | Type::Char => Some(self.to_string()),
             _ => None,
         }
     }
@@ -123,7 +160,6 @@ impl<'ctx> Type {
 
     pub fn to_llvm(&self, ctx: &CodegenContext<'ctx>) -> BasicTypeEnum<'ctx> {
         match self {
-            Type::String => ctx.context.ptr_type(AddressSpace::default()).into(),
             Type::Unknown => panic!("Unknown type reached codegen — sema did not resolve it"),
             Type::Void => panic!("Void has no LLVM basic type"),
 
@@ -132,18 +168,24 @@ impl<'ctx> Type {
             Type::Int { bits, .. } => llvm_int_type(*bits, ctx).into(),
 
             Type::Bool => ctx.context.bool_type().into(),
+            Type::Char => ctx.context.i8_type().into(),
             Type::Object(_) => panic!("Object type reached codegen — sema did not canonicalize it"),
             Type::Enum(name) => ctx.module.get_struct_type(name).expect("enum not defined").into(),
             Type::Class(name) => ctx.module.get_struct_type(name).expect("struct not defined").into(),
             Type::Param(name) => panic!("type parameter '{}' reached codegen — sema did not substitute it", name),
             Type::Generic { name, .. } => panic!("generic type '{}' reached codegen — sema did not instantiate it", name),
-            Type::Ref(_) | Type::Unique(_) | Type::Buffer(_) => ctx.context.ptr_type(AddressSpace::default()).into(),
+            Type::Ref(_) | Type::Unique(_) | Type::Shared(_) | Type::Buffer(_) | Type::Handle(_) => ctx.context.ptr_type(AddressSpace::default()).into(),
+            Type::Array(element, len) => element.to_llvm(ctx).array_type(*len as u32).into(),
+            Type::Slice(_) => ctx.slice_type().into(),
+            Type::Tuple(items) => {
+                let fields: Vec<BasicTypeEnum> = items.iter().map(|t| t.to_llvm(ctx)).collect();
+                ctx.context.struct_type(&fields, false).into()
+            }
         }
     }
 
     pub fn to_fn_type(&self, param_types: &[BasicMetadataTypeEnum<'ctx>], ctx: &CodegenContext<'ctx>) -> FunctionType<'ctx> {
         match self {
-            Type::String => ctx.context.ptr_type(AddressSpace::default()).fn_type(param_types, false),
             Type::Unknown => panic!("Unknown type reached codegen — sema did not resolve it"),
             Type::Void => ctx.context.void_type().fn_type(param_types, false),
 
@@ -152,24 +194,26 @@ impl<'ctx> Type {
             Type::Int { bits, .. } => llvm_int_type(*bits, ctx).fn_type(param_types, false),
 
             Type::Bool => ctx.context.bool_type().fn_type(param_types, false),
+            Type::Char => ctx.context.i8_type().fn_type(param_types, false),
             Type::Object(_) => panic!("Object type reached codegen — sema did not canonicalize it"),
             Type::Enum(name) => ctx.module.get_struct_type(name).expect("enum not defined").fn_type(param_types, false),
             Type::Class(name) => ctx.module.get_struct_type(name).expect("struct not defined").fn_type(param_types, false),
             Type::Param(name) => panic!("type parameter '{}' reached codegen — sema did not substitute it", name),
             Type::Generic { name, .. } => panic!("generic type '{}' reached codegen — sema did not instantiate it", name),
-            Type::Ref(_) | Type::Unique(_) | Type::Buffer(_) => ctx.context.ptr_type(AddressSpace::default()).fn_type(param_types, false),
+            Type::Ref(_) | Type::Unique(_) | Type::Shared(_) | Type::Buffer(_) | Type::Handle(_) => ctx.context.ptr_type(AddressSpace::default()).fn_type(param_types, false),
+            Type::Array(..) | Type::Slice(_) | Type::Tuple(_) => self.to_llvm(ctx).fn_type(param_types, false),
         }
     }
 
     pub fn formatter(&self) -> Option<&str> {
         let f = match self {
             Type::Bool => "%s",
+            Type::Char => "%c",
             Type::Float { .. } => "%f",
             Type::Int { bits: 64, signed: true } => "%lld",
             Type::Int { bits: 64, signed: false } => "%llu",
             Type::Int { signed: true, .. } => "%d",
             Type::Int { signed: false, .. } => "%u",
-            Type::String => "%s",
 
             Type::Ref(_) => "%p",
             _ => return None
@@ -200,7 +244,7 @@ impl From<ExprKind> for Type {
             ExprKind::Identifier(name) => Type::Object(name.to_string()),
             ExprKind::IntLiteral(_) => Type::INT32,
             ExprKind::FloatLiteral(_) => Type::FLOAT64,
-            ExprKind::StringLiteral(_) => Type::String,
+            ExprKind::StringLiteral(_) => Type::string(),
             ExprKind::Boolean(_) => Type::Bool,
             _ => Type::Unknown
         }

@@ -232,3 +232,66 @@ print(-x * 2 + 10);
 print(1.0 + 2.0 * 3.5);
 --- output
 8.000000
+
+=== compound assignment
+class Counter {
+  pub count: int32 = 0;
+  Constructor();
+}
+mut x = 10;
+x += 5;
+x -= 3;
+x *= 2;
+x /= 4;
+x %= 4;
+print(x);
+mut s = "a";
+s += "b";
+print(s);
+mut c = Counter();
+c.count += 7;
+print(c.count);
+--- output
+2
+ab
+7
+
+=== compound assignment needs a mutable variable
+let x = 1;
+x += 1;
+--- error
+Tried reassigning a value to the unmutable Variable 'x'
+
+=== xor flips the bits that are set in the other side
+let a: uint8 = 12;
+let b: uint8 = 10;
+print(a ^ b);
+print(5 ^ 3);
+print(-1 ^ 0);
+mut h: uint64 = 1;
+h ^= 3;
+print(h);
+--- output
+6
+6
+-1
+2
+
+=== xor binds looser than arithmetic and tighter than comparisons
+print(6 ^ 2 + 1);
+print(6 == 4 ^ 2);
+--- output
+5
+true
+
+=== xor of bools is true if exactly one is
+print(true ^ false);
+print(true ^ true);
+--- output
+true
+false
+
+=== xor needs integers or bools
+print(1.5 ^ 2.0);
+--- error
+'^' can't be used on values of type 'float64'

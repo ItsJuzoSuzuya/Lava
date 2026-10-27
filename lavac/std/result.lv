@@ -1,0 +1,41 @@
+// std::result: the value of something that worked, or why it didn't.
+//
+//   import std::result::{Result};
+//
+//   func half(n: int32) -> Result<int32, String> {
+//     if n % 2 != 0 {
+//       return Err("odd");
+//     }
+//     Ok(n / 2)
+//   }
+//   print(half(4) ?? -1);
+//
+// With `Result` imported, `Ok(x)` and `Err(e)` need no `Result::`.
+
+// The value of something that worked, or the error why it didn't.
+pub enum Result<T, E> {
+  Ok => T,
+  Err => E;
+
+  pub func is_ok(&self) -> bool {
+    match self {
+      Result::Ok => return true,
+      Result::Err => return false,
+    }
+  }
+
+  pub func is_err(&self) -> bool {
+    match self {
+      Result::Ok => return false,
+      Result::Err => return true,
+    }
+  }
+
+  // A copy of the value, or `default` if it's an error.
+  pub func ok_or(&self, default: T) -> T {
+    match self {
+      Result::Ok(value) => return value.clone(),
+      Result::Err => return default,
+    }
+  }
+}

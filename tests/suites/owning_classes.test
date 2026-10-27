@@ -26,7 +26,7 @@ print(s.data.get(1));
 --- output
 42
 
-=== copying a class copies its unique
+=== cloning a class copies its unique
 class Point {
   pub x: int32 = x;
 
@@ -38,7 +38,7 @@ class Holder {
   Constructor(p: Unique<Point>);
 }
 mut a = Holder { p: unique(Point { x: 1 }) };
-mut b = a;
+mut b = a.clone();
 b.p.x = 2;
 print(a.p.x);
 print(b.p.x);
@@ -46,7 +46,7 @@ print(b.p.x);
 1
 2
 
-=== copying a class copies its buffer
+=== cloning a class copies its buffer
 class Store {
   pub data: Buffer<int32> = Buffer<int32>(2);
 
@@ -54,7 +54,7 @@ class Store {
 }
 mut a = Store();
 a.data.set(0, 1);
-mut b = a;
+mut b = a.clone();
 b.data.set(0, 2);
 print(a.data.get(0));
 print(b.data.get(0));
@@ -62,7 +62,19 @@ print(b.data.get(0));
 1
 2
 
-=== the original stays usable after a copy
+=== assigning moves a class owning memory
+class Holder {
+  pub v: Unique<int32> = v;
+
+  Constructor(v: Unique<int32>);
+}
+let a = Holder { v: unique(5) };
+let b = a;
+let c = a;
+--- error
+use of moved value 'a'
+
+=== the original stays usable when a clone is moved
 class Holder {
   pub v: Unique<int32> = v;
 
@@ -73,13 +85,28 @@ class Holder {
   }
 }
 let a = Holder { v: unique(5) };
-let b = a;
-let c = a;
+let b = a.clone();
+let c = a.clone();
 a.show();
 --- output
 1
 
-=== passing to a function copies
+=== passing to a function moves
+class Store {
+  pub data: Buffer<int32> = Buffer<int32>(1);
+
+  Constructor();
+}
+func change(mut s: Store) {
+  s.data.set(0, 99);
+}
+mut s = Store();
+change(s);
+print(s.data.get(0));
+--- error
+use of moved value 's'
+
+=== passing a clone to a function
 class Store {
   pub data: Buffer<int32> = Buffer<int32>(1);
 
@@ -91,11 +118,30 @@ func change(mut s: Store) {
 }
 mut s = Store();
 s.data.set(0, 1);
-change(s);
+change(s.clone());
 print(s.data.get(0));
 --- output
 99
 1
+
+=== passing a reference borrows
+class Store {
+  pub data: Buffer<int32> = Buffer<int32>(1);
+
+  Constructor();
+}
+func show(s: &Store) {
+  print(s.data.get(0));
+}
+mut s = Store();
+s.data.set(0, 4);
+show(&s);
+show(s);
+print(s.data.get(0));
+--- output
+4
+4
+4
 
 === returning from a function
 class Store {
@@ -113,7 +159,7 @@ print(s.data.get(0));
 --- output
 7
 
-=== reading an owning field gives a copy
+=== cloning an owning field
 class Store {
   pub data: Buffer<int32> = Buffer<int32>(1);
 
@@ -121,13 +167,98 @@ class Store {
 }
 mut s = Store();
 s.data.set(0, 1);
-mut copy = s.data;
+mut copy = s.data.clone();
 copy.set(0, 2);
 print(s.data.get(0));
 print(copy.get(0));
 --- output
 1
 2
+
+=== moving fields out one by one
+class Pair {
+  pub left: String = left;
+  pub right: String = right;
+
+  Constructor(left: String, right: String);
+}
+func take(text: String) -> String {
+  return text + "!";
+}
+let pair = Pair("a", "b");
+print(take(pair.left) + take(pair.right));
+--- output
+a!b!
+
+=== a moved field can't be used
+class Pair {
+  pub left: Unique<int32> = left;
+  pub right: Unique<int32> = right;
+
+  Constructor(left: Unique<int32>, right: Unique<int32>);
+}
+let pair = Pair(unique(1), unique(2));
+let left = pair.left;
+let again = pair.left;
+--- error
+use of moved value 'pair.left'
+
+=== a value with a moved field can't be used as a whole
+class Pair {
+  pub left: Unique<int32> = left;
+  pub right: Unique<int32> = right;
+
+  Constructor(left: Unique<int32>, right: Unique<int32>);
+}
+let pair = Pair(unique(1), unique(2));
+let left = pair.left;
+let whole = pair;
+--- error
+use of moved value 'pair.left'
+
+=== assigning a moved field gives it a value again
+class Pair {
+  pub left: String = left;
+  pub right: String = right;
+
+  Constructor(left: String, right: String);
+}
+mut pair = Pair("a", "b");
+let left = pair.left;
+pair.left = left + "c";
+print(pair.left);
+let whole = pair;
+print(whole.right);
+--- output
+ac
+b
+
+=== a field of self can't be moved out
+class Name {
+  text: Unique<int32> = text;
+
+  Constructor(text: Unique<int32>);
+
+  pub func get(&self) -> Unique<int32> {
+    return self.text;
+  }
+}
+--- error
+can't move out of 'self.text', it's only borrowed, use 'self.text.clone()' for a copy
+
+=== a field of a temporary moves out
+class Name {
+  pub text: String = text;
+
+  Constructor(text: String);
+}
+func make() -> Name {
+  return Name("temp");
+}
+let text = make().text;
+print(text);
+--- output
+temp
 
 === assigning a new value to an owning field
 class Store {

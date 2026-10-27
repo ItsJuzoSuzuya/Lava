@@ -1,0 +1,251 @@
+=== destructuring an array
+let point: int32[3] = {1, 2, 3};
+let sum = match point {
+  [x, y, z] => x + y + z,
+};
+print(sum);
+--- output
+6
+
+=== literals and wildcards in an array pattern
+let pair: int32[2] = {0, 7};
+match pair {
+  [0, y] => print(y),
+  [_, _] => print(-1),
+}
+--- output
+7
+
+=== rest of an array is a smaller array
+let values: int32[4] = {1, 2, 3, 4};
+match values {
+  [first, ..rest] => {
+    print(first);
+    print(rest.len());
+    print(rest[0] + rest[2]);
+  }
+}
+--- output
+1
+3
+6
+
+=== first and last with a rest in between
+let values: int32[5] = {9, 0, 0, 0, 8};
+match values {
+  [first, .., last] => print(first * 10 + last),
+}
+--- output
+98
+
+=== nested arrays
+let grid: int32[2][2] = {{1, 2}, {3, 4}};
+match grid {
+  [[a, _], [_, d]] => print(a + d),
+}
+--- output
+5
+
+=== array pattern of the wrong length is an error
+let point: int32[3] = {1, 2, 3};
+match point {
+  [x, y] => print(x),
+}
+--- error
+this pattern has 2 items, but the array has 3, use '..' for the rest
+
+=== too many items before and after the rest is an error
+let point: int32[2] = {1, 2};
+match point {
+  [a, .., b, c] => print(a),
+}
+--- error
+this pattern needs at least 3 items, but the array only has 2
+
+=== two rests are an error
+let point: int32[3] = {1, 2, 3};
+match point {
+  [.., x, ..] => print(x),
+}
+--- error
+a list pattern can only have one '..'
+
+=== vector lengths pick the arm
+import std::vector::{Vector};
+import std::string::{int_to_string};
+func describe(items: &Vector<int32>) -> String {
+  return match items {
+    [] => "empty",
+    [only] => "one: " + int_to_string(only as int64),
+    [first, second] => "two: " + int_to_string((first + second) as int64),
+    [first, ..rest] => "many, starting with " + int_to_string(first as int64) + " and " + int_to_string(rest.len() as int64) + " more",
+  };
+}
+mut v = Vector<int32>();
+print(describe(v));
+v.push(4);
+print(describe(v));
+v.push(5);
+print(describe(v));
+v.push(6);
+v.push(7);
+print(describe(v));
+--- output
+empty
+one: 4
+two: 9
+many, starting with 4 and 3 more
+
+=== string literals in a vector pattern
+import std::vector::{Vector};
+import std::string::{int_to_string};
+func run(arguments: Vector<String>) -> String {
+  return match arguments {
+    ["build", file] => "building " + file,
+    ["run", file, ..options] => "running " + file + " with " + int_to_string(options.len() as int64) + " options",
+    [command, ..] => "unknown command " + command,
+    [] => "no command",
+  };
+}
+mut a = Vector<String>();
+a.push("build");
+a.push("main.lv");
+print(run(a));
+mut b = Vector<String>();
+b.push("run");
+b.push("app.lv");
+b.push("-v");
+b.push("-q");
+print(run(b));
+mut c = Vector<String>();
+c.push("fly");
+print(run(c));
+print(run(Vector<String>()));
+--- output
+building main.lv
+running app.lv with 2 options
+unknown command fly
+no command
+
+=== rest of a vector is a vector of the remaining items
+import std::vector::{Vector};
+mut v = Vector<int32>();
+v.push(1);
+v.push(2);
+v.push(3);
+match v {
+  [_, ..rest] => {
+    print(rest[0] + rest[1]);
+    mut copy = rest.clone();
+    copy.push(10);
+    print(copy.len());
+    print(v.len());
+  }
+  _ => print(0),
+}
+--- output
+5
+3
+3
+
+=== last items of a vector
+import std::vector::{Vector};
+mut v = Vector<String>();
+v.push("a");
+v.push("b");
+v.push("c");
+match v {
+  [.., second_last, last] => print(second_last + last),
+  _ => print("short"),
+}
+--- output
+bc
+
+=== enum variants inside a list pattern
+import std::option::{Option};
+let items: Option<int32>[2] = {Option::Some(1), Option::None};
+match items {
+  [Option::Some(x), Option::None] => print(x),
+  _ => print(0),
+}
+--- output
+1
+
+=== vector of uniques is only looked at, not moved
+import std::vector::{Vector};
+mut v = Vector<Unique<int32>>();
+v.push(unique(3));
+v.push(unique(4));
+match v {
+  [a, b] => print(1),
+  _ => print(0),
+}
+print(v.len());
+--- output
+1
+2
+
+=== match on a string
+let command = "stop";
+let code = match command {
+  "go" => 1,
+  "stop" => 2,
+  _ => 0,
+};
+print(code);
+--- output
+2
+
+=== a vector match giving a value has to cover every length
+import std::vector::{Vector};
+mut v = Vector<int32>();
+let n = match v {
+  [] => 0,
+  [x] => x,
+};
+print(n);
+--- error
+a match giving a value has to handle every case
+
+=== a gap in the covered lengths is an error
+import std::vector::{Vector};
+mut v = Vector<int32>();
+let n = match v {
+  [] => 0,
+  [a, b, ..] => a + b,
+};
+print(n);
+--- error
+a match giving a value has to handle every case
+
+=== empty and non-empty cover every length
+import std::vector::{Vector};
+mut v = Vector<int32>();
+v.push(6);
+let n = match v {
+  [] => 0,
+  [x, ..] => x,
+};
+print(n);
+--- output
+6
+
+=== a vector is fully covered by a rest pattern
+import std::vector::{Vector};
+mut v = Vector<int32>();
+v.push(2);
+let n = match v {
+  [] => 0,
+  [..] => 1,
+};
+print(n);
+--- output
+1
+
+=== a list pattern on something else is an error
+let n = 5;
+match n {
+  [x] => print(x),
+}
+--- error
+a list pattern like [a, b] only matches an array or Vector

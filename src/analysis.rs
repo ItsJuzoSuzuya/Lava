@@ -8,8 +8,8 @@
 
 use std::{collections::HashMap, path::PathBuf};
 
-use crate::{declaration::{Declaration, DeclarationKind, TypeParam, Visibility}, expression::{Expr, ExprKind},
-    module::ModuleGraph, param::Param, program::CheckedModule, span::Span, statement::{Pattern, Stmt, StmtKind},
+use crate::{declaration::{Declaration, DeclarationKind, ExternItem, TypeParam, Visibility}, expression::{Block, Expr, ExprKind, MatchArm, Pattern},
+    module::{self, ModuleGraph}, param::Param, program::CheckedModule, runtime, span::Span, statement::{Stmt, StmtKind},
     r#type::Type};
 
 /// What a [`Def`] declares.
@@ -50,6 +50,9 @@ pub struct Def {
     pub mutable: bool,
     /// Whether a method takes `mut &self`.
     pub mut_self: bool,
+    /// Whether a function of a type takes `self`. Without, it's called like
+    /// `Type::function()` instead of on a value.
+    pub takes_self: bool,
     /// Whether this is a method of a trait or impl, whose signature is fixed by the trait.
     pub in_trait: bool,
     pub has_body: bool,
@@ -138,8 +141,18 @@ impl FileInfo {
 
     /// Whether the word at `span` is `word`.
     fn has_word(&self, span: &Span, word: &str) -> bool {
-        let word: Vec<char> = word.chars().collect();
-        is_word_at(self.line(span.line), span.col, &word)
+        self.spelling_at(span, word).is_some()
+    }
+
+    /// How `name` is written at `span`: in full, or for a standard library
+    /// item like `fs::read`, also only as `read`. That's how it's written in
+    /// its own module and after `import std::fs::{read};`.
+    fn spelling_at<'n>(&self, span: &Span, name: &'n str) -> Option<&'n str> {
+        let short = name.rsplit("::").next().unwrap_or(name);
+        [name, short].into_iter().find(|word| {
+            let word: Vec<char> = word.chars().collect();
+            is_word_at(self.line(span.line), span.col, &word)
+        })
     }
 
     /// Position of the `}` closing the first `{` at or after `from`. Strings
@@ -197,6 +210,9 @@ pub struct Index {
     ref_at: HashMap<(usize, usize, usize), usize>,
     /// Methods of trait impls by the name of the type they're for.
     impl_methods: HashMap<String, Vec<usize>>,
+    /// The extern type each one declared like `extern type IntType: Type` is
+    /// a kind of, whose methods it has too.
+    handle_bases: HashMap<String, String>,
     /// Keys standing for the definition of another key, with the type the
     /// impl is for: default trait methods copied into impls.
     aliases: Vec<(String, String, String)>,
@@ -227,7 +243,9 @@ pub fn show_type(ty: &Type) -> String {
             format!("{}<{}>", name, args.join(", "))
         }
         Type::Unique(inner) => format!("Unique<{}>", show_type(inner)),
+        Type::Shared(inner) => format!("Shared<{}>", show_type(inner)),
         Type::Buffer(inner) => format!("Buffer<{}>", show_type(inner)),
+        Type::Array(element, len) => format!("{}[{}]", show_type(element), len),
         Type::Ref(inner) => format!("&{}", show_type(inner)),
         other => other.to_string(),
     }
@@ -258,13 +276,15 @@ fn show_type_params(type_params: &[TypeParam]) -> String {
 const BUILTINS: &[(&str, &str, &str)] = &[
     ("builtin:print", "print", "print(value)\n\nPrints a number, bool or String and a newline."),
     ("builtin:unique", "unique", "unique<T>(value: T) -> Unique<T>\n\nMoves the value onto the heap. It's freed when its owner goes out of scope."),
+    ("builtin:shared", "shared", "shared<T>(value: T) -> Shared<T>\n\nMoves the value onto the heap. Copies of the Shared use the same value, it's freed when the last one goes out of scope."),
     ("builtin:Buffer", "Buffer", "Buffer<T>(capacity: uint64) -> Buffer<T>\n\nA block of `capacity` elements on the heap."),
-    ("fn:sqrt", "sqrt", "sqrt(x: float64) -> float64\n\nThe square root of `x`."),
-    ("fn:panic", "panic", "panic(message: String)\n\nPrints `error: message` and stops the program."),
     ("fn:Buffer.get", "get", "get(&self, index: uint64) -> T\n\nA copy of the element at `index`. Stops the program if it's out of bounds."),
+    ("fn:Buffer.take", "take", "take(mut &self, index: uint64) -> T\n\nMoves the element at `index` out, its slot is left empty. Stops the program if it's out of bounds."),
     ("fn:Buffer.set", "set", "set(mut &self, index: uint64, value: T)\n\nReplaces the element at `index`. Stops the program if it's out of bounds."),
     ("fn:Buffer.capacity", "capacity", "capacity(&self) -> uint64\n\nHow many elements fit into the Buffer."),
     ("fn:Buffer.resize", "resize", "resize(mut &self, capacity: uint64)\n\nGrows or shrinks the Buffer, keeping the elements that still fit."),
+    ("fn:Array.len", "len", "len(&self) -> uint64\n\nHow many elements the array has, known while compiling."),
+    ("fn:Slice.len", "len", "len(&self) -> uint64\n\nHow many elements the slice looks at."),
 ];
 
 impl Index {
@@ -282,6 +302,7 @@ impl Index {
             def_at: HashMap::new(),
             ref_at: HashMap::new(),
             impl_methods: HashMap::new(),
+            handle_bases: HashMap::new(),
             aliases: Vec::new(),
         };
 
@@ -290,8 +311,29 @@ impl Index {
             def.signature = signature.to_string();
             def.public = true;
             def.mut_self = signature.contains("mut &self");
+            def.takes_self = signature.contains("self");
             let id = index.push_def(def);
             index.by_key.insert(key.to_string(), id);
+        }
+        for builtin in runtime::builtins().into_iter().filter(|b| !runtime::is_internal(b.name)) {
+            // String methods are registered like `String_len`
+            let (owner, name) = match builtin.name.split_once('_') {
+                Some(("String", method)) => (Some("String"), method),
+                _ => (None, builtin.name),
+            };
+            let params: Vec<String> = builtin.params.iter()
+                .map(|(n, ty)| if *n == "self" { "&self".to_string() } else { format!("{}: {}", n, show_type(ty)) })
+                .collect();
+            let ret = if builtin.ret == Type::Void { String::new() } else { format!(" -> {}", show_type(&builtin.ret)) };
+            let mut def = Def::new(name, DefKind::Builtin, None, Span { line: 0, col: 0, len: 0 });
+            def.signature = format!("{}({}){}\n\n{}", name, params.join(", "), ret, builtin.doc);
+            def.ty = builtin.ret.clone();
+            def.public = true;
+            let id = index.push_def(def);
+            index.by_key.insert(format!("fn:{}", builtin.name), id);
+            if let Some(owner) = owner {
+                index.impl_methods.entry(owner.to_string()).or_default().push(id);
+            }
         }
 
         for file in 0..index.files.len() {
@@ -440,6 +482,7 @@ impl Index {
                 def.container = container.as_ref().map(|(id, _, _)| *id);
                 def.public = matches!(visibility, Visibility::Public) || public || kind == DefKind::Constructor;
                 def.mut_self = params.iter().any(|p| p.name == "self" && p.mutable);
+                def.takes_self = params.iter().any(|p| p.name == "self");
                 def.in_trait = matches!(&container, Some((_, _, Some(_))));
                 def.has_body = body.is_some();
                 def.end_line = self.files[file].closing_brace(&def.span).map(|(l, _)| l).unwrap_or(def.span.line);
@@ -478,10 +521,12 @@ impl Index {
                     self.declare(file, method, Some((class, name.clone(), None)));
                 }
             }
-            DeclarationKind::Enum { name, type_params, fields } => {
+            DeclarationKind::Enum { name, type_params, fields, methods } => {
                 let span = self.name_after(file, &decl.span, name);
                 let mut def = Def::new(name, DefKind::Enum, Some(file), span);
-                let variants: Vec<String> = fields.iter().map(|(v, _, ty, _)| format!("    {} => {}", v, show_type(ty))).collect();
+                let variants: Vec<String> = fields.iter()
+                    .map(|(v, _, ty, _)| if *ty == Type::Void { format!("    {}", v) } else { format!("    {} => {}", v, show_type(ty)) })
+                    .collect();
                 def.signature = format!("{}enum {}{} {{\n{}\n}}", if public { "pub " } else { "" }, name, show_type_params(type_params), variants.join(",\n"));
                 def.ty = Type::Enum(name.clone());
                 def.public = public;
@@ -490,14 +535,26 @@ impl Index {
                 self.by_key.insert(format!("enum:{}", name), enum_def);
 
                 for (variant, _, ty, ty_span) in fields {
-                    let span = self.files[file].word_before(ty_span, variant).unwrap_or(ty_span.clone());
+                    // A variant without payload has the span of its name
+                    let span = if *ty == Type::Void {
+                        ty_span.clone()
+                    } else {
+                        self.files[file].word_before(ty_span, variant).unwrap_or(ty_span.clone())
+                    };
                     let mut def = Def::new(variant, DefKind::Variant, Some(file), span);
-                    def.signature = format!("{}::{} => {}", name, variant, show_type(ty));
+                    def.signature = if *ty == Type::Void {
+                        format!("{}::{}", name, variant)
+                    } else {
+                        format!("{}::{} => {}", name, variant, show_type(ty))
+                    };
                     def.ty = ty.clone();
                     def.container = Some(enum_def);
                     def.public = true;
                     let id = self.push_def(def);
                     self.by_key.insert(format!("variant:{}::{}", name, variant), id);
+                }
+                for method in methods {
+                    self.declare(file, method, Some((enum_def, name.clone(), None)));
                 }
             }
             DeclarationKind::Trait { name, methods } => {
@@ -535,6 +592,25 @@ impl Index {
                     }
                 }
             }
+            // An extern type is found like a class, its methods are its members
+            DeclarationKind::Extern(ExternItem::Type { name, base, methods }) => {
+                let span = self.name_after(file, &decl.span, name);
+                let mut def = Def::new(name, DefKind::Class, Some(file), span);
+                let kind_of = base.as_ref().map(|b| format!(": {}", b)).unwrap_or_default();
+                def.signature = format!("{}extern type {}{}", if public { "pub " } else { "" }, name, kind_of);
+                if let Some(base) = base {
+                    self.handle_bases.insert(name.clone(), base.clone());
+                }
+                def.ty = Type::Handle(name.clone());
+                def.public = public;
+                def.end_line = self.files[file].closing_brace(&def.span).map(|(l, _)| l).unwrap_or(def.span.line);
+                let type_def = self.push_def(def);
+                self.by_key.insert(format!("class:{}", name), type_def);
+                for method in methods {
+                    self.declare(file, method, Some((type_def, name.clone(), None)));
+                }
+            }
+            DeclarationKind::Extern(ExternItem::Link(_)) => {}
         }
     }
 
@@ -623,6 +699,22 @@ impl Index {
         if name == "Buffer" {
             members.extend(["get", "set", "capacity", "resize"].iter().filter_map(|m| self.key(&format!("fn:Buffer.{}", m))));
         }
+        // Arrays and slices only have their built-in `len`
+        if name == "Array" || name == "Slice" {
+            members.extend(self.key(&format!("fn:{}.len", name)));
+        }
+        // An extern type has the methods of the one it's a kind of, unless it has its own
+        let mut base = self.handle_bases.get(&name);
+        for _ in 0..64 {
+            let Some(current) = base else { break };
+            let owner = self.key(&format!("class:{}", current));
+            for i in (0..self.defs.len()).filter(|&i| owner.is_some() && self.defs[i].container == owner) {
+                if !members.iter().any(|&m| self.defs[m].name == self.defs[i].name) {
+                    members.push(i);
+                }
+            }
+            base = self.handle_bases.get(current);
+        }
         members
     }
 
@@ -655,8 +747,10 @@ impl Index {
     /// The definitions usable from anywhere in `file`: its own top-level
     /// declarations and the public ones of the modules it imports.
     pub fn globals_for(&self, file: usize) -> Vec<usize> {
+        // The prelude counts as imported everywhere
         let imported: Vec<usize> = self.files[file].imports.iter()
             .filter_map(|(name, _)| self.files.iter().position(|f| &f.name == name))
+            .chain(self.files.iter().position(|f| f.path == module::prelude_path()))
             .collect();
         (0..self.defs.len())
             .filter(|&i| {
@@ -665,7 +759,7 @@ impl Index {
                 match d.file {
                     Some(f) if top_level => f == file || (imported.contains(&f) && d.public),
                     Some(_) => d.kind == DefKind::Module && imported.contains(&d.file.unwrap()),
-                    None => !d.name.is_empty() && !matches!(d.name.as_str(), "get" | "set" | "capacity" | "resize"),
+                    None => !d.name.is_empty() && !matches!(d.name.as_str(), "get" | "take" | "set" | "capacity" | "resize"),
                 }
             })
             .collect()
@@ -686,6 +780,7 @@ impl Def {
             public: false,
             mutable: false,
             mut_self: false,
+            takes_self: false,
             in_trait: false,
             has_body: false,
             end_line: span.line,
@@ -765,7 +860,7 @@ impl<'a> Walker<'a> {
     fn root_def(&self, expr: &Expr) -> Option<usize> {
         match &expr.kind {
             ExprKind::Identifier(name) => self.lookup(name),
-            ExprKind::FieldAccess { object, .. } => self.root_def(object),
+            ExprKind::FieldAccess { object, .. } | ExprKind::Index { object, .. } => self.root_def(object),
             ExprKind::FunctionCall { receiver: Some(receiver), .. } => self.root_def(receiver),
             _ => None,
         }
@@ -775,7 +870,7 @@ impl<'a> Walker<'a> {
     fn type_ref(&mut self, ty: &Type, span: &Span) {
         let name = match ty {
             Type::Class(n) | Type::Enum(n) | Type::Generic { name: n, .. } => template_name(n),
-            Type::Ref(inner) | Type::Unique(inner) => return self.type_ref(inner, span),
+            Type::Ref(inner) | Type::Unique(inner) | Type::Shared(inner) => return self.type_ref(inner, span),
             _ => return,
         };
         if !self.index.files[self.file].has_word(span, &name) {
@@ -805,6 +900,17 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// Where the name of the function `def` is in a call like `Type::function(...)`
+    /// starting at `call`: right after the first `::`.
+    fn static_call_name(&self, call: &Span, def: usize) -> Option<Span> {
+        let text = self.index.files[self.file].line(call.line);
+        let rest: String = text.get(call.col..)?.iter().collect();
+        let after = rest.find("::")? + 2;
+        let col = call.col + rest[..after].chars().count();
+        let name: Vec<char> = self.index.defs[def].name.chars().collect();
+        is_word_at(text, col, &name).then(|| Span { line: call.line, col, len: name.len() })
+    }
+
     /// Line of the `}` ending the block that starts at or after `from`.
     fn block_end(&self, from: &Span) -> usize {
         self.index.files[self.file].closing_brace(from).map(|(l, _)| l).unwrap_or(from.line)
@@ -818,7 +924,8 @@ impl<'a> Walker<'a> {
                 self.decl(decl);
                 self.checked = true;
             }
-            DeclarationKind::Class { type_params, .. } if !type_params.is_empty() && self.checked => {
+            DeclarationKind::Class { type_params, .. } | DeclarationKind::Enum { type_params, .. }
+                if !type_params.is_empty() && self.checked => {
                 self.checked = false;
                 self.decl(decl);
                 self.checked = true;
@@ -883,10 +990,17 @@ impl<'a> Walker<'a> {
                 }
                 self.class = outer;
             }
-            DeclarationKind::Enum { fields, .. } => {
+            DeclarationKind::Enum { name, fields, methods, .. } => {
                 for (_, _, ty, span) in fields {
-                    self.type_ref(ty, span);
+                    if *ty != Type::Void {
+                        self.type_ref(ty, span);
+                    }
                 }
+                let outer = self.class.replace(template_name(name));
+                for method in methods {
+                    self.decl(method);
+                }
+                self.class = outer;
             }
             DeclarationKind::Trait { methods, .. } => {
                 for method in methods {
@@ -916,6 +1030,14 @@ impl<'a> Walker<'a> {
                 }
                 self.class = outer;
             }
+            DeclarationKind::Extern(ExternItem::Type { name, methods, .. }) => {
+                let outer = self.class.replace(name.clone());
+                for method in methods {
+                    self.decl(method);
+                }
+                self.class = outer;
+            }
+            DeclarationKind::Extern(ExternItem::Link(_)) => {}
         }
     }
 
@@ -962,50 +1084,21 @@ impl<'a> Walker<'a> {
                 };
                 self.declare_local(name, span, DefKind::Variable, &ty, *mutable, usize::MAX);
             }
-            StmtKind::Match { scrutinee, arms } => {
-                self.expr(scrutinee);
-                for arm in arms {
-                    self.scopes.push(HashMap::new());
-                    let arm_end = arm.body.iter().map(|s| s.span.line).max().unwrap_or(arm.span.line);
-                    let arm_end = if self.index.files[file].line(arm.span.line).contains(&'{') { self.block_end(&arm.span).max(arm_end) } else { arm_end };
-                    match &arm.pattern {
-                        Pattern::EnumVariant { enum_name, variant, binding } => {
-                            let enum_key = template_name(enum_name);
-                            if let Some(enum_def) = self.index.key(&format!("enum:{}", enum_key)) {
-                                if self.index.files[file].has_word(&arm.span, enum_name) {
-                                    self.reference(Span { len: enum_name.chars().count(), ..arm.span.clone() }, enum_def, RefKind::Read);
-                                }
-                            }
-                            let variant_def = self.index.key(&format!("variant:{}::{}", enum_key, variant));
-                            let variant_span = self.index.files[file].word_after(&Span { col: arm.span.col + 1, ..arm.span.clone() }, variant);
-                            if let (Some(def), Some(span)) = (variant_def, variant_span.clone()) {
-                                self.reference(span, def, RefKind::Read);
-                            }
-                            if let (Some(binding), Some(after)) = (binding, variant_span) {
-                                let after = Span { col: after.col + after.len, ..after };
-                                if let Some(span) = self.index.files[file].word_after(&after, binding) {
-                                    let ty = variant_def.map(|d| self.index.defs[d].ty.clone()).unwrap_or(Type::Unknown);
-                                    self.declare_local(binding, span, DefKind::Variable, &ty, false, arm_end);
-                                }
-                            }
+            StmtKind::Destructure { names, value, mutable } => {
+                self.expr(value);
+                let types = match &value.ty {
+                    Type::Tuple(types) => types.clone(),
+                    _ => vec![],
+                };
+                let mut after = stmt.span.clone();
+                for (i, name) in names.iter().enumerate() {
+                    if let Some(span) = self.index.files[file].word_after(&after, name) {
+                        after = Span { col: span.col + span.len, ..span.clone() };
+                        if name != "_" {
+                            let ty = types.get(i).cloned().unwrap_or(Type::Unknown);
+                            self.declare_local(name, span, DefKind::Variable, &ty, *mutable, usize::MAX);
                         }
-                        Pattern::Literal(expr) => self.expr(expr),
-                        Pattern::Wildcard => {}
                     }
-                    for stmt in &arm.body {
-                        self.stmt(stmt);
-                    }
-                    self.close_scope(arm_end);
-                }
-            }
-            StmtKind::If { condition, then_body, else_body } => {
-                self.expr(condition);
-                let then_end = self.index.files[file].closing_brace(&stmt.span);
-                self.block(then_body, then_end.map(|(l, _)| l).unwrap_or(stmt.span.line));
-                if let Some(else_body) = else_body {
-                    let else_start = then_end.map(|(line, col)| Span { line, col: col + 1, len: 0 }).unwrap_or(stmt.span.clone());
-                    let else_end = self.block_end(&else_start);
-                    self.block(else_body, else_end);
                 }
             }
             StmtKind::While { condition, body } => {
@@ -1013,12 +1106,125 @@ impl<'a> Walker<'a> {
                 let end = self.block_end(&stmt.span);
                 self.block(body, end);
             }
+            StmtKind::Break | StmtKind::Continue => {}
+        }
+    }
+
+    /// Walks an `if` starting at `span`. Each branch is its own scope.
+    fn if_branches(&mut self, span: &Span, condition: &Expr, then_block: &Block, else_block: Option<&Block>) {
+        let file = self.file;
+        self.expr(condition);
+        let then_end = self.index.files[file].closing_brace(span);
+        self.value_block(then_block, then_end.map(|(l, _)| l).unwrap_or(span.line));
+        if let Some(else_block) = else_block {
+            let else_start = then_end.map(|(line, col)| Span { line, col: col + 1, len: 0 }).unwrap_or(span.clone());
+            let else_end = self.block_end(&else_start);
+            self.value_block(else_block, else_end);
+        }
+    }
+
+    /// Walks `block`, a scope whose variables are visible until `scope_end`.
+    fn value_block(&mut self, block: &Block, scope_end: usize) {
+        self.scopes.push(HashMap::new());
+        for stmt in &block.stmts {
+            self.stmt(stmt);
+        }
+        if let Some(value) = &block.value {
+            self.expr(value);
+        }
+        self.close_scope(scope_end);
+    }
+
+    /// Walks the match pattern `pattern` written at or after `from`. The names
+    /// it binds are visible until `scope_end`.
+    fn pattern(&mut self, pattern: &Pattern, from: &Span, scope_end: usize) {
+        let file = self.file;
+        match pattern {
+            Pattern::EnumVariant { enum_name, variant, binding } => {
+                let enum_key = template_name(enum_name);
+                // The pattern names the template, like `Option` for `Option<int32>`
+                let enum_span = self.index.files[file].word_after(from, &enum_key);
+                if let (Some(enum_def), Some(span)) = (self.index.key(&format!("enum:{}", enum_key)), enum_span.clone()) {
+                    self.reference(span, enum_def, RefKind::Read);
+                }
+                let after_enum = enum_span.map(|s| Span { col: s.col + s.len, ..s }).unwrap_or(from.clone());
+                let variant_def = self.index.key(&format!("variant:{}::{}", enum_key, variant));
+                let variant_span = self.index.files[file].word_after(&after_enum, variant);
+                if let (Some(def), Some(span)) = (variant_def, variant_span.clone()) {
+                    self.reference(span, def, RefKind::Read);
+                }
+                if let (Some(binding), Some(after)) = (binding, variant_span) {
+                    let after = Span { col: after.col + after.len, ..after };
+                    if let Some(span) = self.index.files[file].word_after(&after, binding) {
+                        let ty = variant_def.map(|d| self.index.defs[d].ty.clone()).unwrap_or(Type::Unknown);
+                        self.declare_local(binding, span, DefKind::Variable, &ty, false, scope_end);
+                    }
+                }
+            }
+            // A name matches anything and binds it
+            Pattern::Literal(Expr { kind: ExprKind::Identifier(name), span, ty }) => {
+                self.declare_local(name, span.clone(), DefKind::Variable, ty, false, scope_end);
+            }
+            Pattern::Literal(expr) => self.expr(expr),
+            Pattern::Wildcard => {}
+            Pattern::List { before, rest, after } => {
+                for item in before {
+                    self.pattern(item, from, scope_end);
+                }
+                if let Some(rest) = rest {
+                    if let Some(name) = &rest.binding {
+                        if let Some(span) = self.index.files[file].word_after(&rest.span, name) {
+                            self.declare_local(name, span, DefKind::Variable, &rest.ty, false, scope_end);
+                        }
+                    }
+                }
+                let after_rest = rest.as_ref().map(|r| r.span.clone()).unwrap_or(from.clone());
+                for item in after {
+                    self.pattern(item, &after_rest, scope_end);
+                }
+            }
+            Pattern::Tuple(items) => {
+                for item in items {
+                    self.pattern(item, from, scope_end);
+                }
+            }
+        }
+    }
+
+    /// Walks a match on `scrutinee`. A binding in an arm's pattern is visible
+    /// in that arm only.
+    fn match_arms(&mut self, scrutinee: &Expr, arms: &[MatchArm]) {
+        let file = self.file;
+        self.expr(scrutinee);
+        for arm in arms {
+            self.scopes.push(HashMap::new());
+            let arm_end = arm.block.stmts.iter().map(|s| s.span.line)
+                .chain(arm.block.value.iter().map(|v| v.span.line))
+                .max()
+                .unwrap_or(arm.span.line);
+            let arm_end = if self.index.files[file].line(arm.span.line).contains(&'{') { self.block_end(&arm.span).max(arm_end) } else { arm_end };
+            self.pattern(&arm.pattern, &arm.span, arm_end);
+            for stmt in &arm.block.stmts {
+                self.stmt(stmt);
+            }
+            if let Some(value) = &arm.block.value {
+                self.expr(value);
+            }
+            self.close_scope(arm_end);
         }
     }
 
     fn expr(&mut self, expr: &Expr) {
         let file = self.file;
         match &expr.kind {
+            ExprKind::Match { scrutinee, arms } => self.match_arms(scrutinee, arms),
+            ExprKind::If { condition, then_block, else_block } =>
+                self.if_branches(&expr.span, condition, then_block, else_block.as_ref()),
+            ExprKind::Ternary { condition, then_value, else_value } => {
+                self.expr(condition);
+                self.expr(then_value);
+                self.expr(else_value);
+            }
             ExprKind::Identifier(name) => {
                 if let Some(def) = self.lookup(name) {
                     self.reference(expr.span.clone(), def, RefKind::Read);
@@ -1032,8 +1238,11 @@ impl<'a> Walker<'a> {
                 }
                 let callee = self.callee(name, receiver.as_deref(), mangled.as_deref());
                 if let Some(def) = callee {
-                    let span = Span { len: name.chars().count(), ..expr.span.clone() };
-                    if self.index.files[file].has_word(&span, name) {
+                    if let Some(spelling) = self.index.files[file].spelling_at(&expr.span, name) {
+                        let span = Span { len: spelling.chars().count(), ..expr.span.clone() };
+                        self.reference(span, def, RefKind::Read);
+                    } else if let Some(span) = self.static_call_name(&expr.span, def) {
+                        // `Type::function(...)`, whose function is named after the `::`
                         self.reference(span, def, RefKind::Read);
                     }
                     if self.index.defs[def].mut_self {
@@ -1071,12 +1280,23 @@ impl<'a> Walker<'a> {
                         }
                         self.mutate_root(object);
                     }
+                    // `a[i] = v` changes the array `a`
+                    ExprKind::Index { object, .. } => {
+                        self.expr(lhs);
+                        self.mutate_root(object);
+                    }
                     _ => self.expr(lhs),
                 }
             }
             ExprKind::BinaryExpr { lhs, rhs, .. } => {
                 self.expr(lhs);
                 self.expr(rhs);
+            }
+            ExprKind::SliceOf(value) => self.expr(value),
+            ExprKind::SliceLiteral(values) => {
+                for value in values {
+                    self.expr(value);
+                }
             }
             ExprKind::Convert { value, target } => {
                 self.expr(value);
@@ -1086,7 +1306,17 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
-            ExprKind::Negation(inner) => self.expr(inner),
+            ExprKind::Negation(inner) | ExprKind::Not(inner) => self.expr(inner),
+            ExprKind::ArrayLiteral(values) | ExprKind::Tuple(values) => {
+                for value in values {
+                    self.expr(value);
+                }
+            }
+            ExprKind::Index { object, index } => {
+                self.expr(object);
+                self.expr(index);
+            }
+            ExprKind::CharLiteral(_) => {}
             ExprKind::Ref(inner) => {
                 self.expr(inner);
                 if let Some(def) = self.root_def(inner) {
@@ -1101,11 +1331,16 @@ impl<'a> Walker<'a> {
                 self.builtin(&expr.span, "unique", "builtin:unique");
                 self.expr(inner);
             }
+            ExprKind::Shared(inner) => {
+                self.builtin(&expr.span, "shared", "builtin:shared");
+                self.expr(inner);
+            }
+            ExprKind::Deref(inner) => self.expr(inner),
             ExprKind::NewBuffer(capacity) => {
                 self.builtin(&expr.span, "Buffer", "builtin:Buffer");
                 self.expr(capacity);
             }
-            ExprKind::ColonAccess { name, tag } => self.variant_ref(expr, name, tag),
+            ExprKind::ColonAccess { name, tag, .. } => self.variant_ref(expr, name, tag),
             ExprKind::EnumInit { name, tag, value, .. } => {
                 self.variant_ref(expr, name, tag);
                 self.expr(value);
@@ -1139,6 +1374,10 @@ impl<'a> Walker<'a> {
     /// The definition of the function or method a call of `name` calls.
     fn callee(&self, name: &str, receiver: Option<&Expr>, mangled: Option<&str>) -> Option<usize> {
         if let Some(mangled) = mangled {
+            // A slice's built-in `len`
+            if mangled == crate::sema::SLICE_LEN {
+                return self.index.key("fn:Slice.len");
+            }
             if let Some(def) = self.index.key(&format!("fn:{}", template_name(mangled))) {
                 return Some(def);
             }

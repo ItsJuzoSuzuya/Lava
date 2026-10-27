@@ -194,7 +194,7 @@ class Box<T> {
   Constructor(value: T);
 
   pub func get(&self) -> T {
-    return self.value;
+    return self.value.clone();
   }
 }
 func unbox<T>(b: Box<T>) -> T {

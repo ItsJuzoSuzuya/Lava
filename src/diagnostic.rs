@@ -1,9 +1,8 @@
 //! Compile errors as values.
 //!
 //! Errors stop compiling by panicking with a [`CompileError`] payload, see
-//! [`throw`]. The compiler prints them through the hook from [`install_hook`],
-//! tools like the linter and the language server catch them with [`catch`]
-//! and keep going.
+//! [`throw`]. The command line catches them with [`catch`] and prints them,
+//! the language server catches them and keeps going.
 
 use std::{any::Any, panic::{self, AssertUnwindSafe}, path::PathBuf};
 
@@ -48,18 +47,6 @@ pub fn throw(message: impl Into<String>, span: Option<Span>, source: &str) -> ! 
 /// Stops compiling with the error `message` at `span` in the file `file`.
 pub fn throw_in_file(message: impl Into<String>, span: Option<Span>, source: &str, file: PathBuf) -> ! {
     panic::panic_any(CompileError { message: message.into(), span, source: source.to_string(), file: Some(file) })
-}
-
-/// Makes the compiler print [`CompileError`]s like `error: ...` with their
-/// position instead of Rust's panic message. Other panics are printed as usual.
-pub fn install_hook() {
-    let default = panic::take_hook();
-    panic::set_hook(Box::new(move |info| {
-        match info.payload().downcast_ref::<CompileError>() {
-            Some(error) => eprintln!("{}", error.render()),
-            None => default(info),
-        }
-    }));
 }
 
 /// Stops printing anything when the compiler panics, for tools that report

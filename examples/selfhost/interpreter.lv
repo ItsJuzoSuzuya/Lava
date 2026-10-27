@@ -1,0 +1,174 @@
+// Runs the syntax tree of the parser. Bools are the numbers 1 and 0.
+
+import parser;
+import std::result::{Result};
+import std::vector::{Vector};
+import std::collections::{Map};
+
+pub class Interpreter {
+  vars: Map<int64> = Map<int64>();
+
+  Constructor();
+
+  pub func run(mut &self, stmts: &Vector<Stmt>) -> Result<bool, String> {
+    mut i: uint64 = 0;
+    while i < stmts.len() {
+      match self.exec(stmts.get(i)) {
+        Result::Err(message) => return Result::Err(message),
+        Result::Ok => {}
+      }
+      i = i + 1;
+    }
+    return Result::Ok(true);
+  }
+
+  func exec(mut &self, stmt: Stmt) -> Result<bool, String> {
+    match stmt {
+      Stmt::Let(assign) => {
+        match self.eval(assign.value) {
+          Result::Err(message) => return Result::Err(message),
+          Result::Ok(value) => self.vars.put(assign.name, value),
+        }
+      }
+      Stmt::Set(assign) => {
+        if !self.vars.has(assign.name) {
+          return Result::Err("assignment to unknown variable '" + assign.name + "'");
+        }
+        match self.eval(assign.value) {
+          Result::Err(message) => return Result::Err(message),
+          Result::Ok(value) => self.vars.put(assign.name, value),
+        }
+      }
+      Stmt::Print(expr) => {
+        match self.eval(expr) {
+          Result::Err(message) => return Result::Err(message),
+          Result::Ok(value) => print(value),
+        }
+      }
+      Stmt::While(loop) => {
+        while true {
+          mut condition: int64 = 0;
+          match self.eval(loop.condition) {
+            Result::Err(message) => return Result::Err(message),
+            Result::Ok(value) => condition = value,
+          }
+          if condition == 0 {
+            break;
+          }
+          match self.run(loop.body) {
+            Result::Err(message) => return Result::Err(message),
+            Result::Ok => {}
+          }
+        }
+      }
+      Stmt::If(branch) => {
+        mut condition: int64 = 0;
+        match self.eval(branch.condition) {
+          Result::Err(message) => return Result::Err(message),
+          Result::Ok(value) => condition = value,
+        }
+        if condition != 0 {
+          return self.run(branch.then_body);
+        }
+        return self.run(branch.else_body);
+      }
+    }
+    return Result::Ok(true);
+  }
+
+  pub func eval(&self, expr: &Expr) -> Result<int64, String> {
+    match expr {
+      Expr::Int(value) => return Result::Ok(value),
+      Expr::Bool(value) => {
+        if value {
+          return Result::Ok(1);
+        }
+        return Result::Ok(0);
+      }
+      Expr::Var(name) => {
+        match self.vars.find(name) {
+          Option::Some(value) => return Result::Ok(value),
+          Option::None => return Result::Err("unknown variable '" + name + "'"),
+        }
+      }
+      Expr::Unary(unary) => {
+        mut value: int64 = 0;
+        match self.eval(unary.operand) {
+          Result::Err(message) => return Result::Err(message),
+          Result::Ok(operand) => value = operand,
+        }
+        if unary.op == "-" {
+          return Result::Ok(-value);
+        }
+        return Result::Ok(truth(value == 0));
+      }
+      Expr::Binary(binary) => {
+        mut left: int64 = 0;
+        match self.eval(binary.left) {
+          Result::Err(message) => return Result::Err(message),
+          Result::Ok(value) => left = value,
+        }
+        mut right: int64 = 0;
+        match self.eval(binary.right) {
+          Result::Err(message) => return Result::Err(message),
+          Result::Ok(value) => right = value,
+        }
+        return apply(binary.op, left, right);
+      }
+    }
+  }
+}
+
+// 1 for true, 0 for false.
+func truth(value: bool) -> int64 {
+  if value {
+    return 1;
+  }
+  return 0;
+}
+
+func apply(op: &String, left: int64, right: int64) -> Result<int64, String> {
+  if op == "+" {
+    return Result::Ok(left + right);
+  }
+  if op == "-" {
+    return Result::Ok(left - right);
+  }
+  if op == "*" {
+    return Result::Ok(left * right);
+  }
+  if op == "/" || op == "%" {
+    if right == 0 {
+      return Result::Err("division by zero");
+    }
+    if op == "/" {
+      return Result::Ok(left / right);
+    }
+    return Result::Ok(left % right);
+  }
+  if op == "==" {
+    return Result::Ok(truth(left == right));
+  }
+  if op == "!=" {
+    return Result::Ok(truth(left != right));
+  }
+  if op == "<" {
+    return Result::Ok(truth(left < right));
+  }
+  if op == "<=" {
+    return Result::Ok(truth(left <= right));
+  }
+  if op == ">" {
+    return Result::Ok(truth(left > right));
+  }
+  if op == ">=" {
+    return Result::Ok(truth(left >= right));
+  }
+  if op == "&&" {
+    return Result::Ok(truth(left != 0 && right != 0));
+  }
+  if op == "||" {
+    return Result::Ok(truth(left != 0 || right != 0));
+  }
+  return Result::Err("unknown operator '" + op + "'");
+}
