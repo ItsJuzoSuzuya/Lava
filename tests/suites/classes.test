@@ -166,7 +166,7 @@ class Num {
   }
 
   pub func twice(&self) -> int32 {
-    return get() * 2;
+    return self.get() * 2;
   }
 }
 let n = Num { value: 21 };
@@ -185,13 +185,81 @@ class Secret {
   }
 
   pub func reveal(&self) -> int32 {
-    return hidden();
+    return self.hidden();
   }
 }
 let s = Secret { value: 7 };
 print(s.reveal());
 --- output
 7
+
+=== method called without receiver is an error
+class Secret {
+  value: int32 = value;
+
+  Constructor(value: int32);
+
+  func hidden(&self) -> int32 {
+    return self.value;
+  }
+
+  pub func reveal(&self) -> int32 {
+    return hidden();
+  }
+}
+let s = Secret { value: 7 };
+print(s.reveal());
+--- error
+'hidden' is a method of 'Secret', call it as `self.hidden(...)`
+
+=== static function called without class is an error
+class Secret {
+  func seven() -> int32 {
+    return 7;
+  }
+
+  pub func reveal(&self) -> int32 {
+    return seven();
+  }
+}
+--- error
+'seven' is a method of 'Secret', call it as `Secret::seven(...)`
+
+=== static function calling a method without receiver is an error
+class Secret {
+  value: int32 = value;
+
+  Constructor(value: int32);
+
+  func hidden(&self) -> int32 {
+    return self.value;
+  }
+
+  pub func make() -> int32 {
+    return hidden();
+  }
+}
+print(Secret::make());
+--- error
+'hidden' is a method of 'Secret', call it as `self.hidden(...)`
+
+=== free function wins over a method of the same name
+func value() -> int32 {
+  return 1;
+}
+class Box {
+  func value(&self) -> int32 {
+    return 2;
+  }
+
+  pub func get(&self) -> int32 {
+    return value() + self.value();
+  }
+}
+let b = Box();
+print(b.get());
+--- output
+3
 
 === two instances are independent
 class Box {

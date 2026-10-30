@@ -206,6 +206,7 @@ pub fn prelude_path() -> PathBuf {
 /// The modules of the standard library, imported like `import std::fs;`.
 /// They're built into the compiler like the prelude.
 pub const STD: &[(&str, &str)] = &[
+    ("iterable", include_str!("std/iterable.lv")),
     ("option", include_str!("std/option.lv")),
     ("result", include_str!("std/result.lv")),
     ("vector", include_str!("std/vector.lv")),

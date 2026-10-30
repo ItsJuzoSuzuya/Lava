@@ -12,6 +12,7 @@ import codegen_ctx;
 
 func main() -> int32 {
   let args = args().collect();
+
   match args[1] {
     "run" => {
       let main = main_file(args.at(2) ?? "main.lv");
@@ -50,7 +51,7 @@ func build_command(args: &Vector<String>) -> Result<ExitCode, String> {
     Ok(ExitCode::Success)
 }
 
-func build(main: &Path, output: Option<Path>) -> Result<String,String> {
+func build(main: &Path, output: Option<Path>) -> Result<Path,String> {
   let dir = main.parent();
   let name = main.file_name();
   let build_dir = dir.join("build");
@@ -64,7 +65,7 @@ func build(main: &Path, output: Option<Path>) -> Result<String,String> {
 
   let context = Context();
   mut graph = ModuleGraph(main);
-  mut program = Program(CodegenContext(context), &graph);
+  let program = Program(CodegenContext(context), &graph);
   let compiled = program.build(&object);
 
   Ok(executable)

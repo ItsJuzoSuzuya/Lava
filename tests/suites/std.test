@@ -8,7 +8,7 @@ abc
 
 === writing and reading files
 import std::fs;
-import std::string::{split};
+import std::string;
 match fs::write("note.txt", "first line\nsecond") {
   Result::Ok(count) => print(count),
   Result::Err(message) => print(message),
@@ -407,6 +407,34 @@ let i: IntType = t;
 --- error
 type 'Type' does not match 'IntType' in variable declaration
 
+=== a slice of a kind of extern type is a slice of its base
+extern type File;
+extern type LogFile: File;
+extern func fopen(path: String, mode: String) -> LogFile;
+extern func fclose(file: File) -> int32;
+func close_all(files: &[File]) -> int32 {
+  fclose(files[0]) + fclose(files[1])
+}
+func close_logs(logs: &[LogFile]) -> int32 {
+  close_all(logs)
+}
+let logs: LogFile[2] = {fopen("/dev/null", "w"), fopen("/dev/null", "w")};
+print(close_logs(&logs));
+--- output
+0
+
+=== a slice of an extern type isn't a slice of a kind of it
+extern type Type;
+extern type IntType: Type;
+func ints(types: &[IntType]) -> uint64 {
+  types.len()
+}
+func types(types: &[Type]) -> uint64 {
+  ints(types)
+}
+--- error
+type '&[Type]' does not match '&[IntType]' in function argument
+
 === an extern type can only be a kind of an extern type
 class Thing {}
 extern type IntType: Thing;
@@ -430,8 +458,8 @@ print(memcmp(&a, &b, 3) < 0);
 true
 
 === a Buffer passed to C stays usable
-extern func snprintf(into: &Buffer<uint8>, size: uint64, format: String, ..) -> int32;
-mut text = Buffer<uint8>(16);
+extern func snprintf(into: &Buffer<char>, size: uint64, format: String, ..) -> int32;
+mut text = Buffer<char>(16);
 let length = snprintf(text, 16, "%d", 1234);
 print(length);
 print(text.get(0) == '1');

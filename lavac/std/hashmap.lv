@@ -1,4 +1,4 @@
-
+import std::path::{Path};
 // --- HashMaps ---
 //
 // A draft moved here from the prelude, as it was there. It doesn't compile
@@ -8,15 +8,12 @@ pub trait Hash {
   pub func hash(&self) -> int32;
 }
 
-class Bucket<T> {
+pub class Bucket<T> {
   pairs: Vector<(int32, T)>;
 }
 
-pub class HashMap<Key: Hashable, Value> {
-  buckets: Bucket<V>[16] = Bucket[16];
-
-  Constructor {}
-
+pub class HashMap<Key: Hash, Value> {
+  buckets: Bucket<Value>[16] = Bucket[16];
 
   pub func set(key: Key, value: Value) {
     let hash: int32 = key.hash();
@@ -26,6 +23,12 @@ pub class HashMap<Key: Hashable, Value> {
 
 impl Hash for String {
   pub func hash(&self) -> int32 {
-    20;
+    return 20;
+  }
+}
+
+impl Hash for Path {
+  pub func hash(&self) -> int32 {
+    return 10;
   }
 }

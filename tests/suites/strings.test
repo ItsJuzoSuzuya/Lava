@@ -48,15 +48,15 @@ print(int_to_string(-42) + "|" + float_to_string(0.5) + "|" + char_to_string('x'
 -42|0.5|x
 
 === std::string helpers
-import std::string::{trim, starts_with, ends_with, contains, index_of};
+import std::string;
 let line = "  let x = 1;  ";
 print(line.trim());
 print(line.trim().starts_with("let"));
 print(line.trim().ends_with(";"));
 print(line.contains("x ="));
 print(line.contains("y"));
-print(index_of("abcabc", "ca").unwrap_or(99));
-print(index_of("abc", "z").is_none());
+print("abcabc".index_of("ca").unwrap_or(99));
+print("abc".index_of("z").is_none());
 --- output
 let x = 1;
 true
@@ -67,7 +67,7 @@ false
 true
 
 === split and join
-import std::string::{split, join};
+import std::string::{join};
 let parts = "a,b,,c".split(',');
 print(parts.len());
 print(parts.join("-"));
@@ -76,12 +76,12 @@ print(parts.join("-"));
 a-b--c
 
 === parse_int
-import std::string::{parse_int};
-print(parse_int("123").unwrap_or(0));
-print(parse_int("-7").unwrap_or(0));
-print(parse_int("").is_none());
-print(parse_int("-").is_none());
-print(parse_int("4x").is_none());
+import std::string;
+print("123".parse_int().unwrap_or(0));
+print("-7".parse_int().unwrap_or(0));
+print("".parse_int().is_none());
+print("-".parse_int().is_none());
+print("4x".parse_int().is_none());
 --- output
 123
 -7
@@ -110,7 +110,7 @@ print(int_to_string(9223372036854775807));
 9223372036854775807
 
 === copy_bytes is hidden from programs
-mut bytes = Buffer<uint8>(1);
+mut bytes = Buffer<char>(1);
 copy_bytes(bytes, 0, bytes, 0, 1);
 --- error
 unknown function 'copy_bytes'
@@ -124,7 +124,7 @@ print(word + "e"[0]);
 abcde
 
 === a string from a Buffer of bytes
-mut bytes = Buffer<uint8>(8);
+mut bytes = Buffer<char>(8);
 bytes.set(0, 'h');
 bytes.set(1, 'i');
 let text = String(bytes, 2);
@@ -135,7 +135,7 @@ hi
 2
 
 === a length beyond the Buffer stops the program
-let text = String(Buffer<uint8>(2), 5);
+let text = String(Buffer<char>(2), 5);
 print(text);
 --- output
 error: a String of 5 bytes doesn't fit into a Buffer of capacity 2
@@ -261,7 +261,7 @@ world!
 true
 
 === strip_prefix
-import std::string::{strip_prefix};
+import std::string;
 let text = "hello world";
 match text.strip_prefix("hello ") {
   Some(rest) => print(rest),
@@ -273,7 +273,7 @@ world
 true
 
 === a free function called on self in a method gets self
-import std::string::{starts_with};
+import std::string;
 class Word {
   pub text: String;
 

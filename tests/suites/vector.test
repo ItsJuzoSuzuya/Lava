@@ -405,3 +405,34 @@ v.push(1);
 print(v[3]);
 --- output
 error: index 3 is out of bounds for a Vector of length 1
+
+=== for loop over a vector
+import std::vector::{Vector};
+mut v = Vector<String>();
+v.push("a");
+v.push("b");
+for x in v {
+  for y in v {
+    print(x + y);
+  }
+}
+print(v.len());
+--- output
+aa
+ab
+ba
+bb
+2
+
+=== for loop over the iter of a vector
+import std::vector::{Vector};
+mut v = Vector<int32>();
+v.push(4);
+v.push(5);
+mut total = 0;
+for x in v.iter() {
+  total = total + x;
+}
+print(total);
+--- output
+9

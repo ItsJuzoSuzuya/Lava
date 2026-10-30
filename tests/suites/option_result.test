@@ -148,9 +148,9 @@ failed: division by zero
 === passing an error on explicitly
 import std::option::{Option};
 import std::result::{Result};
-import std::string::{parse_int};
+import std::string;
 func parse(text: String) -> Result<int64, String> {
-  match parse_int(text) {
+  match text.parse_int() {
     Option::Some(value) => return Result::Ok(value),
     Option::None => return Result::Err("not a number: " + text),
   }
@@ -274,7 +274,7 @@ print(eval(copy));
 14
 
 === an own Option works without importing std's
-import std::string::{parse_int};
+import std::string;
 enum Option<T> {
   Some => T,
   Nothing => int32
@@ -284,7 +284,7 @@ match a {
   Option::Some(v) => print(v),
   Option::Nothing => print(0),
 }
-print(parse_int("5").is_some());
+print("5".parse_int().is_some());
 --- output
 1
 true
@@ -369,9 +369,9 @@ anonymous
 
 === ?? on a Result
 import std::result::{Result};
-import std::string::{parse_int};
+import std::string;
 func parse(text: String) -> Result<int64, String> {
-  match parse_int(&text) {
+  match text.parse_int() {
     Some(n) => Ok(n),
     None => Err("not a number"),
   }

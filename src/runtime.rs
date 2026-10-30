@@ -22,13 +22,12 @@ pub struct Builtin {
     pub doc: &'static str,
 }
 
-const UINT8: Type = Type::Int { bits: 8, signed: false };
 const UINT64: Type = Type::Int { bits: 64, signed: false };
 
 /// Every function built into the language, besides `print`, `unique` and
 /// `Buffer`, which are handled on their own.
 pub fn builtins() -> Vec<Builtin> {
-    let bytes = || Type::Ref(Box::new(Type::Buffer(Box::new(UINT8))));
+    let bytes = || Type::Ref(Box::new(Type::Buffer(Box::new(Type::Char))));
     vec![
         Builtin { name: "copy_bytes",
             params: vec![("into", bytes()), ("at", UINT64), ("from", bytes()), ("start", UINT64), ("count", UINT64)], ret: Type::Void,
@@ -38,7 +37,7 @@ pub fn builtins() -> Vec<Builtin> {
             doc: "How `count` bytes of `a` from `a_start` and of `b` from `b_start` compare: below, at or above zero like C's `memcmp`. Stops the program if either is too short." },
         Builtin { name: "arg_count", params: vec![], ret: Type::INT32,
             doc: "How many command line arguments the program got, the program's own name included." },
-        Builtin { name: "arg_bytes", params: vec![("index", Type::INT32)], ret: Type::Buffer(Box::new(UINT8)),
+        Builtin { name: "arg_bytes", params: vec![("index", Type::INT32)], ret: Type::Buffer(Box::new(Type::Char)),
             doc: "The bytes of the command line argument at `index`, 0 is the program's name. Stops the program if it's out of range." },
     ]
 }

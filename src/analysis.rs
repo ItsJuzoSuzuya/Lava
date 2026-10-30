@@ -60,6 +60,9 @@ pub struct Def {
     pub end_line: usize,
     /// Last line a parameter or variable can be used on.
     pub scope_end: usize,
+    /// Whether this field is also a parameter of the constructor made from the
+    /// fields, so the field defaults after it can use it until `scope_end`.
+    pub ctor_param: bool,
     pub reads: usize,
     pub writes: usize,
     /// Changes through it that need it to be `mut`, like `p.x = 1` or `v.push(1)`.
@@ -557,7 +560,7 @@ impl Index {
                     self.declare(file, method, Some((enum_def, name.clone(), None)));
                 }
             }
-            DeclarationKind::Trait { name, methods } => {
+            DeclarationKind::Trait { name, methods, .. } => {
                 let span = self.name_after(file, &decl.span, name);
                 let mut def = Def::new(name, DefKind::Trait, Some(file), span);
                 def.public = public;
@@ -573,7 +576,7 @@ impl Index {
                     .collect();
                 self.defs[trait_def].signature = format!("{}trait {} {{\n{}\n}}", if public { "pub " } else { "" }, name, shown.join("\n"));
             }
-            DeclarationKind::Impl { trait_name, target, methods } => {
+            DeclarationKind::Impl { trait_name, target, methods, .. } => {
                 let owner = template_name(&target.owner_name().unwrap_or_else(|| show_type(target)));
                 let class = self.key(&format!("class:{}", owner)).or_else(|| self.key(&format!("enum:{}", owner)));
                 for method in methods {
@@ -733,12 +736,18 @@ impl Index {
     /// The parameters and variables usable at `line` of `file`.
     pub fn locals_at(&self, file: usize, line: usize) -> Vec<usize> {
         let function = self.function_at(file, line);
+        // Field defaults are outside of any body but run in the constructor, so they see its
+        // parameters. Those of the constructor made from the fields are the fields themselves
+        let ctor_param = |d: &Def| function.is_none() && match d.kind {
+            DefKind::Param => d.function.is_some_and(|f| self.defs[f].kind == DefKind::Constructor),
+            DefKind::Field => d.ctor_param,
+            _ => false,
+        };
         (0..self.defs.len())
             .filter(|&i| {
                 let d = &self.defs[i];
-                matches!(d.kind, DefKind::Param | DefKind::Variable)
+                (matches!(d.kind, DefKind::Param | DefKind::Variable) && d.function == function || ctor_param(d))
                     && d.file == Some(file)
-                    && d.function == function
                     && d.span.line <= line && line <= d.scope_end
             })
             .collect()
@@ -785,6 +794,7 @@ impl Def {
             has_body: false,
             end_line: span.line,
             scope_end: usize::MAX,
+            ctor_param: false,
             reads: 0,
             writes: 0,
             mutations: 0,
@@ -800,7 +810,7 @@ struct Walker<'a> {
     file: usize,
     /// Parameters and variables by name, the innermost scope last.
     scopes: Vec<HashMap<String, usize>>,
-    /// The class or type whose methods are walked, for `self` and calls without receiver.
+    /// The class or type whose methods are walked, for `self`.
     class: Option<String>,
     /// The function whose body is walked.
     function: Option<usize>,
@@ -976,6 +986,13 @@ impl<'a> Walker<'a> {
                     let end = self.block_end(span).max(span.line);
                     self.params(params, end);
                     self.function = outer_function;
+                    // The constructor made from the fields declares its parameters where the fields are
+                    for param in params {
+                        if let Some(id) = self.lookup(&param.name).filter(|&id| self.index.defs[id].kind == DefKind::Field) {
+                            self.index.defs[id].ctor_param = true;
+                            self.index.defs[id].scope_end = end;
+                        }
+                    }
                 }
                 for field in fields {
                     self.type_ref(&field.ty, &field.ty_span);
@@ -1007,7 +1024,7 @@ impl<'a> Walker<'a> {
                     self.decl(method);
                 }
             }
-            DeclarationKind::Impl { trait_name, target, methods } => {
+            DeclarationKind::Impl { trait_name, target, methods, .. } => {
                 let file = self.file;
                 if let Some(trait_def) = self.index.key(&format!("trait:{}", trait_name)) {
                     if let Some(span) = self.index.files[file].word_after(&decl.span, trait_name) {
@@ -1382,11 +1399,7 @@ impl<'a> Walker<'a> {
                 return Some(def);
             }
         }
-        let owner = match receiver {
-            Some(receiver) => self.type_name_of(receiver),
-            None => self.class.clone(),
-        };
-        if let Some(owner) = owner.map(|o| template_name(&o)) {
+        if let Some(owner) = receiver.and_then(|r| self.type_name_of(r)).map(|o| template_name(&o)) {
             if let Some(def) = self.index.key(&format!("fn:{}_{}", owner, name)) {
                 return Some(def);
             }

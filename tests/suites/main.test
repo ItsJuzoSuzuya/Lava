@@ -9,7 +9,7 @@ main
 
 === arguments one after the other
 import std::env;
-import std::string::{ends_with};
+import std::string;
 func main() {
   mut arguments = env::args();
   print(arguments.len());
@@ -28,7 +28,7 @@ true
 
 === collecting the arguments into a list
 import std::env;
-import std::string::{ends_with};
+import std::string;
 let all = env::args().collect();
 print(all.len());
 print(all[0].ends_with("main"));

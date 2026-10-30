@@ -60,8 +60,8 @@ class Counter {
   }
 
   pub func bump_twice(mut &self) {
-    bump();
-    bump();
+    self.bump();
+    self.bump();
   }
 }
 mut c = Counter { count: 0 };
@@ -124,7 +124,7 @@ class Counter {
   }
 
   pub func sneaky(&self) {
-    bump();
+    self.bump();
   }
 }
 --- error

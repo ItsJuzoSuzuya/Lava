@@ -18,12 +18,12 @@
 //
 // More about strings, like `split`, `trim` and `int_to_string`, is in `std::string`.
 pub class String {
-  bytes: Shared<Buffer<byte>> = shared(bytes);
+  bytes: Shared<Buffer<char>> = shared(bytes);
   start: uint64 = 0;
   length: uint64 = length;
 
   // A string of the first `length` bytes of `bytes`.
-  Constructor(bytes: Buffer<byte>, length: uint64) {
+  Constructor(bytes: Buffer<char>, length: uint64) {
     if self.length > self.bytes.capacity() {
       panic("a String of " + decimal(self.length) + " bytes doesn't fit into a Buffer of capacity "
         + decimal(self.bytes.capacity()));
@@ -37,15 +37,15 @@ pub class String {
 
   // The char at `index`, `text[index]` is the same. Stops the program if it's out of bounds.
   pub func char_at(&self, index: uint64) -> char {
-    return self.byte(index) as char;
-  }
-
-  // The byte at `index`. Stops the program if it's out of bounds.
-  pub func byte(&self, index: uint64) -> byte {
     if index >= self.length {
       panic("index " + decimal(index) + " is out of bounds for a String of length " + decimal(self.length));
     }
     return self.bytes.get(self.start + index);
+  }
+
+  // The byte at `index` as a number. Stops the program if it's out of bounds.
+  pub func byte(&self, index: uint64) -> byte {
+    return self.char_at(index) as byte;
   }
 
   // The bytes from `start` up to, but not including, `end`. Shares this
@@ -64,7 +64,7 @@ pub class String {
   // A new string of this one followed by `other`, `a + b` is the same.
   pub func concat(&self, other: &String) -> String {
     let length = self.length + other.length;
-    mut bytes = Buffer<uint8>(length);
+    mut bytes = Buffer<char>(length);
     copy_bytes(bytes, 0, self.bytes, self.start, self.length);
     copy_bytes(bytes, self.length, other.bytes, other.start, other.length);
     return String(bytes, length);
@@ -73,9 +73,9 @@ pub class String {
   // A new string of this one followed by `c`, `text + c` is the same.
   pub func concat_char(&self, c: char) -> String {
     let length = self.length + 1;
-    mut bytes = Buffer<uint8>(length);
+    mut bytes = Buffer<char>(length);
     copy_bytes(bytes, 0, self.bytes, self.start, self.length);
-    bytes.set(self.length, c as uint8);
+    bytes.set(self.length, c);
     return String(bytes, length);
   }
 
@@ -125,11 +125,11 @@ pub func panic(message: String) {
 
 // `value` in decimal, for the messages above. `std::string` has `int_to_string`.
 func decimal(value: uint64) -> String {
-  mut digits = Buffer<uint8>(24);
+  mut digits = Buffer<char>(24);
   let length = c_snprintf(digits, digits.capacity(), "%llu", value);
   return String(digits, length as uint64);
 }
 
 extern "printf" func c_printf(format: String, ..) -> int32;
-extern "snprintf" func c_snprintf(into: &Buffer<uint8>, size: uint64, format: String, ..) -> int32;
+extern "snprintf" func c_snprintf(into: &Buffer<char>, size: uint64, format: String, ..) -> int32;
 extern "exit" func c_exit(code: int32);

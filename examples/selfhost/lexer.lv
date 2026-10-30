@@ -6,14 +6,14 @@
 import std::option::{Option};
 import std::result::{Result};
 import std::vector::{Vector};
-import std::string::{is_digit, is_alpha, is_alphanumeric, is_whitespace, split, parse_int, char_to_string, int_to_string};
+import std::string::{is_digit, is_alpha, is_alphanumeric, is_whitespace, char_to_string, int_to_string};
 
 pub enum TokenKind {
   Ident => String,
   Keyword => String,
   Int => int64,
   Str => String,
-  Char => uint8,
+  Char => char,
   Symbol => String,
   End
 }
@@ -33,7 +33,7 @@ pub func describe(token: &Token) -> String {
     TokenKind::Keyword(word) => return "keyword '" + word + "'",
     TokenKind::Int(value) => return "number " + int_to_string(value),
     TokenKind::Str(text) => return "string \"" + text + "\"",
-    TokenKind::Char(byte) => return "character '" + char_to_string(byte as char) + "'",
+    TokenKind::Char(c) => return "character '" + char_to_string(c) + "'",
     TokenKind::Symbol(symbol) => return "'" + symbol + "'",
     TokenKind::End => return "end of file",
   }
@@ -67,11 +67,11 @@ func is_pair(pair: &String) -> bool {
     || pair == ">=" || pair == "=>" || pair == "&&" || pair == "||";
 }
 
-func is_single(byte: uint8) -> bool {
+func is_single(c: char) -> bool {
   let symbols = "(){};,:=+-*/.&<>!%";
   mut i: uint64 = 0;
   while i < symbols.len() {
-    if symbols.byte(i) == byte {
+    if symbols.char_at(i) == c {
       return true;
     }
     i = i + 1;
@@ -79,9 +79,9 @@ func is_single(byte: uint8) -> bool {
   return false;
 }
 
-// The byte an escape like `\n` stands for, given the byte after the `\`.
-func escaped(byte: uint8) -> Option<uint8> {
-  match byte {
+// The char an escape like `\n` stands for, given the char after the `\`.
+func escaped(c: char) -> Option<char> {
+  match c {
     'n' => return Option::Some('\n'),
     't' => return Option::Some('\t'),
     'r' => return Option::Some('\r'),
@@ -127,7 +127,7 @@ pub class Lexer {
       while !self.at_end() && is_digit(self.current()) {
         self.advance();
       }
-      match parse_int(self.source.slice(start, self.pos)) {
+      match self.source.slice(start, self.pos).parse_int() {
         Option::Some(value) => return Result::Ok(Token(TokenKind::Int(value), line, col)),
         Option::None => return Result::Err(position(line, col) + "number doesn't fit into int64"),
       }
@@ -143,11 +143,11 @@ pub class Lexer {
             break;
           }
           match escaped(self.current()) {
-            Option::Some(c) => text = text + char_to_string(c as char),
+            Option::Some(c) => text = text + c,
             Option::None => return Result::Err(position(self.line, self.col) + "unknown escape"),
           }
         } else {
-          text = text + char_to_string(self.current() as char);
+          text = text + self.current();
         }
         self.advance();
       }
@@ -192,24 +192,24 @@ pub class Lexer {
     }
     if is_single(byte) {
       self.advance();
-      return Result::Ok(Token(TokenKind::Symbol(char_to_string(byte as char)), line, col));
+      return Result::Ok(Token(TokenKind::Symbol(char_to_string(byte)), line, col));
     }
-    return Result::Err(position(line, col) + "unexpected character '" + char_to_string(byte as char) + "'");
+    return Result::Err(position(line, col) + "unexpected character '" + char_to_string(byte) + "'");
   }
 
   func at_end(&self) -> bool {
     return self.pos >= self.source.len();
   }
 
-  func current(&self) -> uint8 {
-    return self.source.byte(self.pos);
+  func current(&self) -> char {
+    return self.source.char_at(self.pos);
   }
 
-  func following(&self) -> uint8 {
+  func following(&self) -> char {
     if self.pos + 1 >= self.source.len() {
-      return 0;
+      return '\0';
     }
-    return self.source.byte(self.pos + 1);
+    return self.source.char_at(self.pos + 1);
   }
 
   func advance(mut &self) {

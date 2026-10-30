@@ -344,6 +344,29 @@ fn completion_and_signature_help() {
 }
 
 #[test]
+fn completion_in_field_defaults() {
+    let (mut client, dir, main, _) = started("field_defaults");
+
+    let labels = |items: &Value| -> Vec<String> {
+        items.as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect()
+    };
+
+    // Field defaults run in the constructor, so they see its parameters
+    let source = format!("{}class Holder {{\n  pub point: &Point;\n  pub y: int32 = point.double();\n}}\n", MAIN);
+    client.change(&main, 2, &source);
+    let line = source.lines().count() as u64 - 2;
+    let everything = labels(&client.result("textDocument/completion", at(&main, line, 17)));
+    assert!(everything.contains(&"point".to_string()), "{:?}", everything);
+
+    let typed = source.replace("point.double();", "point.");
+    client.change(&main, 3, &typed);
+    let members = labels(&client.result("textDocument/completion", at(&main, line, 23)));
+    assert!(members.contains(&"double".to_string()), "{:?}", members);
+
+    stop(client, dir);
+}
+
+#[test]
 fn completion_imports_what_it_suggests() {
     let (mut client, dir, main, _) = started("auto_import");
     fs::write(dir.join("shapes.lv"), "pub func area(w: int32, h: int32) -> int32 {\n  return w * h;\n}\nfunc hidden() {}\n").unwrap();
@@ -397,8 +420,20 @@ fn completion_imports_what_it_suggests() {
     assert_eq!(read["insertText"], "read($0)");
     assert!(import_of(&read).is_none());
 
+    // After `text.` the methods std::string adds to `String`, which import the module
+    let with_text = format!("{}let text = \"a,b\";\n", MAIN);
+    client.change(&main, 6, &with_text);
+    client.diagnostics(&main);
+    client.change(&main, 7, &format!("{}text.", with_text));
+    let items = client.result("textDocument/completion", at(&main, 22, 5));
+    let split = find(&items, "split").expect("split of std::string is offered after `text.`");
+    assert_eq!(split["insertText"], "split($0)");
+    assert_eq!(import_of(&split).as_deref(), Some("import std::string;\n"));
+    assert_eq!(split["detail"], "split(separator: char) -> Vector<String>");
+    assert!(find(&items, "read").is_none(), "fs::read doesn't take a String first");
+
     // `import std::` lists the modules
-    client.change(&main, 6, &format!("import std::\n{}", MAIN));
+    client.change(&main, 8, &format!("import std::\n{}", MAIN));
     let modules = client.result("textDocument/completion", at(&main, 0, 12));
     assert!(find(&modules, "fs").is_some() && find(&modules, "math").is_some(), "{}", modules);
 
@@ -429,6 +464,22 @@ fn symbols_and_quick_fixes() {
     assert_eq!(edit["newText"], "_");
     assert_eq!(edit["range"]["start"], json!({ "line": 20, "character": 4 }));
 
+    // A method called without receiver gets `self.` put in front
+    let quad = "    return self.x * 2;\n  }\n\n  pub func quad(&self) -> int32 {\n    return double() * 2;\n  }\n";
+    client.change(&main, 2, &MAIN.replacen("    return self.x * 2;\n  }\n", quad, 1));
+    let diagnostics = client.diagnostics(&main);
+    assert!(diagnostics.iter().any(|d| d["severity"] == 1), "{:?}", diagnostics);
+    let actions = client.result("textDocument/codeAction", json!({
+        "textDocument": { "uri": main },
+        "range": { "start": { "line": 12, "character": 11 }, "end": { "line": 12, "character": 11 } },
+        "context": { "diagnostics": [] },
+    }));
+    let action = &actions[0];
+    assert_eq!(action["title"], "Call it as `self.double(...)`", "{}", actions);
+    let edit = &action["edit"]["changes"][&main][0];
+    assert_eq!(edit["newText"], "self.");
+    assert_eq!(edit["range"]["start"], json!({ "line": 12, "character": 11 }));
+
     stop(client, dir);
 }
 
@@ -437,5 +488,30 @@ fn unknown_requests_get_an_error() {
     let (mut client, dir, _, _) = started("unknown");
     let response = client.request("textDocument/somethingNew", json!({}));
     assert_eq!(response["error"]["code"], -32601);
+    stop(client, dir);
+}
+
+#[test]
+fn impl_blocks_in_symbols_and_completion() {
+    let (mut client, dir, main, _) = started("impl_blocks");
+    let source = format!("{}impl String {{\n  pub func shout(&self) -> String {{\n    return self.concat(\"!\");\n  }}\n}}\nlet s = \"hi\";\nprint(s.shout());\n", MAIN);
+    client.change(&main, 2, &source);
+    assert!(client.diagnostics(&main).iter().all(|d| d["severity"] != 1));
+
+    // The block is listed as `impl String`, not as the trait it becomes
+    let symbols = client.result("textDocument/documentSymbol", json!({ "textDocument": { "uri": main } }));
+    let block = symbols.as_array().unwrap().iter().find(|s| s["name"] == "impl String").expect("impl block listed");
+    assert_eq!(block["detail"], "impl String {");
+    assert_eq!(block["children"][0]["name"], "shout");
+    assert_eq!(block["children"][0]["detail"], "pub func String.shout(&self) -> String");
+
+    let line = source.lines().count() as u64;
+    let hover = client.result("textDocument/hover", at(&main, line - 1, 9));
+    assert!(hover["contents"]["value"].as_str().unwrap().contains("pub func String.shout(&self) -> String"), "{}", hover);
+
+    client.change(&main, 3, &format!("{}s.", source));
+    let items = client.result("textDocument/completion", at(&main, line, 2));
+    assert!(items.as_array().unwrap().iter().any(|i| i["label"] == "shout"), "{}", items);
+
     stop(client, dir);
 }

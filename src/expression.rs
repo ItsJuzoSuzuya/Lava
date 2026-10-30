@@ -256,7 +256,7 @@ pub enum ExprKind {
         type_args: Vec<Type>,
         params: Vec<Expr>,
         /// The object a method is called on, like `a.b` in `a.b.get()`. `None`
-        /// for free functions and for method calls without receiver inside a method.
+        /// for free functions and static functions like `Block::create()`.
         receiver: Option<Box<Expr>>,
         mangled: Option<String>,
     },
@@ -677,16 +677,9 @@ impl Expr {
 
                 // A method gets the address of its receiver as `self`
                 let target_has_self = ctx.func_has_self(mangled);
-                let parent_sym = if !target_has_self {
-                    None
-                } else {
-                    match receiver {
-                        Some(receiver) => Some(object_address(ctx, receiver, span)),
-                        // Inside a method, a call without receiver goes to `self`. Checked by
-                        // scope, since instances of generic methods are generated outside their class
-                        None if ctx.scope.contains_key("self") => Some(variable_address(ctx, "self", span)),
-                        None => None,
-                    }
+                let parent_sym = match receiver {
+                    Some(receiver) if target_has_self => Some(object_address(ctx, receiver, span)),
+                    _ => None,
                 };
                 // Put all Params into the function (parent is always first parent)
                 let mut llvm_params: Vec<BasicMetadataValueEnum> = match parent_sym {

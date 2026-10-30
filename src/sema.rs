@@ -134,7 +134,7 @@ impl SemanticError {
             SemanticError::EmptyArrayType { span } =>
                 (span.line, span.col, "the type of an empty array can't be inferred, give it like `let a: int32[0] = {};`".to_string()),
             SemanticError::ExternType { ty, span } =>
-                (span.line, span.col, format!("'{}' can't be passed to a C function, use a number, String, extern type, or a slice or &Buffer of numbers", ty)),
+                (span.line, span.col, format!("'{}' can't be passed to a C function, use a number, char, String, extern type, or a slice or &Buffer of numbers or chars", ty)),
             SemanticError::ExternReturnType { ty, span } =>
                 (span.line, span.col, format!("a C function can't return '{}', only a number, String, extern type or nothing", ty)),
             SemanticError::ModuleNotImported { module, span } =>
@@ -223,6 +223,18 @@ struct PendingInstance {
     imports: Imports,
 }
 
+/// The type an impl method returns for a trait method returning `impl Trait`.
+/// Whether it implements the trait is checked at the end of the module, when
+/// all impls are known, see [`Sema::check_opaque_returns`].
+struct OpaqueReturn {
+    ty: Type,
+    /// Like `Iterator<int32>`.
+    trait_name: String,
+    method: String,
+    span: Span,
+    source: String,
+}
+
 /// Who owns the value a match looks at, so its bindings know whether they
 /// can be moved out of.
 #[derive(Clone)]
@@ -241,8 +253,22 @@ pub struct Sema {
     functions: HashMap<String, (Vec<Param>, Type, Visibility, String)>,
     classes: HashMap<String, Vec<Field>>,
     enums: HashMap<String, Vec<(String, u32, Type)>>,
-    /// Methods of every trait, by trait name.
+    /// Methods of every trait, by trait name. An instance of a generic trait is
+    /// named like `Iterator<int32>`.
     traits: HashMap<String, Vec<Declaration>>,
+    /// Generic traits like `Iterator<T>` by name, templates for their instances.
+    generic_traits: HashMap<String, GenericDecl>,
+    /// Type arguments of every instance of a generic trait by instance name. The
+    /// default methods copied into an impl are checked with them.
+    trait_substs: HashMap<String, HashMap<String, Type>>,
+    /// Generic impls like `impl<T> Iterator<T> for VectorIter<T>`, applied to
+    /// every instance of their target.
+    generic_impls: Vec<GenericDecl>,
+    /// Which generic impls were applied to which instance, by index into
+    /// [`Sema::generic_impls`] and instance name.
+    applied_impls: HashSet<(usize, String)>,
+    /// Types returned for `impl Trait` that still have to be checked.
+    opaque_returns: Vec<OpaqueReturn>,
     /// Names of the traits each type implements, by type name.
     impls: HashMap<String, Vec<String>>,
     current_class: Option<String>,
@@ -340,6 +366,8 @@ impl Sema {
         let mut sema = Self {
             scope: HashMap::new(), functions: HashMap::new(), classes: HashMap::new(), enums: HashMap::new(),
             traits: HashMap::new(), impls: HashMap::new(), current_class: None, current_trait: None,
+            generic_traits: HashMap::new(), trait_substs: HashMap::new(), generic_impls: Vec::new(), applied_impls: HashSet::new(),
+            opaque_returns: Vec::new(),
             generic_functions: HashMap::new(), generic_types: HashMap::new(), type_instances: HashMap::new(),
             pending_instances: Vec::new(), instances: Vec::new(), type_subst: HashMap::new(), expected_type: None,
             moved: HashSet::new(), borrowed: HashSet::new(), binding_roots: HashMap::new(),
@@ -946,7 +974,8 @@ impl Sema {
         for (qualified, module, span) in self.imported_items.clone() {
             let exists = self.functions.contains_key(&qualified) || self.generic_functions.contains_key(&qualified)
                 || self.classes.contains_key(&qualified) || self.enums.contains_key(&qualified)
-                || self.generic_types.contains_key(&qualified) || self.traits.contains_key(&qualified);
+                || self.generic_types.contains_key(&qualified) || self.traits.contains_key(&qualified)
+                || self.generic_traits.contains_key(&qualified);
             if !exists {
                 let item = qualified.split_once("::").map_or(qualified.clone(), |(_, item)| item.to_string());
                 self.recover(|s| SemanticError::UnknownImport { item, module, span }.throw(&s.source));
@@ -958,6 +987,7 @@ impl Sema {
         while let Some(pending) = self.pending_instances.pop() {
             self.recover(|s| s.check_type_instance(pending));
         }
+        self.check_opaque_returns();
 
         // Literals that never got a type from their context stay int32
         let first = self.oversized_literals.drain()
@@ -1037,13 +1067,25 @@ impl Sema {
         }
         // All traits are known before any impl is checked against them
         for stmt in ast.iter() {
-            if let StmtKind::Declaration(Declaration { kind: DeclarationKind::Trait { name, methods }, .. }) = &stmt.kind {
+            let StmtKind::Declaration(decl) = &stmt.kind else { continue };
+            let DeclarationKind::Trait { name, type_params, methods } = &decl.kind else { continue };
+            if type_params.is_empty() {
                 self.traits.insert(name.clone(), methods.clone());
+            } else {
+                self.generic_traits.insert(name.clone(), self.template(decl));
+            }
+        }
+        // Generic impls apply to the instances of their target, also to those created already
+        for stmt in ast.iter() {
+            if let StmtKind::Declaration(decl) = &stmt.kind {
+                if matches!(&decl.kind, DeclarationKind::Impl { type_params, .. } if !type_params.is_empty()) {
+                    self.recover(|s| s.register_generic_impl(decl));
+                }
             }
         }
         for stmt in ast.iter_mut() {
             if let StmtKind::Declaration(decl) = &mut stmt.kind {
-                if matches!(decl.kind, DeclarationKind::Impl { .. }) {
+                if matches!(&decl.kind, DeclarationKind::Impl { type_params, .. } if type_params.is_empty()) {
                     self.recover(|s| s.complete_impl(decl));
                 }
             }
@@ -1114,10 +1156,12 @@ impl Sema {
     /// missing method without default body.
     fn complete_impl(&mut self, decl: &mut Declaration) {
         let span = decl.span.clone();
-        let DeclarationKind::Impl { trait_name, target, methods } = &mut decl.kind else { return };
+        let DeclarationKind::Impl { trait_name, trait_args, target, methods, .. } = &mut decl.kind else { return };
 
-        let trait_methods = self.traits.get(trait_name).cloned()
-            .unwrap_or_else(|| SemanticError::UnknownTrait { name: trait_name.clone(), span: span.clone() }.throw(&self.source));
+        // `impl Iterator<int32> for ...` implements the instance `Iterator<int32>`
+        *trait_name = self.trait_instance(trait_name, trait_args, &span);
+        trait_args.clear();
+        let trait_methods = self.traits[trait_name.as_str()].clone();
         let type_name = target.owner_name()
             .unwrap_or_else(|| SemanticError::InvalidImplTarget { ty: target.clone(), span: span.clone() }.throw(&self.source));
         if self.impls.get(&type_name).is_some_and(|traits| traits.contains(trait_name)) {
@@ -1142,7 +1186,30 @@ impl Sema {
                     trait_name: trait_name.clone(),
                     span: method.span.clone(),
                 }.throw(&self.source));
-            if !same_signature(&trait_method.kind, &method.kind) {
+            // `-> impl Iterator<T>` in the trait takes any type implementing that trait
+            let mut expected = trait_method.kind.clone();
+            if let (
+                DeclarationKind::Function { return_type: Some(Type::Opaque(bound)), .. },
+                DeclarationKind::Function { return_type: Some(returned), .. },
+            ) = (&trait_method.kind, &method.kind) {
+                let (bound_name, bound_args) = match bound.as_ref() {
+                    Type::Generic { name, args } => (name.clone(), args.clone()),
+                    Type::Class(name) | Type::Object(name) => (name.clone(), vec![]),
+                    other => diagnostic::throw(format!("'impl' needs a trait, '{}' isn't one", other), Some(trait_method.span.clone()), &self.source),
+                };
+                let bound_trait = self.trait_instance(&bound_name, &bound_args, &trait_method.span);
+                self.opaque_returns.push(OpaqueReturn {
+                    ty: returned.clone(),
+                    trait_name: bound_trait,
+                    method: method_name.to_string(),
+                    span: method.span.clone(),
+                    source: self.source.clone(),
+                });
+                if let DeclarationKind::Function { return_type, .. } = &mut expected {
+                    *return_type = Some(returned.clone());
+                }
+            }
+            if !same_signature(&expected, &method.kind) {
                 SemanticError::TraitMethodMismatch {
                     method: method_name.to_string(),
                     trait_name: trait_name.clone(),
@@ -1180,6 +1247,177 @@ impl Sema {
         }
 
         self.impls.entry(type_name).or_default().push(trait_name.clone());
+    }
+
+    /// Checks that every type an impl method returns for `impl Trait` implements
+    /// that trait. Done once all impls of the module are known, so the order
+    /// of the impls doesn't matter.
+    fn check_opaque_returns(&mut self) {
+        for opaque in std::mem::take(&mut self.opaque_returns) {
+            if !self.implements(&opaque.ty, &opaque.trait_name) {
+                let ty = opaque.ty.owner_name().unwrap_or_else(|| opaque.ty.to_string());
+                self.recover(|_| diagnostic::throw(
+                    format!("'{}' returns '{}', which doesn't implement '{}'", opaque.method, ty, opaque.trait_name),
+                    Some(opaque.span.clone()),
+                    &opaque.source,
+                ));
+            }
+        }
+    }
+
+    /// `decl` as a template for its instances, checked later in the current module.
+    fn template(&self, decl: &Declaration) -> GenericDecl {
+        GenericDecl {
+            decl: decl.clone(),
+            module: self.module.clone(),
+            source: self.source.clone(),
+            imports: self.imports(),
+            class: None,
+            outer_subst: HashMap::new(),
+        }
+    }
+
+    /// The name of the trait `name` with the type arguments `args`. For a
+    /// generic trait that's its instance like `Iterator<int32>`, created the
+    /// first time with the type parameters replaced in its method signatures.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the trait is unknown, or the number of type arguments is wrong.
+    fn trait_instance(&mut self, name: &str, args: &[Type], span: &Span) -> String {
+        let known = |s: &Self, name: &str| s.traits.contains_key(name) || s.generic_traits.contains_key(name);
+        let name = if known(self, name) { name.to_string() } else { self.resolve_name(name, span) };
+        let Some(generic) = self.generic_traits.get(&name).cloned() else {
+            if !self.traits.contains_key(&name) {
+                SemanticError::UnknownTrait { name, span: span.clone() }.throw(&self.source);
+            }
+            if !args.is_empty() {
+                SemanticError::WrongTypeArgCount { function: name, expected: 0, got: args.len(), span: span.clone() }.throw(&self.source);
+            }
+            return name;
+        };
+        let DeclarationKind::Trait { type_params, methods, .. } = &generic.decl.kind else {
+            unreachable!("generic traits are trait declarations");
+        };
+        if args.len() != type_params.len() {
+            SemanticError::WrongTypeArgCount { function: name, expected: type_params.len(), got: args.len(), span: span.clone() }
+                .throw(&self.source);
+        }
+
+        let args: Vec<Type> = args.iter().map(|arg| self.canonicalize_type(arg, span)).collect();
+        let subst: HashMap<String, Type> = type_params.iter().map(|p| p.name.clone()).zip(args).collect();
+        let instance = instance_name(&name, type_params, &subst);
+        if self.traits.contains_key(&instance) {
+            return instance;
+        }
+        let mut methods = methods.clone();
+        self.in_template_context(subst.clone(), &generic, |sema| {
+            for method in methods.iter_mut() {
+                sema.canonicalize_decl(method);
+            }
+        });
+        self.traits.insert(instance.clone(), methods);
+        self.trait_substs.insert(instance.clone(), subst);
+        instance
+    }
+
+    /// Registers the generic impl `decl`, like `impl<T> Iterator<T> for VectorIter<T>`,
+    /// and applies it to the instances of its target that exist already.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the target isn't an instance of a generic class or enum.
+    fn register_generic_impl(&mut self, decl: &Declaration) {
+        let mut decl = decl.clone();
+        let DeclarationKind::Impl { target, .. } = &mut decl.kind else { return };
+        // The target is written with the type parameters, like `VectorIter<T>`
+        let Type::Generic { name, .. } = target else {
+            diagnostic::throw(format!("a generic impl needs a generic target like `Box<T>`, '{}' isn't one", target), Some(decl.span.clone()), &self.source)
+        };
+        if !self.generic_types.contains_key(name.as_str()) {
+            *name = self.resolve_name(name, &decl.span);
+        }
+        if !self.generic_types.contains_key(name.as_str()) {
+            SemanticError::UnknownType { name: name.clone(), span: decl.span.clone() }.throw(&self.source);
+        }
+        let template = name.clone();
+
+        let index = self.generic_impls.len();
+        self.generic_impls.push(self.template(&decl));
+        let existing: Vec<String> = self.type_instances.iter()
+            .filter(|(_, (of, _))| *of == template)
+            .map(|(instance, _)| instance.clone())
+            .collect();
+        for instance in existing {
+            self.apply_generic_impl(index, &instance);
+        }
+    }
+
+    /// Applies every generic impl of the template of `instance` to it.
+    fn apply_generic_impls(&mut self, instance: &str) {
+        let Some((template, _)) = self.type_instances.get(instance).cloned() else { return };
+        let matching: Vec<usize> = self.generic_impls.iter().enumerate()
+            .filter(|(_, generic)| matches!(&generic.decl.kind,
+                DeclarationKind::Impl { target: Type::Generic { name, .. }, .. } if *name == template))
+            .map(|(index, _)| index)
+            .collect();
+        for index in matching {
+            self.apply_generic_impl(index, instance);
+        }
+    }
+
+    /// Creates the impl of the generic impl at `index` for the class or enum
+    /// `instance`, like `impl Iterator<int32> for VectorIter<int32>`, declares
+    /// its methods and checks its bodies at the end of the module.
+    ///
+    /// An impl whose type parameters have bounds the instance's type arguments
+    /// don't meet doesn't apply, so `impl<T: Show> Show for Box<T>` only gives
+    /// `Box<int32>` a `show` if `int32` has one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a type parameter of the impl doesn't appear in its target,
+    /// or the impl doesn't match its trait.
+    fn apply_generic_impl(&mut self, index: usize, instance: &str) {
+        if !self.applied_impls.insert((index, instance.to_string())) {
+            return;
+        }
+        let generic = self.generic_impls[index].clone();
+        let mut decl = generic.decl.clone();
+        let DeclarationKind::Impl { type_params, target, .. } = &mut decl.kind else { return };
+
+        // `VectorIter<T>` against the instance `VectorIter<int32>` gives `T = int32`
+        let instance_ty = if self.enums.contains_key(instance) { Type::Enum(instance.to_string()) } else { Type::Class(instance.to_string()) };
+        let mut subst = HashMap::new();
+        self.bind_type_params(target, &instance_ty, &mut subst);
+        for param in type_params.iter() {
+            let Some(ty) = subst.get(&param.name) else {
+                diagnostic::throw(
+                    format!("type parameter '{}' of the impl has to appear in its target", param.name),
+                    Some(decl.span.clone()),
+                    &generic.source,
+                )
+            };
+            if !param.bounds.iter().all(|bound| self.implements(ty, bound)) {
+                return;
+            }
+        }
+        type_params.clear();
+
+        let span = decl.span.clone();
+        self.in_template_context(subst.clone(), &generic, |sema| {
+            sema.canonicalize_decl(&mut decl);
+            sema.complete_impl(&mut decl);
+            sema.declare_decl(&mut decl);
+            sema.validate_decl_types(&decl, &span);
+        });
+        self.pending_instances.push(PendingInstance {
+            decl,
+            subst,
+            module: generic.module,
+            source: generic.source,
+            imports: generic.imports,
+        });
     }
 
     fn canonicalize_type(&mut self, ty: &Type, span: &Span) -> Type {
@@ -1246,6 +1484,14 @@ impl Sema {
             Type::Array(element, len) => Type::Array(Box::new(self.canonicalize_type(element, span)), *len),
             Type::Slice(element) => Type::Slice(Box::new(self.canonicalize_type(element, span))),
             Type::Tuple(items) => Type::Tuple(items.iter().map(|item| self.canonicalize_type(item, span)).collect()),
+            // The trait of `impl Iterator<T>` stays a name, only its type arguments are types
+            Type::Opaque(bound) => Type::Opaque(Box::new(match bound.as_ref() {
+                Type::Generic { name, args } => Type::Generic {
+                    name: name.clone(),
+                    args: args.iter().map(|arg| self.canonicalize_type(arg, span)).collect(),
+                },
+                other => other.clone(),
+            })),
             other => other.clone(),
         }
     }
@@ -1295,6 +1541,10 @@ impl Sema {
                     *rt = self.canonicalize_or_unknown(rt, &span);
                 }
             }
+            // Generic traits and impls are canonicalized per instance, see
+            // `trait_instance` and `apply_generic_impl`
+            DeclarationKind::Trait { type_params, .. } | DeclarationKind::Impl { type_params, .. }
+                if !type_params.is_empty() => {}
             DeclarationKind::Trait { methods, .. } => {
                 for m in methods.iter_mut() {
                     self.canonicalize_decl(m);
@@ -1383,6 +1633,7 @@ impl Sema {
             }
             // Trait methods are checked through the impls they get copied into
             DeclarationKind::Trait { .. } | DeclarationKind::Extern(ExternItem::Link(_)) => {}
+            DeclarationKind::Impl { type_params, .. } if !type_params.is_empty() => {}
             DeclarationKind::Impl { methods, .. } => {
                 for m in methods {
                     self.validate_decl_types(m, span);
@@ -1440,10 +1691,11 @@ impl Sema {
                 // Only values C has too can be passed, a `&Buffer` or slice as the address of its elements
                 for p in params.iter() {
                     let passable = match &p.ty {
-                        Type::Int { .. } | Type::Float { .. } | Type::Handle(_) => true,
+                        Type::Int { .. } | Type::Float { .. } | Type::Char | Type::Handle(_) => true,
                         ty if ty.is_string() => true,
-                        Type::Ref(inner) => matches!(inner.as_ref(), Type::Buffer(element) if element.is_number()),
-                        Type::Slice(element) => element.is_number() || matches!(element.as_ref(), Type::Handle(_)),
+                        // A char is a C `char`, so a `&Buffer<char>` is a `char *`
+                        Type::Ref(inner) => matches!(inner.as_ref(), Type::Buffer(element) if element.is_number() || **element == Type::Char),
+                        Type::Slice(element) => element.is_number() || matches!(element.as_ref(), Type::Char | Type::Handle(_)),
                         _ => false,
                     };
                     if !passable {
@@ -1475,7 +1727,9 @@ impl Sema {
                 *mangled = Some(m);
             }
             DeclarationKind::Trait { .. } | DeclarationKind::Extern(ExternItem::Link(_)) => {}
-            DeclarationKind::Impl { trait_name, target, methods } => {
+            // A generic impl's methods are declared for each instance, see `apply_generic_impl`
+            DeclarationKind::Impl { type_params, .. } if !type_params.is_empty() => {}
+            DeclarationKind::Impl { trait_name, target, methods, .. } => {
                 let prev_class = self.current_class.take();
                 self.current_class = target.owner_name();
                 self.current_trait = Some(trait_name.clone());
@@ -1557,15 +1811,28 @@ impl Sema {
     /// Panics if the explicit type arguments have the wrong count, a type
     /// parameter can't be inferred, a type argument doesn't implement a bound,
     /// or the instance's body contains an error.
+    /// Checks the arguments of a call of a generic function or constructor
+    /// before its type arguments are inferred from them. Like for other calls,
+    /// an argument for a `&` or slice parameter of `declared` is only borrowed,
+    /// the others are taken.
+    fn check_generic_args(&mut self, args: &mut [Expr], declared: &[Type]) {
+        for (i, arg) in args.iter_mut().enumerate() {
+            if matches!(declared.get(i), Some(Type::Ref(_) | Type::Slice(_))) {
+                self.check_borrowed(arg, None);
+            } else {
+                self.check_expr(arg);
+            }
+        }
+    }
+
     fn instantiate(&mut self, name: &str, type_args: &[Type], args: &mut [Expr], expected: Option<&Type>, span: &Span) -> String {
         let generic = self.generic_functions.get(name).cloned().unwrap();
         let DeclarationKind::Function { type_params, params, return_type, .. } = &generic.decl.kind else {
             unreachable!("generic functions are function declarations");
         };
 
-        for arg in args.iter_mut() {
-            self.check_expr(arg);
-        }
+        let declared: Vec<Type> = params.iter().filter(|p| p.name != "self").map(|p| p.ty.clone()).collect();
+        self.check_generic_args(args, &declared);
         let bindings: Vec<(Type, &Expr)> = params.iter()
             .filter(|p| p.name != "self")
             .map(|p| p.ty.clone())
@@ -1862,6 +2129,8 @@ impl Sema {
             source: generic.source.clone(),
             imports: generic.imports.clone(),
         });
+        // Like `impl<T> Iterator<T> for VectorIter<T>` for `VectorIter<int32>`
+        self.apply_generic_impls(&instance);
         ty
     }
 
@@ -1906,9 +2175,8 @@ impl Sema {
         };
         let constructor_params = constructor_params(name, methods);
 
-        for arg in args.iter_mut() {
-            self.check_expr(arg);
-        }
+        let declared: Vec<Type> = constructor_params.iter().map(|p| p.ty.clone()).collect();
+        self.check_generic_args(args, &declared);
         let bindings: Vec<(Type, &Expr)> = constructor_params.iter().map(|p| p.ty.clone()).zip(args.iter()).collect();
         let self_type = Self::generic_self_type(name, type_params);
         let result = expected.map(|expected| (&self_type, expected));
@@ -2036,6 +2304,10 @@ impl Sema {
             },
             StmtKind::Declaration(decl) => self.check_decl(decl),
             StmtKind::Instantiation { name, typedef, value, mutable } => {
+                // The hidden iterator of a `for` loop, see `Parser::parse_for`
+                if name.starts_with("for$") {
+                    self.for_iterator(value);
+                }
                 let declared = typedef.as_ref().map(|td| {
                     let ty = self.canonicalize_type(td, &stmt_span);
                     self.check_type(&ty, &stmt_span);
@@ -3112,11 +3384,10 @@ impl Sema {
             }
             ExprKind::FunctionCall { name, type_args, params, receiver, mangled } => {
                 // `read` after `import std::fs::{read};` calls `fs::read`, unless this
-                // module or class declares a `read` itself
+                // module declares a `read` itself
                 if receiver.is_none() {
                     let own = self.functions.get(name.as_str()).is_some_and(|f| f.3 == self.module)
-                        || self.generic_functions.get(name.as_str()).is_some_and(|g| g.module == self.module)
-                        || self.current_class.as_ref().is_some_and(|c| self.functions.contains_key(&format!("{}_{}", c, name)));
+                        || self.generic_functions.get(name.as_str()).is_some_and(|g| g.module == self.module);
                     if !own {
                         *name = self.resolve_name(name, &span);
                     }
@@ -3149,17 +3420,10 @@ impl Sema {
                         // A generic method like `Box<int32>_convert`, or a generic function
                         m = self.instantiate(&m.clone(), type_args, params, expected.as_ref(), &span);
                         args_checked = true;
-                    } else if recv_class.is_none() && self.generic_functions.contains_key(name.as_str()) {
-                        // A generic function called inside a class, where `name` got looked up as a method
-                        m = self.instantiate(&name.clone(), type_args, params, expected.as_ref(), &span);
-                        args_checked = true;
                     } else if recv_class.is_none() && self.generic_types.contains_key(name.as_str()) {
                         // Constructor call of a generic class, like `Box(5)`
                         m = self.instantiate_constructor(&name.clone(), type_args, params, expected.as_ref(), &span);
                         args_checked = true;
-                    } else if recv_class.is_none() && self.functions.contains_key(name.as_str()) {
-                        // A free function called inside a class
-                        m = name.clone();
                     }
                 }
                 // Unknown names fall through to the unknown function error below
@@ -3187,16 +3451,11 @@ impl Sema {
                         .throw(&self.source);
                 }
 
-                // A method changing `self` needs a receiver that may be changed. Without
-                // receiver the call goes to the calling method's own `self`
+                // A method changing `self` needs a receiver that may be changed
                 if defs.first().is_some_and(|p| p.name == "self" && p.mutable) {
                     // `a.b.change()` changes the variable `a`. A temporary receiver like
                     // the result of a call has no variable, changing it is fine
-                    let variable = match receiver {
-                        Some(receiver) => root_variable(receiver),
-                        None => Some("self"),
-                    };
-                    if let Some(variable) = variable {
+                    if let Some(variable) = receiver.as_deref().and_then(root_variable) {
                         if self.scope.get(variable).is_some_and(|(_, mutable)| !mutable) {
                             SemanticError::MutatingCallOnImmutable {
                                 method: name.clone(),
@@ -3347,8 +3606,9 @@ impl Sema {
             (Type::Handle(handle), Type::Handle(base)) => handle != base && self.is_kind_of(handle, base),
             _ => false,
         };
+        // A slice can't change its elements, so `&[IntType]` is also safe to see as `&[Type]`
         let upcast = match (&expr.ty, target) {
-            (Type::Ref(inner), Type::Ref(base)) => kind_of(inner, base),
+            (Type::Ref(inner), Type::Ref(base)) | (Type::Slice(inner), Type::Slice(base)) => kind_of(inner, base),
             (ty, target) => kind_of(ty, target),
         };
         if upcast {
@@ -3438,12 +3698,29 @@ impl Sema {
     /// Panics if the receiver is unknown or its type can't have methods.
     fn resolve_call(&mut self, name: &str, receiver: &mut Option<Box<Expr>>, span: &Span) -> (String, Option<String>) {
         let Some(receiver) = receiver else {
-            // Without a receiver, a call inside a class refers to one of its methods.
-            let mangled = match &self.current_class {
-                Some(cls) if cls != name => self.find_method(cls, name, span),
-                _ => name.to_string(),
-            };
-            return (mangled, None);
+            // Without a receiver a call goes to a free function. A method of the
+            // surrounding class has to be called as `self.f()` or `Class::f()`
+            if let Some(cls) = self.current_class.clone() {
+                let free = self.functions.contains_key(name) || self.generic_functions.contains_key(name);
+                if cls != name && !free {
+                    let method = self.find_method(&cls, name, span);
+                    let takes_self = match (self.functions.get(&method), self.generic_functions.get(&method)) {
+                        (Some((defs, ..)), _) => Some(defs.first().is_some_and(|p| p.name == "self")),
+                        (None, Some(generic)) => Some(matches!(&generic.decl.kind,
+                            DeclarationKind::Function { params, .. } if params.first().is_some_and(|p| p.name == "self"))),
+                        (None, None) => None,
+                    };
+                    if let Some(takes_self) = takes_self {
+                        let fix = if takes_self { format!("self.{}(...)", name) } else { format!("{}::{}(...)", cls, name) };
+                        diagnostic::throw(
+                            format!("'{}' is a method of '{}', call it as `{}`", name, cls, fix),
+                            Some(span.clone()),
+                            &self.source,
+                        );
+                    }
+                }
+            }
+            return (name.to_string(), None);
         };
 
         let recv_ty = match self.check_receiver(receiver) {
@@ -3582,6 +3859,38 @@ impl Sema {
             converted.ty = Type::UINT64;
             **index = converted;
         }
+    }
+
+    /// Makes `values` of `for x in values` an iterator: an iterator, with a
+    /// `next` method, is used as it is, anything else with an `iter` method,
+    /// like an `Iterable`, becomes `values.iter()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `values` has neither method.
+    fn for_iterator(&mut self, values: &mut Expr) {
+        let span = values.span.clone();
+        if self.has_method(values, "next", &span) {
+            return;
+        }
+        if !self.has_method(values, "iter", &span) {
+            let ty = peel(self.probe_type(values));
+            let ty = ty.owner_name().unwrap_or_else(|| ty.to_string());
+            diagnostic::throw(
+                format!("a for loop can't go through '{}', it has no 'next' or 'iter' method", ty),
+                Some(span),
+                &self.source,
+            );
+        }
+        let placeholder = Expr::new(ExprKind::Boolean(false), span.clone());
+        let receiver = std::mem::replace(values, placeholder);
+        values.kind = ExprKind::FunctionCall {
+            name: "iter".to_string(),
+            type_args: vec![],
+            params: vec![],
+            receiver: Some(Box::new(receiver)),
+            mangled: None,
+        };
     }
 
     /// Whether the value of `receiver` has a method `name`.
@@ -3896,9 +4205,12 @@ impl Sema {
                 let prev_roots = std::mem::take(&mut self.binding_roots);
                 if let Some(cls) = self.current_class.clone() {
                     // A constructor builds its object, so it may change it. Methods
-                    // declare `self` as a parameter, which replaces this one
+                    // declare `self` as a parameter, which replaces this one. Static
+                    // functions have no `self`
                     let is_ctor = *name == cls;
-                    self.scope.insert("self".to_string(), (Type::Class(cls), is_ctor));
+                    if is_ctor || params.first().is_some_and(|p| p.name == "self") {
+                        self.scope.insert("self".to_string(), (Type::Class(cls), is_ctor));
+                    }
                 }
                 for p in params.iter() {
                     self.scope.insert(p.name.clone(), (p.ty.clone(), p.mutable));
@@ -3932,12 +4244,27 @@ impl Sema {
             }
             // Trait methods are checked through the impls they get copied into
             DeclarationKind::Trait { .. } | DeclarationKind::Extern(ExternItem::Link(_)) => Type::Void,
-            DeclarationKind::Impl { target, methods, .. } => {
+            DeclarationKind::Impl { type_params, .. } if !type_params.is_empty() => Type::Void,
+            DeclarationKind::Impl { trait_name, target, methods, .. } => {
                 let prev_class = self.current_class.take();
                 self.current_class = target.owner_name();
+                // Default methods copied from a generic trait's instance use its type
+                // parameters. The impl's own ones, of a generic impl, are set already
+                let outer_subst = self.type_subst.clone();
+                for (param, ty) in self.trait_substs.get(trait_name.as_str()).cloned().unwrap_or_default() {
+                    match self.type_subst.get(&param) {
+                        Some(own) if *own != ty => diagnostic::throw(
+                            format!("type parameter '{}' stands for '{}' in the impl, but for '{}' in its trait '{}', rename one of them", param, own, ty, trait_name),
+                            Some(decl.span.clone()),
+                            &self.source,
+                        ),
+                        _ => { self.type_subst.insert(param, ty); }
+                    }
+                }
                 for method in methods.iter_mut() {
                     self.check_decl(method);
                 }
+                self.type_subst = outer_subst;
                 self.current_class = prev_class;
                 Type::Void
             }

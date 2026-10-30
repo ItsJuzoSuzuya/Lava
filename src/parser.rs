@@ -68,6 +68,8 @@ pub struct Parser {
     impl_params: Option<Vec<TypeParam>>,
     /// Identifiers read as another name, see [`Parser::with_renames`].
     renames: HashMap<String, String>,
+    /// How many `for` loops were parsed, each one's hidden iterator variable gets its own name.
+    for_loops: usize,
 }
 
 impl Parser {
@@ -76,7 +78,7 @@ impl Parser {
     /// `fs::read` in the standard library module `std::fs` (see
     /// [`Module::renames`](crate::module::Module::renames)).
     pub fn with_renames(string: String, renames: HashMap<String, String>) -> Self {
-        Self { lexer: Lexer::new(string), allow_brace_init: true, type_params: vec![], impl_params: None, renames }
+        Self { lexer: Lexer::new(string), allow_brace_init: true, type_params: vec![], impl_params: None, renames, for_loops: 0 }
     }
 
     /// `token` with its identifier renamed, see [`Parser::with_renames`].
@@ -233,6 +235,7 @@ impl Parser {
             // An if on its own is an expression statement, without `;`
             Token::If     => StmtKind::Expression(Expr::new(self.parse_if(), span.clone())),
             Token::While  => self.parse_while(),
+            Token::For    => self.parse_for(span.clone()),
             Token::Return => self.parse_return(),
             Token::Break => {
                 self.expect(Token::Semicolon, "after 'break'");
@@ -361,6 +364,83 @@ impl Parser {
         StmtKind::While { condition, body }
     }
 
+    /// Parses a `for` loop. `for` is already consumed.
+    ///
+    /// ```text
+    /// for x in values { ... }
+    /// ```
+    ///
+    /// `values` is anything with a method `next(mut &self) -> Option<T>`. The loop
+    /// becomes the same as
+    ///
+    /// ```text
+    /// if true {
+    ///     mut for$1 = values;
+    ///     while true {
+    ///         match for$1.next() {
+    ///             Some(x) => { ... },
+    ///             None => break,
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// where `for$1` can't be written, so the body can't touch it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the loop contains a syntax error.
+    fn parse_for(&mut self, span: Span) -> StmtKind {
+        let (binding, _) = self.expect(Token::Identifier(String::new()), "as variable of for loop");
+        let binding = binding.to_string();
+        match self.next_token() {
+            (Token::Identifier(word), _) if word == "in" => {}
+            (got, span) => diagnostic::throw(format!("expected 'in' after the variable of a for loop, got '{}'", got), Some(span), &self.lexer.source),
+        }
+        let iterable = self.parse_condition();
+        let body = self.parse_body();
+
+        self.for_loops += 1;
+        let iterator = format!("for${}", self.for_loops);
+        let expr = |kind: ExprKind, span: &Span| Expr::new(kind, span.clone());
+        let next = expr(ExprKind::FunctionCall {
+            name: "next".to_string(),
+            type_args: vec![],
+            params: vec![],
+            receiver: Some(Box::new(expr(ExprKind::Identifier(iterator.clone()), &iterable.span))),
+            mangled: None,
+        }, &iterable.span);
+        let arm = |variant: &str, binding: Option<String>, stmts: Vec<Stmt>| MatchArm {
+            pattern: Pattern::EnumVariant { enum_name: "Option".to_string(), variant: variant.to_string(), binding },
+            block: Block { stmts, value: None },
+            span: span.clone(),
+        };
+        let matched = expr(ExprKind::Match {
+            scrutinee: Box::new(next),
+            arms: vec![
+                arm("Some", Some(binding), body),
+                arm("None", None, vec![Stmt::new(StmtKind::Break, span.clone(), Type::Unknown)]),
+            ],
+        }, &span);
+        let looped = StmtKind::While {
+            condition: expr(ExprKind::Boolean(true), &span),
+            body: vec![Stmt::new(StmtKind::Expression(matched), span.clone(), Type::Unknown)],
+        };
+        let iterator_span = iterable.span.clone();
+        let declared = StmtKind::Instantiation { name: iterator, typedef: None, value: iterable, mutable: true };
+        StmtKind::Expression(expr(ExprKind::If {
+            condition: Box::new(expr(ExprKind::Boolean(true), &span)),
+            then_block: Block {
+                stmts: vec![
+                    Stmt::new(declared, iterator_span, Type::Unknown),
+                    Stmt::new(looped, span.clone(), Type::Unknown),
+                ],
+                value: None,
+            },
+            else_block: None,
+        }, &span))
+    }
+
     /// Parses the condition of an `if` or `while`.
     ///
     /// Disables brace initialization, otherwise the `{` in `if x { ... }` would
@@ -471,7 +551,7 @@ impl Parser {
             // Statements starting with a keyword are no values, everything else
             // is an expression that is the value if no `;` follows
             let starts_statement = matches!(token,
-                Token::Let | Token::Mut | Token::While | Token::Return | Token::Break
+                Token::Let | Token::Mut | Token::While | Token::For | Token::Return | Token::Break
                 | Token::Continue | Token::Func | Token::Class | Token::Enum | Token::Trait | Token::Impl
                 | Token::Pub | Token::Import);
             if starts_statement {
@@ -811,6 +891,9 @@ impl Parser {
     fn parse_trait_declaration(&mut self) -> DeclarationKind {
         let (name, _) = self.expect(Token::Identifier(String::new()), "in trait declaration");
         let name = name.to_string();
+        // `trait Iterator<T>`, its methods can use `T`
+        let type_params = self.parse_optional_type_params();
+        let outer_type_params = self.enter_type_params(&type_params);
         self.expect(Token::LBrace, "at start of trait body");
 
         let mut methods = vec![];
@@ -826,27 +909,48 @@ impl Parser {
             methods.push(Declaration::new(method, func_span, visibility));
         }
         self.expect(Token::RBrace, "at end of trait body");
+        self.type_params = outer_type_params;
 
-        DeclarationKind::Trait { name, methods }
+        DeclarationKind::Trait { name, type_params, methods }
     }
 
-    /// Parses an impl block `impl Trait for Type { ... }`. `impl` is already consumed.
+    /// Parses an impl block `impl Trait for Type { ... }`, or `impl Type { ... }`
+    /// adding methods to a type declared elsewhere. `impl` is already consumed.
     ///
     /// ```text
     /// impl Shape for Circle {
     ///     func area(&self) -> float64 { ... }
     /// }
+    /// impl String {
+    ///     pub func shout(&self) -> String { ... }
+    /// }
     /// ```
     ///
-    /// Every method needs a body. Impl methods are always public, so they can't be marked `pub`.
+    /// A generic impl like `impl<T> Iterator<T> for VectorIter<T> { ... }`
+    /// applies to every instance of the target.
+    ///
+    /// Every method needs a body. The second form has an empty `trait_name`,
+    /// see [`desugar_inherent_impls`].
     ///
     /// # Panics
     ///
     /// Panics if the impl contains a syntax error or the body isn't closed.
     fn parse_impl_declaration(&mut self) -> DeclarationKind {
-        let (trait_name, _) = self.expect(Token::Identifier(String::new()), "as trait name in impl");
-        self.expect(Token::For, "after trait name in impl");
-        let (target, _) = self.parse_type();
+        let type_params = self.parse_optional_type_params();
+        // The type parameters are known in the trait, the target and the methods
+        let outer_type_params = self.enter_type_params(&type_params);
+        let (first, _) = self.parse_type();
+        let (trait_name, trait_args, target) = if matches!(self.peek().0, Token::For) {
+            self.consume();
+            let (trait_name, trait_args) = match first {
+                Type::Class(name) | Type::Object(name) => (name, vec![]),
+                Type::Generic { name, args } => (name, args),
+                other => diagnostic::throw(format!("expected a trait name in impl, got '{}'", other), Some(self.peek().1), &self.lexer.source),
+            };
+            (trait_name, trait_args, self.parse_type().0)
+        } else {
+            (String::new(), vec![], first)
+        };
         // Sema gives `self` the real target type, this is only a placeholder
         let target_name = target.to_string();
         self.expect(Token::LBrace, "at start of impl body");
@@ -861,17 +965,22 @@ impl Parser {
                 Visibility::Private 
             };
             let (_, func_span) = self.expect(Token::Func, "in impl body");
-            let method = self.parse_function_declaration(Some(target_name.clone()), Visibility::Public);
+            // Methods of a trait impl are as visible as the trait, others need `pub`
+            let method_visibility = if trait_name.is_empty() { visibility.clone() } else { Visibility::Public };
+            let method = self.parse_function_declaration(Some(target_name.clone()), method_visibility);
             methods.push(Declaration::new(method, func_span, visibility));
         }
         self.expect(Token::RBrace, "at end of impl body");
+        self.type_params = outer_type_params;
 
-        DeclarationKind::Impl { trait_name: trait_name.to_string(), target, methods }
+        DeclarationKind::Impl { trait_name, trait_args, type_params, target, methods }
     }
 
     /// Parses a method of the trait `trait_name`. `func` is already consumed.
     ///
     /// Unlike other functions, a trait method may end with `;` instead of a body.
+    /// It may return `impl Trait`, a type each impl picks, like
+    /// `func iter(&self) -> impl Iterator<T>;`. Such a method has no body.
     ///
     /// # Panics
     ///
@@ -879,7 +988,25 @@ impl Parser {
     fn parse_trait_method(&mut self, trait_name: &str, visibility: Visibility) -> DeclarationKind {
         let (name, _) = self.expect(Token::Identifier(String::new()), "in trait method");
         let params = self.parse_params(Some(trait_name));
-        let return_type = self.parse_return_type();
+        let return_type = if matches!(self.peek().0, Token::Arrow) {
+            self.consume(); // '->'
+            if matches!(self.peek().0, Token::Impl) {
+                let (_, span) = self.next_token(); // 'impl'
+                let (bound, _) = self.parse_type();
+                if matches!(self.peek().0, Token::LBrace) {
+                    diagnostic::throw(
+                        format!("'{}' returns 'impl', so each impl writes it, it can't have a body here", name),
+                        Some(span),
+                        &self.lexer.source,
+                    );
+                }
+                Some(Type::Opaque(Box::new(bound)))
+            } else {
+                Some(self.parse_type().0)
+            }
+        } else {
+            None
+        };
         let body = if matches!(self.peek().0, Token::LBrace) {
             Some(self.parse_function_body(&return_type))
         } else {
@@ -2213,6 +2340,55 @@ impl Parser {
         }
         let inner = self.next_expression();
         ExprKind::Ref(Box::new(inner))
+    }
+}
+
+/// Turns every `impl Type { ... }` of the module `module` into a public trait
+/// with the methods' signatures and an `impl` of it for `Type`, so the methods
+/// exist wherever the module is imported.
+///
+/// The trait is named like `String@std::string`, which can't be written, so
+/// nothing else refers to it. A generic block gets a generic trait. A second block for the same type in a module
+/// gets `#2` and so on appended.
+pub fn desugar_inherent_impls(stmts: &mut Vec<Stmt>, module: &str) {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut i = 0;
+    while i < stmts.len() {
+        let StmtKind::Declaration(Declaration { kind: DeclarationKind::Impl { trait_name, trait_args, type_params, target, methods }, span, .. }) = &mut stmts[i].kind else {
+            i += 1;
+            continue;
+        };
+        if !trait_name.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        let target_name = target.owner_name().unwrap_or_else(|| target.to_string());
+        let count = seen.entry(target_name.clone()).or_insert(0);
+        *count += 1;
+        *trait_name = match *count {
+            1 => format!("{}@{}", target_name, module),
+            n => format!("{}@{}#{}", target_name, module, n),
+        };
+        let signatures = methods.iter().map(|method| {
+            let mut kind = method.kind.clone();
+            if let DeclarationKind::Function { body, parent, .. } = &mut kind {
+                *body = None;
+                *parent = Some(trait_name.clone());
+            }
+            Declaration::new(kind, method.span.clone(), method.visibility.clone())
+        }).collect();
+        // `impl<T> Vector<T> { ... }` becomes the generic trait `Vector@main<T>`,
+        // implemented as `impl<T> Vector@main<T> for Vector<T>`
+        *trait_args = type_params.iter().map(|p| Type::Param(p.name.clone())).collect();
+        let span = span.clone();
+        let declaration = Declaration::new(
+            DeclarationKind::Trait { name: trait_name.clone(), type_params: type_params.clone(), methods: signatures },
+            span.clone(),
+            Visibility::Public,
+        );
+        stmts.insert(i, Stmt::new(StmtKind::Declaration(declaration), span, Type::Unknown));
+        i += 2;
     }
 }
 

@@ -91,16 +91,22 @@ pub enum DeclarationKind {
         /// Set for `extern func`, a C function the program calls.
         external: Option<Extern>,
     },
+    /// `trait name<type_params> { methods }`, without `<...>` if it isn't generic.
     Trait {
         name: String,
+        type_params: Vec<TypeParam>,
         methods: Vec<Declaration>
     },
-    /// `impl trait_name for target { methods }`.
+    /// `impl<type_params> trait_name<trait_args> for target { methods }`.
     ///
+    /// A generic impl, with `type_params`, applies to every instance of the
+    /// generic target it matches, like `impl<T> Iterator<T> for VectorIter<T>`.
     /// Sema copies the trait's default methods that aren't overridden into
     /// `methods`, so afterwards it holds every method of the trait.
     Impl {
         trait_name: String,
+        trait_args: Vec<Type>,
+        type_params: Vec<TypeParam>,
         target: Type,
         methods: Vec<Declaration>,
     },
@@ -125,9 +131,9 @@ impl Declaration {
 impl Declare for Declaration {
     fn declare<'ctx>(&self, ctx: &mut CodegenContext<'ctx>) {
         match &self.kind {
-            // Generic classes and enums are templates, sema hands their instances to codegen instead
+            // Generic classes, enums and impls are templates, sema hands their instances to codegen instead
             DeclarationKind::Class { type_params, .. } | DeclarationKind::Enum { type_params, .. }
-                if !type_params.is_empty() => {}
+                | DeclarationKind::Impl { type_params, .. } if !type_params.is_empty() => {}
             DeclarationKind::Class { name, fields, methods, .. } => {
                 let named_fields: Vec<(String, _)> = fields.iter()
                     .map(|p| (p.name.clone(), p.ty.to_llvm(ctx)))
@@ -269,7 +275,7 @@ impl Codegen for Declaration {
     fn codegen<'ctx, 'a>(&self, ctx: &'a mut CodegenContext<'ctx>) -> Option<Box<BasicValueEnum<'ctx>>> {
         match &self.kind {
             DeclarationKind::Class { type_params, .. } | DeclarationKind::Enum { type_params, .. }
-                if !type_params.is_empty() => None,
+                | DeclarationKind::Impl { type_params, .. } if !type_params.is_empty() => None,
             DeclarationKind::Class { name, fields, methods, .. } => {
                 ctx.current_class = Some(name.clone());
                 ctx.current_class_fields = Some(fields.clone());

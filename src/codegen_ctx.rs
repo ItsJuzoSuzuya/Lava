@@ -154,7 +154,7 @@ impl<'ctx> CodegenContext<'ctx> {
 
     // --- Strings ---
     //
-    // `String` is a class of the prelude, a `Buffer<uint8>` of bytes and their
+    // `String` is a class of the prelude, a `Buffer<char>` of bytes and their
     // length. Owning and copying strings works like for every class owning a
     // Buffer, its methods implement the string operators. The compiler only
     // makes literals with its constructor and reads its fields to print a

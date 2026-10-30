@@ -8,6 +8,7 @@
 //   print(names.at(5) ?? "nobody");
 
 import std::option::{Option};
+import std::iterable::{Iterator, Iterable};
 
 // A list that grows as needed, its elements are next to each other in memory.
 pub class Vector<T> {
@@ -41,9 +42,9 @@ pub class Vector<T> {
   // A copy of the element at `index`, or `None` if there's none:
   // `args.at(2) ?? "main.lv"`. `v[i]` and `get` stop the program instead.
   pub func at(&self, index: uint64) -> Option<T> {
-    if index >= self.length {
+    if index >= self.length 
       return None;
-    }
+
     Some(self.data.get(index))
   }
 
@@ -115,9 +116,34 @@ pub class Vector<T> {
 
 // `value` in decimal, for the messages above.
 func int_to_string(value: int64) -> String {
-  mut digits = Buffer<uint8>(24);
+  mut digits = Buffer<char>(24);
   let length = c_snprintf(digits, digits.capacity(), "%lld", value);
   return String(digits, length as uint64);
 }
 
-extern "snprintf" func c_snprintf(into: &Buffer<uint8>, size: uint64, format: String, ..) -> int32;
+extern "snprintf" func c_snprintf(into: &Buffer<char>, size: uint64, format: String, ..) -> int32;
+
+// `for item in vector` goes through the elements from the first one
+impl<T> Iterable<T> for Vector<T> {
+  func iter(&self) -> VectorIter<T> {
+    return VectorIter(self);
+  }
+}
+
+// Goes through the elements of a `Vector`, see its `iter`.
+pub class VectorIter<T> {
+  vector: &Vector<T> = vector;
+  position: uint64 = 0;
+
+  Constructor(vector: &Vector<T>);
+}
+
+impl<T> Iterator<T> for VectorIter<T> {
+  func next(mut &self) -> Option<T> {
+    if self.position >= self.vector.len() {
+      return None;
+    }
+    self.position = self.position + 1;
+    return Some(self.vector.get(self.position - 1));
+  }
+}

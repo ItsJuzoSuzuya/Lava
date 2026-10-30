@@ -2,8 +2,9 @@ import std::vector::{Vector};
 import span;
 import std::path::{Path};
 import std::option::{Option};
-import std::string::{strip_prefix};
+import std::string;
 import std::hashmap;
+import std::hashmap::{HashMap};
 
 /// A module imported by another one, like `import math;` or
 /// `import std::fs::{read};` at `span`.
@@ -18,29 +19,29 @@ pub class Import {
 
 /// A source file of the program.
 pub class Module {
-    pub imports: Vector<Import>;
-    /// Module name, the file name without `.lv` (`math` for `math.lv`), or
-    /// like `std::fs` for a module of the standard library.
-    pub name: String;
-    /// Canonical path of the file.
-    pub path: Path;
-    pub source: String;
+  pub imports: Vector<Import>;
+  /// Module name, the file name without `.lv` (`math` for `math.lv`), or
+  /// like `std::fs` for a module of the standard library.
+  pub full_name: String;
+  /// Canonical path of the file.
+  pub path: Path;
+  pub source: String;
 
-    /// The name of the standard library module this is, `fs` for `std::fs`.
-    pub func std_name(mut &self) -> Option<String> {
-        self.name.strip_prefix("std::")
-    }
+  /// The name of the standard library module this is, `fs` for `std::fs`.
+  pub func strip_std(&self) -> Option<String> {
+      return self.full_name.strip_prefix("std::");
+  }
 
-    /// What the parser renames this module's names to. A standard library
-    /// module's top-level declarations get its name, `read` in `std::fs`
-    /// becomes `fs::read`, so modules can declare the same names and code
-    /// using them says which one it means.
-    pub func renames(mut &self) -> HashMap<String, String> {
-        let std_name = self.std_name();
-        top_level_names(&self.source).into_iter()
-            .map(|name| (name.clone(), format!("{}::{}", std_name, name)))
-            .collect()
-    }
+  /// What the parser renames this module's names to. A standard library
+  /// module's top-level declarations get its name, `read` in `std::fs`
+  /// becomes `fs::read`, so modules can declare the same names and code
+  /// using them says which one it means.
+  pub func renames(mut &self) -> HashMap<String, String> {
+      let module_name = self.strip_std();
+      top_level_names(&self.source).into_iter()
+          .map(|name| (name.clone(), format!("{}::{}", std_name, name)))
+          .collect()
+  }
 }
 
 /// All modules reachable from a root source file.
@@ -53,13 +54,18 @@ pub class Module {
 /// import cycles are allowed. [`ModuleGraph::modules`] lists imports before
 /// the modules importing them.
 pub class ModuleGraph {
-    pub modules: Vector<Module>;
-    /// Sources that replace the content of files on disk, like the unsaved
-    /// buffers of an editor.
-    overlay: HashMap<PathBuf, String>;
-    seen: Vector<PathBuf> = seen;
+  pub modules: Vector<Module> = Vector();
+  overlay: HashMap<Path,String> = HashMap();
+  
+  Constructor(root_path: &Path) {
 
-    Constructor(root_path: &Path) -> Self {
-        Self::with_overlay(root_path, HashMap::new());
-    }
+  }
+}
+
+/// Names of the functions, classes, enums and traits `source` declares at the
+/// top level. Lexing errors end the list, they're reported when parsing.
+pub func top_level_names(source: &String) -> Vec<String> {
+  mut lexer = Lexer(source);
+  mut names = Vector<String>();
+  while lexer.get_next_token()
 }

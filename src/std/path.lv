@@ -1,4 +1,4 @@
-import std::string::{starts_with};
+import std::string;
 
 extern "open" func c_open(path: String, flags: int32, ..) -> int32;
 extern "close" func c_close(file: int32) -> int32;
@@ -17,7 +17,7 @@ pub class Path {
     // A `/` between the two, unless there's one already or nothing to join onto
     let ends_with_slash = self.buffer.len() > 0 && self.buffer[self.buffer.len() - 1] == '/';
     mut joined = self.buffer.clone();
-    if self.buffer.len() > 0 && !ends_with_slash && !starts_with(add, "/") {
+    if self.buffer.len() > 0 && !ends_with_slash && !add.starts_with("/") {
       joined += "/";
     }
     joined += add;

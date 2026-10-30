@@ -528,3 +528,110 @@ type 'String' does not match 'int32' in if branch value
 let x = true ? print(1) : print(2);
 --- error
 this if gives no value
+
+=== for loop goes through what next gives
+import std::option::{Option};
+class Count {
+  i: int32 = 0;
+  end: int32 = end;
+
+  Constructor(end: int32);
+
+  pub func next(mut &self) -> Option<int32> {
+    if self.i >= self.end {
+      return None;
+    }
+    self.i = self.i + 1;
+    return Some(self.i);
+  }
+}
+mut total = 0;
+for n in Count(4) {
+  print(n);
+  total = total + n;
+}
+print(total);
+--- output
+1
+2
+3
+4
+10
+
+=== break and continue in a for loop
+import std::option::{Option};
+class Count {
+  i: int32 = 0;
+  end: int32 = end;
+
+  Constructor(end: int32);
+
+  pub func next(mut &self) -> Option<int32> {
+    if self.i >= self.end {
+      return None;
+    }
+    self.i = self.i + 1;
+    return Some(self.i);
+  }
+}
+for x in Count(10) {
+  if x == 2 {
+    continue;
+  }
+  if x == 4 {
+    break;
+  }
+  print(x);
+}
+--- output
+1
+3
+
+=== nested for loops
+import std::option::{Option};
+class Count {
+  i: int32 = 0;
+  end: int32 = end;
+
+  Constructor(end: int32);
+
+  pub func next(mut &self) -> Option<int32> {
+    if self.i >= self.end {
+      return None;
+    }
+    self.i = self.i + 1;
+    return Some(self.i);
+  }
+}
+for a in Count(2) {
+  for b in Count(2) {
+    print(a * 10 + b);
+  }
+}
+--- output
+11
+12
+21
+22
+
+=== for loop over the program arguments
+import std::env;
+for arg in env::args() {
+  print(arg.len() > 0);
+}
+--- output
+true
+
+=== for loop over something without next is an error
+let n: int32 = 3;
+for x in n {
+  print(x);
+}
+--- error
+a for loop can't go through 'int32', it has no 'next' or 'iter' method
+
+=== for loop needs in
+for x of y {
+}
+--- error
+expected 'in' after the variable of a for loop, got 'of'

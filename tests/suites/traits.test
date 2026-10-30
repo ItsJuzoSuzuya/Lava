@@ -132,7 +132,7 @@ trait Shape {
   func area(&self) -> int32;
 
   func double_area(&self) -> int32 {
-    return area() * 2;
+    return self.area() * 2;
   }
 }
 class Square {
@@ -183,7 +183,7 @@ class Square {
 }
 impl Shape for Square {
   func area(&self) -> int32 {
-    return get_side() * get_side();
+    return self.get_side() * self.get_side();
   }
 }
 let s = Square { side: 5 };
@@ -534,7 +534,7 @@ trait Describe {
   func value(&self) -> int32;
 
   func describe(&self) {
-    print(value() + 1000);
+    print(self.value() + 1000);
   }
 }
 impl Describe for int32 {
@@ -771,3 +771,397 @@ trait Get {
   func get(&self) -> int32;
 --- error
 unexpected end of file in trait body
+
+=== impl block adds methods to a type
+impl String {
+  pub func shout(&self) -> String {
+    return self.concat(self.bang());
+  }
+
+  func bang(&self) -> String {
+    return "!";
+  }
+}
+impl int32 {
+  pub func twice(&self) -> int32 {
+    return self * 2;
+  }
+}
+let n: int32 = 21;
+print("hi".shout());
+print(n.twice());
+--- output
+hi!
+42
+
+=== two impl blocks for the same type
+impl String {
+  pub func first(&self) -> char {
+    return self.char_at(0);
+  }
+}
+impl String {
+  pub func last(&self) -> char {
+    return self.char_at(self.len() - 1);
+  }
+}
+let s = "abc";
+print(s.first());
+print(s.last());
+--- output
+a
+c
+
+=== impl block methods come with the module
+import shout;
+print("hi".shout());
+--- file shout.lv
+impl String {
+  pub func shout(&self) -> String {
+    return self.concat("!");
+  }
+}
+--- output
+hi!
+
+=== private impl block method can't be called from another module
+import shout;
+print("hi".bang());
+--- file shout.lv
+impl String {
+  func bang(&self) -> String {
+    return "!";
+  }
+}
+--- error
+Tried calling a private function 'bang' in 'String'
+
+=== impl block methods need the module imported
+print("hi".shout());
+--- file shout.lv
+impl String {
+  pub func shout(&self) -> String {
+    return self.concat("!");
+  }
+}
+--- error
+unknown function 'shout'
+
+=== generic trait implemented for one type argument
+trait Make<T> {
+  func make(&self) -> T;
+}
+class Factory {
+  n: int32 = n;
+
+  Constructor(n: int32);
+}
+impl Make<int32> for Factory {
+  func make(&self) -> int32 {
+    return self.n * 2;
+  }
+}
+print(Factory(21).make());
+--- output
+42
+
+=== default method of a generic trait uses its type parameter
+trait Pair<T> {
+  func first(&self) -> T;
+
+  func twice(&self) -> (T, T) {
+    let value: T = self.first();
+    return (value, value);
+  }
+}
+class Box {
+  v: String = v;
+
+  Constructor(v: String);
+}
+impl Pair<String> for Box {
+  func first(&self) -> String {
+    return self.v;
+  }
+}
+let (a, b) = Box("x").twice();
+print(a + b);
+--- output
+xx
+
+=== generic impl applies to every instance
+trait Size<T> {
+  func value(&self) -> T;
+}
+class Wrap<T> {
+  v: T = v;
+
+  Constructor(v: T);
+}
+impl<T> Size<T> for Wrap<T> {
+  func value(&self) -> T {
+    return self.v;
+  }
+}
+print(Wrap(5).value());
+print(Wrap("five").value());
+--- output
+5
+five
+
+=== generic impl of a plain trait
+trait Describe {
+  func describe(&self);
+}
+class Wrap<T> {
+  v: T = v;
+
+  Constructor(v: T);
+}
+impl<T> Describe for Wrap<T> {
+  func describe(&self) {
+    print(self.v);
+  }
+}
+Wrap(1.5).describe();
+Wrap(true).describe();
+--- output
+1.500000
+true
+
+=== generic impl applies to instances created before it
+class Wrap<T> {
+  v: T = v;
+
+  Constructor(v: T);
+}
+func make() -> Wrap<int32> {
+  return Wrap(3);
+}
+impl<T> Show for Wrap<T> {
+  func show(&self) {
+    print(self.v);
+  }
+}
+trait Show {
+  func show(&self);
+}
+make().show();
+--- output
+3
+
+=== impl block for a generic class
+class Wrap<T> {
+  v: T = v;
+
+  Constructor(v: T);
+}
+impl<T> Wrap<T> {
+  pub func get(&self) -> T {
+    return self.v;
+  }
+}
+print(Wrap(7).get());
+print(Wrap("seven").get());
+--- output
+7
+seven
+
+=== for loop over a generic iterator
+import std::option::{Option};
+trait Iterator<T> {
+  func next(mut &self) -> Option<T>;
+}
+class Repeat<T> {
+  value: T = value;
+  times: int32 = times;
+
+  Constructor(value: T, times: int32);
+}
+impl<T> Iterator<T> for Repeat<T> {
+  func next(mut &self) -> Option<T> {
+    if self.times == 0 {
+      return None;
+    }
+    self.times = self.times - 1;
+    return Some(self.value);
+  }
+}
+for word in Repeat("hi", 2) {
+  print(word);
+}
+--- output
+hi
+hi
+
+=== generic trait without type arguments is an error
+trait Make<T> {
+  func make(&self) -> T;
+}
+class Factory {
+  n: int32 = n;
+
+  Constructor(n: int32);
+}
+impl Make for Factory {
+  func make(&self) -> int32 {
+    return 1;
+  }
+}
+--- error
+'Make' takes 1 type arguments, got 0
+
+=== generic trait with the wrong return type is an error
+trait Make<T> {
+  func make(&self) -> T;
+}
+class Factory {
+  n: int32 = n;
+
+  Constructor(n: int32);
+}
+impl Make<int32> for Factory {
+  func make(&self) -> int64 {
+    return 1;
+  }
+}
+--- error
+method 'make' doesn't match its signature in trait 'Make<int32>'
+
+=== generic impl needs a generic target
+trait Show {
+  func show(&self);
+}
+impl<T> Show for int32 {
+  func show(&self) {
+    print(self);
+  }
+}
+--- error
+a generic impl needs a generic target like `Box<T>`
+
+=== trait method returns impl Trait
+import std::option::{Option};
+trait Counter {
+  func next(mut &self) -> Option<int32>;
+}
+trait Countable {
+  func counter(&self) -> impl Counter;
+}
+class Down {
+  n: int32 = n;
+
+  Constructor(n: int32);
+}
+impl Counter for Down {
+  func next(mut &self) -> Option<int32> {
+    if self.n == 0 {
+      return None;
+    }
+    self.n = self.n - 1;
+    return Some(self.n + 1);
+  }
+}
+class Three {
+  Constructor();
+}
+impl Countable for Three {
+  func counter(&self) -> Down {
+    return Down(3);
+  }
+}
+for x in Three().counter() {
+  print(x);
+}
+--- output
+3
+2
+1
+
+=== for loop calls iter of an Iterable
+import std::option::{Option};
+trait Iterator<T> {
+  func next(mut &self) -> Option<T>;
+}
+trait Iterable<T> {
+  func iter(&self) -> impl Iterator<T>;
+}
+class Repeat<T> {
+  value: T = value;
+  times: int32 = times;
+
+  Constructor(value: T, times: int32);
+}
+impl<T> Iterator<T> for Repeat<T> {
+  func next(mut &self) -> Option<T> {
+    if self.times == 0 {
+      return None;
+    }
+    self.times = self.times - 1;
+    return Some(self.value);
+  }
+}
+class Twice<T> {
+  value: T = value;
+
+  Constructor(value: T);
+}
+impl<T> Iterable<T> for Twice<T> {
+  func iter(&self) -> Repeat<T> {
+    return Repeat(self.value, 2);
+  }
+}
+let t = Twice("hey");
+for a in t {
+  for b in t {
+    print(a + b);
+  }
+}
+--- output
+heyhey
+heyhey
+heyhey
+heyhey
+
+=== impl Trait return type that doesn't implement it is an error
+import std::option::{Option};
+trait Iterator<T> {
+  func next(mut &self) -> Option<T>;
+}
+trait Iterable<T> {
+  func iter(&self) -> impl Iterator<T>;
+}
+class Box {
+  Constructor();
+}
+impl Iterable<int32> for Box {
+  func iter(&self) -> int32 {
+    return 1;
+  }
+}
+--- error
+'iter' returns 'int32', which doesn't implement 'Iterator<int32>'
+
+=== impl Trait return type can't have a default body
+trait Make {
+  func make(&self) -> impl Make {
+    return self;
+  }
+}
+--- error
+'make' returns 'impl', so each impl writes it, it can't have a body here
+
+=== impl Trait return type has to be written by the impl
+trait Show {
+  func show(&self);
+}
+trait Showable {
+  func showable(&self) -> impl Show;
+}
+class Box {
+  Constructor();
+}
+impl Showable for Box {
+}
+--- error
+'Box' is missing method 'showable' of trait 'Showable'

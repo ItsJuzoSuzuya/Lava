@@ -1,0 +1,92 @@
+import token;
+import std::string::{is_whitespace, is_alpha, is_alphanumeric, is_digit};
+import span;
+import std::result::{Result};
+
+/// Turns source code into [`Token`]s, one at a time.
+///
+/// Tracks the current line and column, so every token comes with the [`Span`]
+/// it was read from.
+pub class Lexer {
+  source: String;
+  position: uint64 = 0;
+  line: uint32 = 1;
+  col: uint32 = 1;
+
+
+  pub func get_next_token(mut &self) -> Result<Token, String> {
+    self.skip_blank();
+    let line = self.line;
+    let col = self.col;
+    if self.at_end() {
+      let span = Span(line, col, 0);
+      let token = Token(TokenKind::EOF, span);
+      return Ok(token);
+    }
+
+    let current = self.current();
+    let start_point = self.position;
+
+    if is_alpha(current) || current == '_' {
+      while !self.at_end() && (is_alphanumeric(self.current()) || self.current() == '_') {
+        self.advance();
+      }
+      let word = self.source.slice(start_point, self.position);
+      let kind = TokenKind::from_string(word);
+      let span = Span(line, col, word.len() as uint32);
+      return Ok(Token(kind, span));
+    }
+
+    if is_digit(current) {
+      while !self.at_end() && is_digit(self.current()) {
+        self.advance();
+      }
+      let num = self.source.slice(start_point, self.position);
+      if  
+
+    }
+  }
+
+  /// Skip whitespaces and comments
+  func skip_blank(mut &self) {
+    while !self.at_end() {
+      if is_whitespace(self.current()) {
+        self.advance();
+      } 
+      else if self.current() == '/' && self.following() == '/' {
+        while !self.at_end() && self.current() != '\n' {
+          self.advance();
+        }
+      } 
+      else break;
+    }
+  }
+
+  func advance(mut &self) {
+    if self.current() == '\n' {
+      self.position += 1;
+      self.line += 1;
+      self.col = 0;
+    } else {
+      self.position += 1;
+      self.col += 1;
+    }
+  }
+
+  func current(&self) -> char {
+    return self.source[self.position];
+  }
+
+  func following(&self) -> char {
+    return self.source[self.position + 1];
+  }
+
+  func at_end(&self) -> bool {
+    self.position > self.source.len()
+  }
+
+  func is_keyword(word: &String) -> bool {
+    let keywords = "as break class Constructor continue else enum false for func if impl import let match mut print pub return self trait true while";
+    return keywords.split(' ').contains_word(word);
+  }
+}

@@ -115,9 +115,9 @@ pub class Vector<T> {
 
 // `value` in decimal, for the messages above.
 func int_to_string(value: int64) -> String {
-  mut digits = Buffer<uint8>(24);
+  mut digits = Buffer<char>(24);
   let length = c_snprintf(digits, digits.capacity(), "%lld", value);
   return String(digits, length as uint64);
 }
 
-extern "snprintf" func c_snprintf(into: &Buffer<uint8>, size: uint64, format: String, ..) -> int32;
+extern "snprintf" func c_snprintf(into: &Buffer<char>, size: uint64, format: String, ..) -> int32;

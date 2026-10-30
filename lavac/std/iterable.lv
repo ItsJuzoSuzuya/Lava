@@ -1,0 +1,7 @@
+pub trait Iterable {
+  pub func iter(&self){
+    self.position = 0;
+  }
+
+  pub func next(&self);
+}

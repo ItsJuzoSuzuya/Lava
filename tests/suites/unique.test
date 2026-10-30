@@ -108,6 +108,7 @@ class Point {
 
   Constructor(x: int32);
 }
+
 let a = unique(Point { x: 7 });
 let b = a;
 print(a.x);

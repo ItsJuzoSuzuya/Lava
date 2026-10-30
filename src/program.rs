@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use inkwell::context::Context;
 
 use crate::{codegen_ctx::CodegenContext, declaration::{Declaration, DeclarationKind, ExternItem}, diagnostic::{self, CompileError},
-    expression::{Expr, ExprKind}, module::ModuleGraph, parser::Parser, sema::Sema, statement::{Stmt, StmtKind}, traits::codegen::{Codegen, Declare},
+    expression::{Expr, ExprKind}, module::ModuleGraph, parser::{self, Parser}, sema::Sema, statement::{Stmt, StmtKind}, traits::codegen::{Codegen, Declare},
     r#type::Type};
 
 /// A module after parsing and checking its semantics.
@@ -43,6 +43,7 @@ pub fn check_modules(graph: &ModuleGraph) -> (Vec<CheckedModule>, Vec<CompileErr
                 return (done, errors);
             }
         };
+        parser::desugar_inherent_impls(&mut stmts, &module.name);
 
         sema.enter_module(module.name.clone(), module.source.clone(), &module.imports);
         let own_stmts = stmts.len();

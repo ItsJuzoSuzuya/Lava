@@ -567,9 +567,14 @@ impl Server {
             let end = Span { line: d.end_line.max(d.span.line), col: 0, len: 0 };
             let end_char = text.lines().nth(end.line).map(|l| l.encode_utf16().count()).unwrap_or(0);
             let start = span_range(&text, &d.span)["start"].clone();
+            // The hidden trait of an `impl String { ... }` block is shown as the block
+            let name = match d.kind {
+                DefKind::Trait if d.name.contains('@') => format!("impl {}", shown_name(&d.name)),
+                _ => shown_name(&d.name),
+            };
             json!({
-                "name": d.name,
-                "detail": d.signature.lines().next().unwrap_or(""),
+                "name": name,
+                "detail": shown_name(d.signature.lines().next().unwrap_or("")),
                 "kind": symbol_kind(d.kind),
                 "range": { "start": start, "end": { "line": end.line, "character": end_char } },
                 "selectionRange": span_range(&text, &d.span),
@@ -614,9 +619,9 @@ impl Server {
                 if !seen.insert((path.clone(), d.span.line, d.span.col)) {
                     continue;
                 }
-                let container = d.container.map(|c| index.defs[c].name.clone());
+                let container = d.container.map(|c| shown_name(&index.defs[c].name));
                 symbols.push(json!({
-                    "name": d.name,
+                    "name": shown_name(&d.name),
                     "kind": symbol_kind(d.kind),
                     "location": { "uri": path_uri(path), "range": span_range(&self.text_of(path), &d.span) },
                     "containerName": container,
@@ -660,16 +665,32 @@ impl Server {
             let chain = trailing_chain(receiver);
             // Private members are only usable inside their own class
             let class_here = index.function_at(file, line).and_then(|f| index.defs[f].container);
-            let items: Vec<Value> = resolve_chain(index, file, line, &chain)
-                .map(|ty| index.members(&ty).into_iter()
-                    // After `.` come fields and methods, an enum's variants and the
-                    // functions without `self` come after `::`
-                    .filter(|&m| index.defs[m].kind != DefKind::Variant)
-                    .filter(|&m| index.defs[m].kind != DefKind::Method || index.defs[m].takes_self)
-                    .filter(|&m| index.defs[m].public || index.defs[m].container == class_here && class_here.is_some())
-                    .map(|m| item(index, m))
-                    .collect())
-                .unwrap_or_default();
+            let Some(ty) = resolve_chain(index, file, line, &chain) else { return json!([]) };
+            let members: Vec<usize> = index.members(&ty).into_iter()
+                // After `.` come fields and methods, an enum's variants and the
+                // functions without `self` come after `::`
+                .filter(|&m| index.defs[m].kind != DefKind::Variant)
+                .filter(|&m| index.defs[m].kind != DefKind::Method || index.defs[m].takes_self)
+                .filter(|&m| index.defs[m].public || index.defs[m].container == class_here && class_here.is_some())
+                .collect();
+            let mut names: HashSet<String> = members.iter().map(|&m| index.defs[m].name.clone()).collect();
+            let mut items: Vec<Value> = members.into_iter().map(|m| item(index, m)).collect();
+            // Standard library methods of `impl String { ... }` blocks, like `text.split(',')`,
+            // and functions taking the value first. Picking one imports it if needed:
+            // the whole module for a method, the function by its name
+            for importable in self.importables(&path, &index.files[file].name) {
+                if importable.module.starts_with("std::") && importable.receiver.as_ref() == Some(&ty)
+                    && names.insert(short_name(&importable.name).to_string())
+                {
+                    let edit = if importable.kind == DefKind::Method {
+                        (!imported.contains(&importable.module))
+                            .then(|| insertion(import_line, 0, format!("import {};\n", importable.module)))
+                    } else {
+                        item_import(&text, &imports, &importable, import_line)
+                    };
+                    items.push(importable_item(&importable, edit));
+                }
+            }
             return json!(items);
         }
         if let Some(owner) = prefix.strip_suffix("::") {
@@ -681,7 +702,8 @@ impl Server {
                 let edit = (!imported.contains(&module_name))
                     .then(|| insertion(import_line, 0, format!("import {};\n", module_name)));
                 let items: Vec<Value> = self.importables(&path, &index.files[file].name).iter()
-                    .filter(|i| i.module == module_name)
+                    // Methods are called on values, not after `string::`
+                    .filter(|i| i.module == module_name && i.kind != DefKind::Method)
                     .map(|i| importable_item(i, edit.clone()))
                     .collect();
                 return json!(items);
@@ -740,6 +762,9 @@ impl Server {
         // item itself for the standard library, like `import std::env::{args};`,
         // the whole module for the program's own modules
         for importable in self.importables(&path, &index.files[file].name) {
+            if importable.kind == DefKind::Method {
+                continue;
+            }
             let edit = if importable.module.starts_with("std::") {
                 item_import(&text, &imports, &importable, import_line)
             } else if imported.contains(&importable.module) {
@@ -791,16 +816,21 @@ impl Server {
                 let parsed = diagnostic::catch(|| Parser::with_renames(m.source.clone(), m.renames()).parse_file());
                 // A file being written may not parse yet, its declarations are still found by name
                 let Ok(stmts) = parsed else { return scanned_importables(&m) };
-                stmts.into_iter().filter_map(|stmt| {
-                    let StmtKind::Declaration(decl) = stmt.kind else { return None };
+                let signature_of = |name: &str, params: &[crate::param::Param], return_type: Option<Type>| {
+                    let params: Vec<String> = params.iter().filter(|p| p.name != "self").map(|p| format!("{}: {}", p.name, show_type(&p.ty))).collect();
+                    let ret = return_type.filter(|t| *t != Type::Void).map(|t| format!(" -> {}", show_type(&t))).unwrap_or_default();
+                    format!("{}({}){}", short_name(name), params.join(", "), ret)
+                };
+                stmts.into_iter().flat_map(|stmt| {
+                    let StmtKind::Declaration(decl) = stmt.kind else { return vec![] };
                     if !matches!(decl.visibility, Visibility::Public) {
-                        return None;
+                        return vec![];
                     }
+                    let mut receiver = None;
                     let (name, kind, signature) = match decl.kind {
                         DeclarationKind::Function { name, params, return_type, .. } => {
-                            let params: Vec<String> = params.iter().map(|p| format!("{}: {}", p.name, show_type(&p.ty))).collect();
-                            let ret = return_type.filter(|t| *t != Type::Void).map(|t| format!(" -> {}", show_type(&t))).unwrap_or_default();
-                            let signature = format!("{}({}){}", short_name(&name), params.join(", "), ret);
+                            receiver = params.first().and_then(|p| type_owner(&p.ty));
+                            let signature = signature_of(&name, &params, return_type);
                             (name, DefKind::Function, signature)
                         }
                         DeclarationKind::Class { name, .. } => (name.clone(), DefKind::Class, format!("class {}", short_name(&name))),
@@ -808,9 +838,26 @@ impl Server {
                         DeclarationKind::Trait { name, .. } => (name.clone(), DefKind::Trait, format!("trait {}", short_name(&name))),
                         DeclarationKind::Extern(ExternItem::Type { name, .. }) =>
                             (name.clone(), DefKind::Class, format!("extern type {}", short_name(&name))),
-                        DeclarationKind::Impl { .. } | DeclarationKind::Extern(ExternItem::Link(_)) => return None,
+                        // The public methods of `impl String { ... }`, which come with the module
+                        DeclarationKind::Impl { trait_name, target, methods, .. } if trait_name.is_empty() => {
+                            let receiver = type_owner(&target);
+                            return methods.into_iter()
+                                .filter(|method| matches!(method.visibility, Visibility::Public))
+                                .filter_map(|method| match method.kind {
+                                    DeclarationKind::Function { name, params, return_type, .. } => Some(Importable {
+                                        signature: signature_of(&name, &params, return_type),
+                                        name,
+                                        kind: DefKind::Method,
+                                        module: m.name.clone(),
+                                        receiver: receiver.clone(),
+                                    }),
+                                    _ => None,
+                                })
+                                .collect();
+                        }
+                        DeclarationKind::Impl { .. } | DeclarationKind::Extern(ExternItem::Link(_)) => return vec![],
                     };
-                    Some(Importable { name, kind, signature, module: m.name.clone() })
+                    vec![Importable { name, kind, signature, module: m.name.clone(), receiver }]
                 }).collect()
             })
             .collect()
@@ -928,6 +975,19 @@ impl Server {
                 "edit": { "changes": { uri.clone(): edits } },
             }));
         }
+
+        // `get()` calling a method of the surrounding class becomes `self.get()` or `Class::get()`
+        for error in &analysis.errors {
+            let error_path = error.file.clone().unwrap_or_else(|| analysis.root.clone());
+            let Some(span) = error.span.as_ref().filter(|s| error_path == path && s.line >= start && s.line <= end) else { continue };
+            let Some(prefix) = method_call_prefix(&error.message) else { continue };
+            let line = text.lines().nth(span.line).unwrap_or("");
+            actions.push(json!({
+                "title": format!("Call it as `{}`", error.message.rsplit_once("call it as `").map_or("", |(_, fix)| fix.trim_end_matches('`'))),
+                "kind": "quickfix",
+                "edit": { "changes": { uri.clone(): [insertion(span.line, col_to_utf16(line, span.col), prefix.to_string())] } },
+            }));
+        }
         json!(actions)
     }
 }
@@ -987,6 +1047,9 @@ struct Importable {
     signature: String,
     /// The module to import, like `std::fs` or `math`.
     module: String,
+    /// For a function, the type of its first parameter, like `String` for
+    /// `split(text: &String, ...)`. It can be called on such a value: `text.split(',')`.
+    receiver: Option<String>,
 }
 
 /// The completion item of `importable`, written by its own name like `read`.
@@ -1000,7 +1063,7 @@ fn importable_item(importable: &Importable, import: Option<Value>) -> Value {
         "labelDetails": { "description": importable.module },
         "insertText": short,
     });
-    if importable.kind == DefKind::Function {
+    if matches!(importable.kind, DefKind::Function | DefKind::Method) {
         item["insertText"] = json!(format!("{}($0)", short));
         item["insertTextFormat"] = json!(2);
     }
@@ -1077,7 +1140,7 @@ fn scanned_importables(module: &module::Module) -> Vec<Importable> {
                 };
                 if let Some((kind, keyword)) = kind {
                     let signature = if keyword == "func" { format!("{}(…)", name) } else { format!("{} {}", keyword, name) };
-                    found.push(Importable { name, kind, signature, module: module.name.clone() });
+                    found.push(Importable { name, kind, signature, module: module.name.clone(), receiver: None });
                 }
                 pending.clear();
                 continue;
@@ -1091,6 +1154,35 @@ fn scanned_importables(module: &module::Module) -> Vec<Importable> {
         pending.clear();
     }
     found
+}
+
+/// What goes before the name in sema's "call it as `self.get(...)`" error for
+/// a method called without receiver: `self.` or `Class::`.
+fn method_call_prefix(message: &str) -> Option<&str> {
+    let (method, fix) = message.split_once(" is a method of ")?.0.strip_prefix('\'')
+        .and_then(|m| m.strip_suffix('\''))
+        .zip(message.rsplit_once("call it as `").map(|(_, fix)| fix))?;
+    fix.strip_suffix(&format!("{}(...)`", method))
+}
+
+/// `text` with the hidden trait of an `impl String { ... }` block, named like
+/// `String@main` (see [`crate::parser::desugar_inherent_impls`]), written as
+/// the block: `pub trait String@main {` becomes `impl String {`, and
+/// `String@main.shout` becomes `String.shout`.
+fn shown_name(text: &str) -> String {
+    if !text.contains('@') {
+        return text.to_string();
+    }
+    let text = text.replacen("pub trait ", "impl ", 1);
+    let mut shown = String::new();
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find('@') {
+        shown.push_str(&rest[..at]);
+        let after = &rest[at..];
+        rest = &after[after.find(['.', ' ']).unwrap_or(after.len())..];
+    }
+    shown.push_str(rest);
+    shown
 }
 
 /// The first name in quotes in `message`, `x` of "unknown identifier 'x'".

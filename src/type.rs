@@ -52,6 +52,10 @@ pub enum Type {
     /// A C pointer declared with `extern type Name;`, only passed to and
     /// returned from `extern func`s. Copied like a number, C frees it.
     Handle(String),
+    /// `impl Iterator<T>` as the return type of a trait method: each impl
+    /// returns a type of its own that implements the trait, like `Iterator<T>`
+    /// as [`Type::Class`] or [`Type::Generic`]. Never the type of a value.
+    Opaque(Box<Type>),
 }
 
 impl Display for Type {
@@ -85,6 +89,10 @@ impl Display for Type {
             }
             Type::Ref(inner)    => write!(f, "Ref({})", inner),
             Type::Handle(name)  => write!(f, "{}", name),
+            Type::Opaque(bound) => match bound.as_ref() {
+                Type::Class(name) => write!(f, "impl {}", name),
+                other => write!(f, "impl {}", other),
+            },
         }
     }
 }
@@ -174,6 +182,7 @@ impl<'ctx> Type {
             Type::Class(name) => ctx.module.get_struct_type(name).expect("struct not defined").into(),
             Type::Param(name) => panic!("type parameter '{}' reached codegen — sema did not substitute it", name),
             Type::Generic { name, .. } => panic!("generic type '{}' reached codegen — sema did not instantiate it", name),
+            Type::Opaque(_) => panic!("'{}' reached codegen — only trait methods return it", self),
             Type::Ref(_) | Type::Unique(_) | Type::Shared(_) | Type::Buffer(_) | Type::Handle(_) => ctx.context.ptr_type(AddressSpace::default()).into(),
             Type::Array(element, len) => element.to_llvm(ctx).array_type(*len as u32).into(),
             Type::Slice(_) => ctx.slice_type().into(),
@@ -200,6 +209,7 @@ impl<'ctx> Type {
             Type::Class(name) => ctx.module.get_struct_type(name).expect("struct not defined").fn_type(param_types, false),
             Type::Param(name) => panic!("type parameter '{}' reached codegen — sema did not substitute it", name),
             Type::Generic { name, .. } => panic!("generic type '{}' reached codegen — sema did not instantiate it", name),
+            Type::Opaque(_) => panic!("'{}' reached codegen — only trait methods return it", self),
             Type::Ref(_) | Type::Unique(_) | Type::Shared(_) | Type::Buffer(_) | Type::Handle(_) => ctx.context.ptr_type(AddressSpace::default()).fn_type(param_types, false),
             Type::Array(..) | Type::Slice(_) | Type::Tuple(_) => self.to_llvm(ctx).fn_type(param_types, false),
         }

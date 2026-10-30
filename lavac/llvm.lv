@@ -25,10 +25,29 @@ pub extern type LLVMBasicBlockRef;
 // AddressSpace
 
 pub class AddressSpace {
-  pub space: uint32;
+  pub value: uint32;
 
   pub func default() -> AddressSpace {
     return AddressSpace(0);
+  }
+}
+
+// Linkage
+
+pub extern func LLVMSetLinkage(global: LLVMValueRef, linkage: int32);
+pub extern func LLVMGetLinkage(global: LLVMValueRef);
+
+pub enum Linkage {
+  External,
+  Internal,
+  Private
+
+  pub func to_int(&self) -> int32 {
+    match self {
+      Linkage::External => 0,
+      Linkage::Internal => 8,
+      Linkage::Private => 9,
+    }
   }
 }
 
@@ -47,11 +66,25 @@ pub extern func LLVMWriteBitcodeToFile(module: LLVMModuleRef, path: String) -> i
 // Prints what's wrong to stderr with `action` 1, gives 1 if something is
 pub extern func LLVMVerifyFunction(function: LLVMValueRef, action: int32) -> int32;
 
-pub class Module {
-  name: String;
+pub extern type BasicBlock: LLVMBasicBlockRef;
 
-  Constructor(name: String, context: LLVMContextRef) {
+pub extern type Builder: LLVMBuilderRef {
+  pub func position_at_end(&self, block: BasicBlock) {
+    LLVMPositionBuilderAtEnd(self, block);
+  }
+}
+
+pub extern type Function: LLVMValueRef;
+
+pub extern type Module: LLVMModuleRef {
+  pub func new(name: String, context: LLVMContextRef) -> Module {
     LLVMModuleCreateWithNameInContext(name, context);
+  }
+
+  pub func add_function(&self, name: String, fn_type: FunctionType, linkage: Linkage) -> Function {
+    let fn = LLVMAddFunction(self, name, fn_type);
+    LLVMSetLinkage(fn, linkage.to_int());
+    return fn;
   }
 }
 
@@ -59,7 +92,15 @@ pub class Context {
   ref: LLVMContextRef = LLVMContextCreate();
 
   pub func create_module(&self, name: String) -> Module {
-    return Module(name, self.ref);
+    return Module::new(name, self.ref);
+  }
+
+  pub func new_builder(&self) -> Builder {
+    return LLVMCreateBuilderInContext(self.ref);
+  }
+
+  pub func append_basic_block(&self, main_fn: Function, name: String) -> BasicBlock {
+    return LLVMAppendBasicBlockInContext(self.ref, main_fn, name);
   }
 
   // types
@@ -68,8 +109,10 @@ pub class Context {
   }
 
   pub func ptr_type(&self, address_space: AddressSpace) -> PointerType {
-    return LLVMPointerTypeInContext(self.ref, address_space.space);
+    return LLVMPointerTypeInContext(self.ref, address_space.value);
   }
+
+
 }
 
 // Types: kinds of `LLVMTypeRef`, each one can be used where an `LLVMTypeRef`
@@ -84,7 +127,7 @@ pub extern type IntType: Type {
     return LLVMIntTypeInContext(context, size);
   }
 
-  pub func as_fn_type(&self, params: &[LLVMTypeRef], variadic: bool) -> FunctionType {
+  pub func as_fn_type(&self, params: &[Type], variadic: bool) -> FunctionType {
     return LLVMFunctionType(self, params, params.len() as uint32, variadic ? 1 : 0);
   }
 }
@@ -116,15 +159,15 @@ pub extern func LLVMSetInitializer(global: LLVMValueRef, value: LLVMValueRef);
 
 // Functions and blocks
 
-pub extern func LLVMAddFunction(module: LLVMModuleRef, name: String, ty: LLVMTypeRef) -> LLVMValueRef;
+pub extern func LLVMAddFunction(module: LLVMModuleRef, name: String, ty: LLVMTypeRef) -> Function;
 pub extern func LLVMGetParam(function: LLVMValueRef, index: uint32) -> LLVMValueRef;
-pub extern func LLVMAppendBasicBlockInContext(context: LLVMContextRef, function: LLVMValueRef, name: String) -> LLVMBasicBlockRef;
+pub extern func LLVMAppendBasicBlockInContext(context: LLVMContextRef, function: LLVMValueRef, name: String) -> BasicBlock;
 
 // Builder
 
-pub extern func LLVMCreateBuilderInContext(context: LLVMContextRef) -> LLVMBuilderRef;
+pub extern func LLVMCreateBuilderInContext(context: LLVMContextRef) -> Builder;
 pub extern func LLVMDisposeBuilder(builder: LLVMBuilderRef);
-pub extern func LLVMPositionBuilderAtEnd(builder: LLVMBuilderRef, block: LLVMBasicBlockRef);
+pub extern func LLVMPositionBuilderAtEnd(builder: Builder, block: BasicBlock);
 pub extern func LLVMGetInsertBlock(builder: LLVMBuilderRef) -> LLVMBasicBlockRef;
 
 pub extern func LLVMBuildRet(builder: LLVMBuilderRef, value: LLVMValueRef) -> LLVMValueRef;

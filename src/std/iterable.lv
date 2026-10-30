@@ -1,0 +1,25 @@
+// std::iterable: going through values one after the other.
+//
+//   import std::iterable::{Iterator, Iterable};
+//
+//   for name in names {
+//     print(name);
+//   }
+//
+// A `for` loop takes an `Iterator`, which gives the values, or an `Iterable`
+// like a `Vector`, whose `iter` gives an iterator over its values.
+
+import std::option::{Option};
+
+// Gives values one after the other.
+pub trait Iterator<T> {
+  // The next value, `None` once there are no more.
+  func next(mut &self) -> Option<T>;
+}
+
+// Has values to go through, like a collection.
+pub trait Iterable<T> {
+  // An iterator over the values, starting at the first one. Each impl
+  // returns its own iterator class.
+  func iter(&self) -> impl Iterator<T>;
+}
