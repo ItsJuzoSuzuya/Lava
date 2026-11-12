@@ -3,18 +3,25 @@ import std::string::{is_whitespace, is_alpha, is_alphanumeric, is_digit};
 import span;
 import std::result::{Result};
 
+pub enum LexError {
+  TokenNotImplemented => String,
+  FloatLiteralToBig,
+  IntLiteralToBig
+} 
+
 /// Turns source code into [`Token`]s, one at a time.
 ///
 /// Tracks the current line and column, so every token comes with the [`Span`]
 /// it was read from.
 pub class Lexer {
   source: String;
+
   position: uint64 = 0;
   line: uint32 = 1;
   col: uint32 = 1;
 
 
-  pub func get_next_token(mut &self) -> Result<Token, String> {
+  pub func next_token(mut &self) -> Result<Token, LexError> {
     self.skip_blank();
     let line = self.line;
     let col = self.col;
@@ -40,11 +47,114 @@ pub class Lexer {
     if is_digit(current) {
       while !self.at_end() && is_digit(self.current()) {
         self.advance();
-      }
-      let num = self.source.slice(start_point, self.position);
-      if  
+      } 
 
+      // '.' signals floating point number
+      if self.current() == '.' {
+        self.advance();
+        while !self.at_end() && is_digit(self.current()) {
+          self.advance();
+        } 
+        
+        let number = self.source.slice(start_point, self.position);
+        let span = Span(line, col, number.len() as uint32);
+        match number.try_as<float64>() {
+          Some(f64) => return Ok(Token(TokenKind::FloatLiteral(f64), span))
+          None => return Err(LexError::FloatLiteralToBig)
+        }
+      }
+      
+      // If not float then int
+      let number = self.source.slice(start_point, self.position);
+      let span = Span(line, col, number.len() as uint32);
+      match number.try_as<int64>() {
+        Some(i64) => return Token(TokenKind::IntLiteral(i64), span)
+        None => return Err(LexError::IntLiteralToBig)
+      }
     }
+    
+    while !self.at_end() && is_digit(self.current()) {
+      self.advance();
+    } 
+
+    let token = self.source.slice(start_point, self.position);
+    return Err(LexError::TokenNotImplemented(token));
+  }
+
+  pub func peek(mut &self) -> Result<Token, LexError> {
+    self.skip_blank();
+    if self.at_end() {
+      let span = Span(self.line, self.col, 0);
+      let token = Token(TokenKind::EOF, span);
+      return Ok(token);
+    }
+
+    let line = self.line;
+    let col = self.col;
+    let current = self.current();
+    let start_point = self.position;
+
+    if is_alpha(current) || current == '_' {
+      while !self.at_end() && (is_alphanumeric(self.current()) || self.current() == '_') {
+        self.advance();
+      }
+      let word = self.source.slice(start_point, self.position);
+      let kind = TokenKind::from_string(word);
+      let span = Span(line, col, word.len() as uint32);
+
+      self.position = start_point;
+      self.line = line;
+      self.col = col;
+      return Ok(Token(kind, span));
+    }
+
+    if is_digit(current) {
+      while !self.at_end() && is_digit(self.current()) {
+        self.advance();
+      } 
+
+      // '.' signals floating point number
+      if self.current() == '.' {
+        self.advance();
+        while !self.at_end() && is_digit(self.current()) {
+          self.advance();
+        } 
+        
+        let word = self.source.slice(start_point, self.position);
+        let span = Span(line, col, word.len() as uint32);
+
+        self.position = start_point;
+        self.line = line;
+        self.col = col;
+        match word.try_as<float64>() {
+          Some(f64) => return Ok(Token(TokenKind::FloatLiteral(f64), span))
+          None => return Err(LexError::FloatLiteralToBig)
+        }
+      }
+      
+      // If not float then int
+      let word = self.source.slice(start_point, self.position);
+      let span = Span(line, col, word.len() as uint32);
+
+      self.position = start_point;
+      self.line = line;
+      self.col = col;
+      match word.try_as<int64>() {
+        Some(i64) => return Ok(Token(TokenKind::IntLiteral(i64), span))
+        None => return Err(LexError::IntLiteralToBig)
+      }
+    }
+
+    while !self.at_end() && is_digit(self.current()) {
+      self.advance();
+    } 
+
+    let token = self.source.slice(start_point, self.position);
+    self.position = start_point;
+    self.line = line;
+    self.col = col;
+
+    return Err(LexError::TokenNotImplemented(token));
   }
 
   /// Skip whitespaces and comments
@@ -83,10 +193,5 @@ pub class Lexer {
 
   func at_end(&self) -> bool {
     self.position > self.source.len()
-  }
-
-  func is_keyword(word: &String) -> bool {
-    let keywords = "as break class Constructor continue else enum false for func if impl import let match mut print pub return self trait true while";
-    return keywords.split(' ').contains_word(word);
   }
 }

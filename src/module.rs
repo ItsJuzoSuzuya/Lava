@@ -7,8 +7,8 @@ use crate::{diagnostic::{self, CompileError}, lexer::Lexer, span::Span, token::T
 pub struct Import {
     /// Name of the imported module, `math` or `std::fs`.
     pub name: String,
-    /// Items of a standard library module usable without its name, `read`
-    /// in `import std::fs::{read};` or `import std::fs::read;`.
+    /// Items usable without the module's name, `read` in `import std::fs::{read};`
+    /// or `import std::fs::read;`, `Module` in `import llvm::{Module};`.
     pub items: Vec<(String, Span)>,
     pub span: Span,
 }
@@ -22,6 +22,9 @@ pub struct Module {
     /// Canonical path of the file.
     pub path: PathBuf,
     pub source: String,
+    /// Whether this is the program's main file. Its names stay as they are,
+    /// the ones of other modules get the module's name, see [`Module::renames`].
+    pub root: bool,
 }
 
 impl Module {
@@ -30,16 +33,62 @@ impl Module {
         self.name.strip_prefix("std::")
     }
 
-    /// What the parser renames this module's names to. A standard library
-    /// module's top-level declarations get its name, `read` in `std::fs`
-    /// becomes `fs::read`, so modules can declare the same names and code
-    /// using them says which one it means.
+    /// What the parser renames this module's names to. A module's top-level
+    /// declarations get its name, `read` in `std::fs` becomes `fs::read` and
+    /// `Module` in `llvm.lv` becomes `llvm::Module`, so modules can declare
+    /// the same names and code using them says which one it means. The
+    /// program's main file and the prelude keep their names.
     pub fn renames(&self) -> HashMap<String, String> {
-        let Some(std_name) = self.std_name() else { return HashMap::new() };
-        top_level_names(&self.source).into_iter()
-            .map(|name| (name.clone(), format!("{}::{}", std_name, name)))
+        let qualifier = match self.std_name() {
+            Some(std_name) => std_name,
+            None if !self.qualified() => return HashMap::new(),
+            None => self.name.as_str(),
+        };
+        self.declared_names().into_iter()
+            .map(|name| (name.clone(), format!("{}::{}", qualifier, name)))
             .collect()
     }
+
+    /// Whether this is one of the program's own modules whose names get the
+    /// module's name, see [`Module::renames`]. The main file's don't, and
+    /// neither do those of a module named like a standard library module,
+    /// like `vector.lv`, whose names would be the same as that one's.
+    pub fn qualified(&self) -> bool {
+        self.std_name().is_none() && !self.root && self.name != "prelude" && std_source(&self.name).is_none()
+    }
+
+    /// The names this module declares at the top level, without its name:
+    /// functions, classes, enums, traits, and in the program's own modules
+    /// extern types too.
+    pub fn declared_names(&self) -> Vec<String> {
+        let mut names = top_level_names(&self.source);
+        if self.std_name().is_none() {
+            names.extend(extern_type_names(&self.source));
+        }
+        names
+    }
+}
+
+/// Names of the extern types `source` declares, like `Module` of
+/// `pub extern type Module: LLVMModuleRef;`.
+fn extern_type_names(source: &str) -> Vec<String> {
+    let mut lexer = Lexer::new(source.to_string());
+    let mut names = Vec::new();
+    let mut depth = 0usize;
+    // How far `extern type Name` got: 1 after `extern`, 2 after `type`
+    let mut step = 0;
+    while let Ok((token, _)) = lexer.get_next_token() {
+        step = match token {
+            Token::EOF => break,
+            Token::LBrace => { depth += 1; 0 }
+            Token::RBrace => { depth = depth.saturating_sub(1); 0 }
+            Token::Extern if depth == 0 => 1,
+            Token::Identifier(word) if step == 1 && word == "type" => 2,
+            Token::Identifier(name) if step == 2 => { names.push(name); 0 }
+            _ => 0,
+        };
+    }
+    names
 }
 
 /// All modules reachable from a root source file.
@@ -87,7 +136,12 @@ impl ModuleGraph {
         let prelude_path = prelude_path();
         let source = graph.overlay.get(&prelude_path).cloned().unwrap_or_else(|| PRELUDE.to_string());
         graph.seen.push(prelude_path.clone());
-        graph.modules.push(Module { imports: vec![], name: "prelude".to_string(), path: prelude_path, source });
+        graph.modules.push(Module { imports: vec![], name: "prelude".to_string(), path: prelude_path, source, root: false });
+        // Their impls work everywhere, like `text.try_as<int32>()`. Their
+        // names, like the trait `TryAs`, still need an import
+        for name in ALWAYS_LOADED {
+            graph.load_std_module(name);
+        }
 
         let root_path = root_path.as_ref();
         let path = canonical(root_path).unwrap_or_else(|| {
@@ -102,9 +156,15 @@ impl ModuleGraph {
             None => graph.load(path),
         }
 
-        // The program's own declarations replace the prelude's with the same name
+        // The main file comes last, after its imports. Its names stay as they are
+        if let Some(last) = graph.modules.last_mut().filter(|m| m.std_name().is_none() && m.name != "prelude") {
+            last.root = true;
+        }
+
+        // The main file's declarations replace the prelude's with the same name. The
+        // other modules' names have their module's name, they can't clash with the prelude's
         let own_names: Vec<String> = graph.modules[1..].iter()
-            .filter(|m| m.std_name().is_none())
+            .filter(|m| m.root)
             .flat_map(|m| top_level_names(&m.source))
             .collect();
         graph.modules[0].source = rename_shadowed(&graph.modules[0].source, &own_names);
@@ -141,7 +201,7 @@ impl ModuleGraph {
         });
 
         let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        self.modules.push(Module { imports, name, path, source });
+        self.modules.push(Module { imports, name, path, source, root: false });
     }
 
     /// Records the error `message` about `import` in `importer`, the source of
@@ -189,7 +249,7 @@ impl ModuleGraph {
                 false
             }
         });
-        self.modules.push(Module { imports, name: format!("std::{}", name), path, source });
+        self.modules.push(Module { imports, name: format!("std::{}", name), path, source, root: false });
     }
 }
 
@@ -212,6 +272,8 @@ pub const STD: &[(&str, &str)] = &[
     ("vector", include_str!("std/vector.lv")),
     ("string", include_str!("std/string.lv")),
     ("collections", include_str!("std/collections.lv")),
+    ("convert", include_str!("std/convert.lv")),
+    ("default", include_str!("std/default.lv")),
     ("hashmap", include_str!("std/hashmap.lv")),
     ("path", include_str!("std/path.lv")),
     ("env", include_str!("std/env.lv")),
@@ -220,6 +282,9 @@ pub const STD: &[(&str, &str)] = &[
     ("math", include_str!("std/math.lv")),
     ("process", include_str!("std/process.lv")),
 ];
+
+/// Standard library modules every program loads, without importing them.
+pub const ALWAYS_LOADED: &[&str] = &["convert", "default"];
 
 /// The source of the standard library module `std::<name>`, if there's one.
 pub fn std_source(name: &str) -> Option<&'static str> {
@@ -337,6 +402,7 @@ fn import_of_path(mut path: Vec<(String, Span)>, mut items: Vec<(String, Span)>)
         }
         return Some(Import { name: format!("std::{}", path[1].0), items, span });
     }
+    // `import llvm::{Module};` imports `Module` of `llvm`
     let (name, _) = path.pop()?;
-    Some(Import { name, items: vec![], span })
+    Some(Import { name, items, span })
 }

@@ -72,8 +72,8 @@ let some = Option::Some(4);
 let none: Option<int32> = Option::None;
 print(some.is_some());
 print(none.is_none());
-print(some.unwrap_or(0));
-print(none.unwrap_or(7));
+print(some ?? 0);
+print(none ?? 7);
 --- output
 true
 true
@@ -295,7 +295,7 @@ mut ages = Map<int32>();
 ages.put("ada", 36);
 ages.put("alan", 41);
 ages.put("ada", 37);
-print(ages.find("ada").unwrap_or(0));
+print(ages.find("ada") ?? 0);
 print(ages.find("bob").is_none());
 print(ages.has("alan"));
 print(ages.len());
@@ -418,3 +418,99 @@ default
 let x = 5 ?? 0;
 --- error
 '??' gives the value of an Option or Result, 'int32' is neither
+
+=== ?? return leaves the function without a value
+import std::result::{Result};
+func parse(n: int32) -> Result<String, String> {
+  return n == 0 ? Err("zero") : Ok("fine");
+}
+func describe(n: int32) -> String {
+  let text = parse(n) ?? return "nothing";
+  return text + "!";
+}
+print(describe(1));
+print(describe(0));
+--- output
+fine!
+nothing
+
+=== ?? break and ?? continue in loops
+import std::option::{Option};
+import std::vector::{Vector};
+mut v = Vector<int32>();
+v.push(1);
+v.push(2);
+v.push(3);
+mut i: uint64 = 0;
+while true {
+  let item = v.at(i) ?? break;
+  i = i + 1;
+  let even = item % 2 == 0 ? Some(item) : None;
+  print(even ?? continue);
+}
+print("done");
+--- output
+2
+done
+
+=== ?? break outside a loop is an error
+import std::option::{Option};
+let a: Option<int32> = None;
+let x = a ?? break;
+--- error
+'break' can only be used inside a loop
+
+=== a value where a Result is expected becomes its Ok
+import std::result::{Result};
+func number(n: int32) -> Result<int64, String> {
+  if n < 0 {
+    return Err("negative");
+  }
+  return n * 2;
+}
+func text() -> Result<String, String> {
+  return "fine";
+}
+let r: Result<int32, String> = 11;
+print(number(4) ?? -1);
+print(number(-4) is Err(e) ? e : "none");
+print(text() ?? "error");
+print(r ?? 0);
+--- output
+8
+negative
+fine
+11
+
+=== an error value isn't wrapped in Err by itself
+import std::result::{Result};
+func f() -> Result<int32, String> {
+  return "bad";
+}
+print(f() ?? 0);
+--- error
+an error has to be written `Err(...)`
+
+=== a value where an Option is expected becomes its Some
+import std::option::{Option};
+func half(n: int32) -> Option<int64> {
+  if n % 2 == 1 {
+    return None;
+  }
+  return n / 2;
+}
+func name(n: int32) -> Option<String> {
+  return n > 0 ? "positive" : None;
+}
+let o: Option<String> = "set";
+print(half(4) ?? -1);
+print(half(3) ?? -1);
+print(name(1) ?? "none");
+print(name(-1) ?? "none");
+print(o ?? "unset");
+--- output
+2
+-1
+positive
+none
+set

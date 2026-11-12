@@ -261,3 +261,12 @@ func first<T>(a: T, b: T) -> T {
 print(first(1, 2));
 --- lint
 main.lv:1:21 unused_parameter: parameter 'b' is never used
+
+=== for loops get no warnings about their hidden parts
+import std::vector::{Vector};
+mut v = Vector<int32>();
+v.push(1);
+for x in v {
+  print(x);
+}
+--- lint

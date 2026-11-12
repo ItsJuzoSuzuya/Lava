@@ -87,7 +87,7 @@ impl Display for Type {
                 let items: Vec<String> = items.iter().map(|t| t.to_string()).collect();
                 write!(f, "({})", items.join(", "))
             }
-            Type::Ref(inner)    => write!(f, "Ref({})", inner),
+            Type::Ref(inner)    => write!(f, "&{}", inner),
             Type::Handle(name)  => write!(f, "{}", name),
             Type::Opaque(bound) => match bound.as_ref() {
                 Type::Class(name) => write!(f, "impl {}", name),
@@ -133,12 +133,12 @@ impl<'ctx> Type {
     }
 
     /// Name the methods of this type are declared and mangled under: the class
-    /// or enum name, or the type's spelling for built-in types like `int32`.
-    /// `None` for types that can't have methods.
+    /// or enum name, or the type's spelling for built-in types like `int32` or
+    /// `Buffer<int32>`. `None` for types that can't have methods.
     pub fn owner_name(&self) -> Option<String> {
         match self {
             Type::Class(name) | Type::Enum(name) | Type::Handle(name) => Some(name.clone()),
-            Type::Int { .. } | Type::Float { .. } | Type::Bool | Type::Char => Some(self.to_string()),
+            Type::Int { .. } | Type::Float { .. } | Type::Bool | Type::Char | Type::Buffer(_) => Some(self.to_string()),
             _ => None,
         }
     }

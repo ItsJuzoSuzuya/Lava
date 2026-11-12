@@ -17,6 +17,16 @@ pub class Vector<T> {
 
   Constructor();
 
+  // `count` elements, each the default value of `T`, like `Vector<Bucket>(16)`.
+  // Only for an element type with a default, see `std::default`.
+  Constructor(count: uint64) {
+    mut i: uint64 = 0;
+    while i < count {
+      self.push(T::default());
+      i = i + 1;
+    }
+  }
+
   // Adds `item` at the end.
   pub func push(mut &self, item: T) {
     self.grow_if_full();
@@ -33,23 +43,23 @@ pub class Vector<T> {
     return self.data.take(self.length);
   }
 
-  // A copy of the element at `index`.
-  pub func get(&self, index: uint64) -> T {
+  // The element at `index`.
+  pub func get(&self, index: uint64) -> &T {
     self.check_index(index);
     return self.data.get(index);
   }
 
-  // A copy of the element at `index`, or `None` if there's none:
+  // The element at `index`, or `None` if there's none:
   // `args.at(2) ?? "main.lv"`. `v[i]` and `get` stop the program instead.
-  pub func at(&self, index: uint64) -> Option<T> {
-    if index >= self.length 
+  pub func at(&self, index: uint64) -> Option<&T> {
+    if index >= self.length
       return None;
 
     Some(self.data.get(index))
   }
 
-  // A copy of the last element, stops the program if there's none.
-  pub func last(&self) -> T {
+  // The last element, stops the program if there's none.
+  pub func last(&self) -> &T {
     if self.length == 0 {
       panic("last on an empty Vector");
     }
@@ -128,6 +138,10 @@ impl<T> Iterable<T> for Vector<T> {
   func iter(&self) -> VectorIter<T> {
     return VectorIter(self);
   }
+
+  func contains(&self, value: &T) -> bool {
+    return VectorIter(self).contains(value);
+  }
 }
 
 // Goes through the elements of a `Vector`, see its `iter`.
@@ -139,11 +153,20 @@ pub class VectorIter<T> {
 }
 
 impl<T> Iterator<T> for VectorIter<T> {
-  func next(mut &self) -> Option<T> {
+  func next(mut &self) -> Option<&T> {
     if self.position >= self.vector.len() {
       return None;
     }
     self.position = self.position + 1;
     return Some(self.vector.get(self.position - 1));
+  }
+
+  func contains(mut &self, value: &T) -> bool {
+    for item in self {
+      if item == value 
+        return true;
+    }
+
+    return false;
   }
 }

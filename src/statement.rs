@@ -1,11 +1,12 @@
 use std::{fmt::Display};
 
+use inkwell::AddressSpace;
 use inkwell::basic_block::BasicBlock;
 use inkwell::types::BasicType;
 use inkwell::IntPredicate;
 use inkwell::values::{BasicValueEnum, IntValue, PointerValue};
 
-use crate::{codegen_ctx::{CodegenContext, CodegenError, LoopTarget, function_symbol}, sym::OwnedSlot, declaration::Declaration, expression::{Block, Expr, ExprKind, ListRest, MatchArm, Pattern, build_comparison, strings_equal}, token::Token, span::Span, traits::codegen::Codegen, r#type::Type};
+use crate::{codegen_ctx::{CodegenContext, CodegenError, LoopTarget, PendingIs}, sym::OwnedSlot, declaration::Declaration, expression::{Block, Expr, ExprKind, ListRest, MatchArm, Pattern, build_comparison, strings_equal}, token::Token, span::Span, traits::codegen::Codegen, r#type::Type};
 
 #[derive(Clone)]
 pub struct Stmt {
@@ -17,6 +18,12 @@ pub struct Stmt {
 impl Stmt {
     pub fn new(kind: StmtKind, span: Span, ty: Type) -> Self {
         Self { kind, span, ty }
+    }
+}
+
+impl std::fmt::Debug for Stmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.kind)
     }
 }
 
@@ -86,12 +93,16 @@ impl Codegen for Stmt {
                 value
             }
             StmtKind::Return(expr) => {
-                // The return value is computed first, it may move a `Unique` out of a variable
-                let expr_val = expr.codegen(ctx).unwrap();
+                // The return value is computed first, it may move a `Unique` out of a variable.
+                // `return log(x);` in a function without a value runs the call and returns nothing
+                let expr_val = expr.codegen(ctx);
                 // The value is computed, temporaries of the expressions around the `return` are freed too
                 ctx.emit_temporary_drops(0);
                 ctx.emit_all_drops();
-                ctx.builder.build_return(Some(&*expr_val)).unwrap();
+                match expr_val {
+                    Some(value) => ctx.builder.build_return(Some(&*value)).unwrap(),
+                    None => ctx.builder.build_return(None).unwrap(),
+                };
                 // A `return` at the top level ends the program in the entry point.
                 // The code after it is never run, but still needs a block to go into
                 let function = ctx.builder.get_insert_block().and_then(|b| b.get_parent()).unwrap();
@@ -146,47 +157,21 @@ impl Codegen for Stmt {
                     return None;
                 }
 
+                // A reference to a class or enum holds its address, like a parameter `&T`
                 let nominal_name = match &ty {
                     Type::Class(n) | Type::Enum(n) => Some(n.clone()),
+                    Type::Ref(inner) => match inner.as_ref() {
+                        Type::Class(n) | Type::Enum(n) => Some(n.clone()),
+                        _ => None,
+                    },
                     _ => None,
                 };
 
-                if nominal_name.is_some() {
-                    if let ExprKind::FunctionCall { params, receiver: None, mangled, .. } = &value.kind {
-                        match mangled {
-                            Some(fn_name) => {
-                                let function = match ctx.module.get_function(&function_symbol(fn_name)) {
-                                    Some(f) => f,
-                                    None => panic!("constructor '{}' not defined", fn_name),
-                                };
-                                let mut llvm_params: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                                for param in params {
-                                    llvm_params.push((*param.codegen(ctx).unwrap()).into());
-                                }
-                                let ret_val = ctx.builder.build_call(function, &llvm_params, "ctor")
-                                    .unwrap()
-                                    .try_as_basic_value()
-                                    .basic()
-                                    .expect("constructor must return a value");
-                                ctx.builder.build_store(ptr, ret_val).unwrap();
-                                ctx.push_var(name.to_string(), llvm_ty, ptr, nominal_name);
-                            }
-                            None => {
-                                let llvm_val = *value.codegen(ctx).unwrap();
-                                ctx.builder.build_store(ptr, llvm_val).unwrap();
-                                ctx.push_var(name.to_string(), llvm_ty, ptr, nominal_name);
-                            }
-                        }
-                    } else {
-                        let llvm_val = *value.codegen(ctx).unwrap();
-                        ctx.builder.build_store(ptr, llvm_val).unwrap();
-                        ctx.push_var(name.to_string(), llvm_ty, ptr, nominal_name);
-                    }
-                } else {
-                    let llvm_val = *value.codegen(ctx).unwrap();
-                    ctx.builder.build_store(ptr, llvm_val).unwrap();
-                    ctx.push_var(name.to_string(), llvm_ty, ptr, None);
-                }
+                // Calls, constructors among them, go through the call's own code,
+                // which lends arguments to `&` parameters
+                let llvm_val = *value.codegen(ctx).unwrap();
+                ctx.builder.build_store(ptr, llvm_val).unwrap();
+                ctx.push_var(name.to_string(), llvm_ty, ptr, nominal_name);
 
                 return None;
             }
@@ -197,23 +182,42 @@ impl Codegen for Stmt {
                 let body_bb = ctx.context.append_basic_block(function, "while_body");
                 let end_bb = ctx.context.append_basic_block(function, "while_end");
 
+                let next_bb = ctx.context.append_basic_block(function, "while_next");
+
                 ctx.builder.build_unconditional_branch(cond_bb).unwrap();
                 ctx.builder.position_at_end(cond_bb);
+                // Values an `is` in the condition matched live until the round ends,
+                // its names exist in the body only
+                let prev_scope = ctx.scope.clone();
+                let drop_depth = ctx.drop_scopes.len();
+                ctx.drop_scopes.push(Vec::new());
+                let is_mark = ctx.pending_is.len();
+                ctx.keep_is_bindings = true;
                 let condition = condition.codegen(ctx).unwrap().into_int_value();
                 ctx.builder.build_conditional_branch(condition, body_bb, end_bb).unwrap();
 
                 // After the body, the condition is checked again
                 ctx.builder.position_at_end(body_bb);
+                bind_is_patterns(ctx, is_mark);
+                ctx.pending_is.truncate(is_mark);
                 ctx.loops.push(LoopTarget {
                     continue_bb: cond_bb,
                     break_bb: end_bb,
-                    drop_depth: ctx.drop_scopes.len(),
+                    drop_depth,
                     temporary_depth: ctx.temporaries.len(),
                 });
-                codegen_block(ctx, body, cond_bb);
+                codegen_block(ctx, body, next_bb);
                 ctx.loops.pop();
+                ctx.scope = prev_scope;
+                let kept = ctx.drop_scopes.pop().unwrap_or_default();
 
+                ctx.builder.position_at_end(next_bb);
+                ctx.emit_drops(&kept);
+                ctx.builder.build_unconditional_branch(cond_bb).unwrap();
+
+                // A false condition leaves what it matched behind too
                 ctx.builder.position_at_end(end_bb);
+                ctx.emit_drops(&kept);
                 None
             }
             StmtKind::Break | StmtKind::Continue => {
@@ -301,11 +305,20 @@ pub fn codegen_if<'ctx>(ctx: &mut CodegenContext<'ctx>, condition: &Expr, then_b
     let else_bb = ctx.context.append_basic_block(function, "else");
     let merge_bb = ctx.context.append_basic_block(function, "if_end");
 
+    // Values an `is` in the condition matched live until the `if` ends, its
+    // names exist in the then branch only
+    let prev_scope = ctx.scope.clone();
+    ctx.drop_scopes.push(Vec::new());
+    let is_mark = ctx.pending_is.len();
+    ctx.keep_is_bindings = true;
     let condition = condition.codegen(ctx).unwrap().into_int_value();
     ctx.builder.build_conditional_branch(condition, then_bb, else_bb).unwrap();
 
     ctx.builder.position_at_end(then_bb);
+    bind_is_patterns(ctx, is_mark);
+    ctx.pending_is.truncate(is_mark);
     codegen_value_block(ctx, then_block, merge_bb, result);
+    ctx.scope = prev_scope;
     ctx.builder.position_at_end(else_bb);
     match else_block {
         Some(else_block) => codegen_value_block(ctx, else_block, merge_bb, result),
@@ -314,6 +327,8 @@ pub fn codegen_if<'ctx>(ctx: &mut CodegenContext<'ctx>, condition: &Expr, then_b
         }
     }
     ctx.builder.position_at_end(merge_bb);
+    let kept = ctx.drop_scopes.pop().unwrap_or_default();
+    ctx.emit_drops(&kept);
 }
 
 /// Generates a match on `scrutinee`. For a match used as a value every arm
@@ -338,8 +353,11 @@ pub fn codegen_match<'ctx>(
     let is_enum = matches!(scrutinee_ty, Type::Enum(_));
 
     // Ints, bools and enums switch on their value or tag, anything else like
-    // arrays, vectors and strings tests one arm after the other
-    if !is_enum && !matches!(scrutinee_ty, Type::Int { .. } | Type::Bool | Type::Char) {
+    // arrays, vectors and strings tests one arm after the other. So does an enum
+    // with an arm whose payload pattern can fail, like `Some(1)` or `Some(Ok(x))`
+    let payloads_always_match = arms.iter().all(|arm| !matches!(&arm.pattern,
+        Pattern::EnumVariant { payload: Some(payload), .. } if !payload.always_matches()));
+    if !payloads_always_match || (!is_enum && !matches!(scrutinee_ty, Type::Int { .. } | Type::Bool | Type::Char)) {
         codegen_chain_match(ctx, scrutinee, arms, result);
         return;
     }
@@ -406,19 +424,15 @@ pub fn codegen_match<'ctx>(
                     ctx.push_var(name.clone(), struct_ty.as_basic_type_enum(), enum_ptr, Some(enum_name.clone()));
                 }
             }
-            if let Pattern::EnumVariant { binding: Some(name), variant, .. } = &arm.pattern {
-                let payload_ty = variants.iter().find(|(n, _)| n == variant)
-                    .map(|(_, t)| *t)
-                    .expect("variant payload missing");
+            // The payload pattern always matches here, it only binds names
+            if let Pattern::EnumVariant { payload: Some(payload), variant, .. } = &arm.pattern {
+                let index = variants.iter().position(|(n, _)| n == variant).expect("sema checked the variant");
+                let payload_ty = ctx.enum_variant_types.get(&enum_name).and_then(|types| types.get(index)).cloned()
+                    .expect("sema checked the variant");
                 let payload_ptr = ctx.builder
                     .build_struct_gep(struct_ty, enum_ptr, 1, "payload_ptr")
                     .unwrap();
-                // The class the binding is or points to, through a `Unique` payload too
-                let index = variants.iter().position(|(n, _)| n == variant);
-                let class_name = index
-                    .and_then(|i| ctx.enum_variant_types.get(&enum_name).and_then(|types| types.get(i)))
-                    .and_then(|ty| ty.class_name());
-                ctx.push_var(name.clone(), payload_ty, payload_ptr, class_name);
+                bind_pattern(ctx, payload, payload_ptr, &payload_ty);
             }
 
             codegen_value_block(ctx, &arm.block, merge_bb, result);
@@ -564,6 +578,63 @@ fn scrutinee_place<'ctx>(ctx: &mut CodegenContext<'ctx>, scrutinee: &Expr, ty: &
     slot
 }
 
+/// Generates `value is pattern`: whether the value matches, as an `i1`.
+///
+/// The names of the pattern are bound later by [`bind_is_patterns`], where
+/// the match is known to have succeeded. They look into the value, so a
+/// temporary one like a call's result is kept until the scope around the
+/// condition ends, see [`codegen_if`].
+pub fn codegen_is<'ctx>(ctx: &mut CodegenContext<'ctx>, value: &Expr, pattern: &Pattern) -> IntValue<'ctx> {
+    // A `&` is matched by the value it refers to
+    let ty = match &value.ty {
+        Type::Ref(inner) => (**inner).clone(),
+        other => other.clone(),
+    };
+    let mark = ctx.temporaries.len();
+    let place = if let Type::Ref(_) = value.ty {
+        value.codegen(ctx).unwrap().into_pointer_value()
+    } else if let Some(place) = value.codegen_place(ctx) {
+        place
+    } else {
+        let computed = *value.codegen(ctx).unwrap();
+        let slot = ctx.build_entry_alloca(ty.to_llvm(ctx), "is_value");
+        ctx.builder.build_store(slot, computed).unwrap();
+        if ctx.owns_memory(&ty) {
+            keep_until_scope_end(ctx, slot, &ty);
+        }
+        slot
+    };
+    // Temporaries the place is in, like the result of `make()` in `make().field`
+    for (slot, ty) in ctx.temporaries.split_off(mark) {
+        keep_until_scope_end(ctx, slot, &ty);
+    }
+
+    let place_slot = ctx.build_entry_alloca(ctx.context.ptr_type(AddressSpace::default()), "is_place");
+    ctx.builder.build_store(place_slot, place).unwrap();
+    let matched = pattern_test(ctx, pattern, place, &ty);
+    ctx.pending_is.push(PendingIs { pattern: pattern.clone(), place: place_slot, ty });
+    matched
+}
+
+/// Lets the current drop scope free the owning value of type `ty` in `slot`
+/// when it ends. Until the code here ran it frees nothing.
+fn keep_until_scope_end<'ctx>(ctx: &mut CodegenContext<'ctx>, slot: PointerValue<'ctx>, ty: &Type) {
+    let alive = ctx.build_entry_flag("is_value_alive");
+    ctx.builder.build_store(alive, ctx.context.bool_type().const_int(1, false)).unwrap();
+    ctx.drop_scopes.last_mut().expect("no scope to keep the value").push(OwnedSlot { slot, alive, ty: ty.clone() });
+}
+
+/// Binds the names of the `is` expressions since there were `mark` of them in
+/// [`CodegenContext::pending_is`]. The code here only runs if they matched,
+/// like the then branch of the `if` they're the condition of.
+pub fn bind_is_patterns(ctx: &mut CodegenContext<'_>, mark: usize) {
+    let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+    for pending in ctx.pending_is[mark..].to_vec() {
+        let place = ctx.builder.build_load(ptr_ty, pending.place, "matched").unwrap().into_pointer_value();
+        bind_pattern(ctx, &pending.pattern, place, &pending.ty);
+    }
+}
+
 /// Whether the value of type `ty` at `place` matches `pattern`, as an `i1`.
 fn pattern_test<'ctx>(ctx: &mut CodegenContext<'ctx>, pattern: &Pattern, place: PointerValue<'ctx>, ty: &Type) -> IntValue<'ctx> {
     let always = ctx.context.bool_type().const_int(1, false);
@@ -585,14 +656,35 @@ fn pattern_test<'ctx>(ctx: &mut CodegenContext<'ctx>, pattern: &Pattern, place: 
             let expected = *expected.codegen(ctx).unwrap();
             build_comparison(ctx, &Token::EqEq, actual, expected, ty)
         }
-        Pattern::EnumVariant { enum_name, variant, .. } => {
+        Pattern::EnumVariant { enum_name, variant, payload } => {
             let struct_ty = ctx.module.get_struct_type(enum_name).expect("enum struct not defined");
             let index = ctx.enums.get(enum_name).and_then(|variants| variants.iter().position(|(n, _)| n == variant))
                 .expect("sema checked the variant");
             let tag_ptr = ctx.builder.build_struct_gep(struct_ty, place, 0, "tag_ptr").unwrap();
             let tag = ctx.builder.build_load(ctx.context.i32_type(), tag_ptr, "tag").unwrap().into_int_value();
             let wanted = ctx.context.i32_type().const_int(index as u64, false);
-            ctx.builder.build_int_compare(IntPredicate::EQ, tag, wanted, "is_variant").unwrap()
+            let is_variant = ctx.builder.build_int_compare(IntPredicate::EQ, tag, wanted, "is_variant").unwrap();
+            let Some(payload) = payload.as_deref().filter(|payload| !payload.always_matches()) else { return is_variant };
+
+            // The payload is only looked at if it's this variant's, another one's
+            // bytes could be anything, like a pointer that isn't one
+            let function = ctx.builder.get_insert_block().and_then(|b| b.get_parent()).unwrap();
+            let matched = ctx.build_entry_alloca(ctx.context.bool_type(), "variant_matched");
+            ctx.builder.build_store(matched, ctx.context.bool_type().const_zero()).unwrap();
+            let payload_bb = ctx.context.append_basic_block(function, "variant_payload");
+            let done_bb = ctx.context.append_basic_block(function, "variant_done");
+            ctx.builder.build_conditional_branch(is_variant, payload_bb, done_bb).unwrap();
+
+            ctx.builder.position_at_end(payload_bb);
+            let payload_ty = ctx.enum_variant_types.get(enum_name).and_then(|types| types.get(index)).cloned()
+                .expect("sema checked the variant");
+            let payload_place = ctx.builder.build_struct_gep(struct_ty, place, 1, "payload_ptr").unwrap();
+            let payload_matches = pattern_test(ctx, payload, payload_place, &payload_ty);
+            ctx.builder.build_store(matched, payload_matches).unwrap();
+            ctx.builder.build_unconditional_branch(done_bb).unwrap();
+
+            ctx.builder.position_at_end(done_bb);
+            ctx.builder.build_load(ctx.context.bool_type(), matched, "variant_matches").unwrap().into_int_value()
         }
         Pattern::List { before, rest, after } => {
             let function = ctx.builder.get_insert_block().and_then(|b| b.get_parent()).unwrap();
@@ -656,14 +748,14 @@ fn bind_pattern<'ctx>(ctx: &mut CodegenContext<'ctx>, pattern: &Pattern, place: 
         Pattern::Literal(Expr { kind: ExprKind::Identifier(name), .. }) => {
             ctx.push_var(name.clone(), ty.to_llvm(ctx), place, ty.class_name());
         }
-        Pattern::EnumVariant { enum_name, variant, binding: Some(name) } => {
+        Pattern::EnumVariant { enum_name, variant, payload: Some(payload) } => {
             let struct_ty = ctx.module.get_struct_type(enum_name).expect("enum struct not defined");
             let index = ctx.enums.get(enum_name).and_then(|variants| variants.iter().position(|(n, _)| n == variant))
                 .expect("sema checked the variant");
             let payload_ty = ctx.enum_variant_types.get(enum_name).and_then(|types| types.get(index)).cloned()
                 .expect("sema checked the variant");
             let payload_place = ctx.builder.build_struct_gep(struct_ty, place, 1, "payload_ptr").unwrap();
-            ctx.push_var(name.clone(), payload_ty.to_llvm(ctx), payload_place, payload_ty.class_name());
+            bind_pattern(ctx, payload, payload_place, &payload_ty);
         }
         Pattern::List { before, rest, after } => {
             let element = list_element(ctx, ty);

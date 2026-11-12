@@ -223,3 +223,17 @@ class Point {
 print((Point { x: 9 }).get());
 --- output
 9
+
+=== a Buffer is iterable with std::iterable
+import std::iterable::{Iterable};
+mut words = Buffer<String>(2);
+words.set(0, "a");
+words.set(1, "b");
+for w in words {
+  print(w);
+}
+print(words.contains("b"));
+--- output
+a
+b
+true

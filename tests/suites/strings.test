@@ -55,7 +55,7 @@ print(line.trim().starts_with("let"));
 print(line.trim().ends_with(";"));
 print(line.contains("x ="));
 print(line.contains("y"));
-print("abcabc".index_of("ca").unwrap_or(99));
+print("abcabc".index_of("ca") ?? 99);
 print("abc".index_of("z").is_none());
 --- output
 let x = 1;
@@ -77,8 +77,8 @@ a-b--c
 
 === parse_int
 import std::string;
-print("123".parse_int().unwrap_or(0));
-print("-7".parse_int().unwrap_or(0));
+print("123".parse_int() ?? 0);
+print("-7".parse_int() ?? 0);
 print("".parse_int().is_none());
 print("-".parse_int().is_none());
 print("4x".parse_int().is_none());

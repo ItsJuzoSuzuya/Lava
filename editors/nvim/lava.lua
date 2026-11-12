@@ -20,5 +20,9 @@ vim.lsp.config("lava", {
   filetypes = { "lava" },
   root_markers = { "main.lv", ".git" },
   capabilities = has_cmp and cmp_lsp.default_capabilities() or nil,
+  -- Errors before warnings in signs, virtual text and floats of Lava files
+  on_init = function(client)
+    vim.diagnostic.config({ severity_sort = true }, vim.lsp.diagnostic.get_namespace(client.id))
+  end,
 })
 vim.lsp.enable("lava")

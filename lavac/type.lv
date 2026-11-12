@@ -1,0 +1,24 @@
+import std::option::{Option};
+import llvm;
+import codegen_ctx;
+import std::string::{Print};
+pub enum Type {
+  Void,
+  Boolean
+
+  pub func formatter(&self) -> Option<String> {
+    match self {
+      Type::Boolean => "%s"
+      _ => return None
+    }
+  }
+}
+
+impl Print for Type {
+  pub func to_string(&self) -> String {
+    match self {
+      Type::Void => "void"
+      Type::Boolean => "bool"
+    }
+  }
+}

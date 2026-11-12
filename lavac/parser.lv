@@ -1,0 +1,149 @@
+import lexer;
+import std::path::{Path};
+import modules;
+import token;
+import std::option::{Option};
+import statement;
+import std::vector::{Vector};
+import std::result::{Result};
+import expression;
+import std::math::{exp};
+import type;
+
+pub enum ParseError {
+  UnexpectedEOF => &Path,
+  UnexpectedToken => (TokenKind, TokenKind),
+  Lex => LexError
+
+  pub func message(&self) {
+    match self {
+      ParseError::UnexpectedEOF(context) => panic("unexpected end of file in " + context.to_string())
+    }
+  }
+}
+
+pub class Parser {
+  lexer: Lexer;
+  errors: Vector<ParseError> = Vector();
+  recovering: bool = false;
+
+  pub func from_source(source: String) -> Parser {
+    return Parser(Lexer(source));
+  }
+
+  pub func parse(mut &self) -> Vector<Statement> {
+    mut stmts = Vector<Statement>();
+    while !self.peek().is_eof() {
+      let stmt = self.parse_stmt();
+      stmts.push(stmt);
+    }
+
+    return stmts;
+  }
+
+  // The next token. Whatever the lexer can't read is recorded and skipped, the
+  // rest of the parser never sees it
+  func next_token(mut &self) -> Token {
+    while true {
+      match self.lexer.next_token() {
+        Ok(token) => return token,
+        Err(message) => self.error(ParseError::Lex(message)),
+      }
+    }
+  }
+
+  func peek(mut &self) -> Token {
+    while true {
+      match self.lexer.peek() {
+        Ok(t) => return t,
+        Err(context) => {
+          self.errors.push(ParseError::Lex(context));
+          self.lexer.next_token();
+        }
+      }
+    }
+  }
+
+  func consume(mut &self) {
+    while true {
+      match self.lexer.next_token() {
+        Ok(_) => break,
+        Err(context) => self.error(ParseError::Lex(context))
+      }
+    }
+  }
+
+  func expect(mut &self, expected_token: TokenKind) {
+    let got = self.peek();
+
+    if got.kind != expected_token 
+      return self.error(ParseError::UnexpectedToken(expected_token, got.kind));
+
+    self.next_token();
+    self.recovering = false;
+  }
+
+  func error(mut &self, err: ParseError){
+    if !self.recovering 
+      self.errors.push(err);
+
+    self.recovering = true;
+  }
+
+  pub func parse_stmt(mut &self) -> Statement {
+    let token = self.next_token();
+    let stmt = match token.kind {
+      TokenKind::Print => self.parse_print(),
+      _ => {
+        let expr = self.parse_expr();
+        Statement(StmtKind::Expression(self.parse_expr()), token.span)
+      }
+    };
+
+    return stmt;
+  }
+
+  pub func parse_expr(mut &self) -> Expression {
+    let token = self.next_token();
+    match token.kind {
+      TokenKind::If => self.parse_if(),
+      _ => Expression(ExprKind::Error(token.kind.to_string() + " can't be used as an expression!"), token.span, Type::Void)
+    };
+
+  }
+
+  func parse_if(mut &self) -> Expression {
+    let condition = self.parse_expr();
+    self.expect(TokenKind::LBrace);
+    let body = self.parse_block();
+    let span = condition.span;
+    let kind = ExprKind::If(condition, body, None);
+    return Expression(kind, span, Type::Void);
+  }
+
+  // Parses a { } block. Doesnt consume the {.
+  func parse_block(mut &self) -> Block {
+    mut stmts: Vector<Statement> = Vector();
+    while !self.peek().is_eof() && self.peek().kind != TokenKind::RBrace {
+      let stmt = self.parse_stmt();
+      if stmt.kind is StmtKind::Value(expr) {
+        self.expect(TokenKind::RBrace);
+        return Block(stmts, expr);
+      } else {
+        stmts.push(stmt);
+      }
+    }
+
+    self.expect(TokenKind::RBrace);
+    return Block(stmts, None);
+  }
+
+  func parse_print(mut &self) -> Statement {
+    self.expect(TokenKind::LParen);
+    let expr = self.parse_expr();
+    let span = expr.span;
+    self.expect(TokenKind::RParen);
+    self.expect(TokenKind::Semicolon);
+    return Statement(StmtKind::Print(expr), span);
+  } 
+}

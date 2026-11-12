@@ -1,4 +1,5 @@
 import std::string;
+import std::string::{Print};
 
 extern "open" func c_open(path: String, flags: int32, ..) -> int32;
 extern "close" func c_close(file: int32) -> int32;
@@ -8,10 +9,6 @@ pub class Path {
   buffer: String = start;
 
   Constructor(start: String = "");
-
-  pub func to_string(&self) -> String {
-    return self.buffer.clone();
-  }
 
   pub func join(&self, add: String) -> Path {
     // A `/` between the two, unless there's one already or nothing to join onto
@@ -70,6 +67,13 @@ pub class Path {
     return self.buffer.slice(i, self.buffer.len());
   }
 
+}
+
+// `print(path)` prints the path, `path.to_string()` gives it as text.
+impl Print for Path {
+  func to_string(&self) -> String {
+    return self.buffer.clone();
+  }
 }
 
 // Anything naming a path, so functions like `fs::read` take a String or a Path.

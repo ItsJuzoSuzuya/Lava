@@ -6,7 +6,7 @@
 //! outline requests with it, the linter finds unused and needlessly mutable
 //! names with it.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::{HashMap, HashSet}, path::PathBuf};
 
 use crate::{declaration::{Declaration, DeclarationKind, ExternItem, TypeParam, Visibility}, expression::{Block, Expr, ExprKind, MatchArm, Pattern},
     module::{self, ModuleGraph}, param::Param, program::CheckedModule, runtime, span::Span, statement::{Stmt, StmtKind},
@@ -113,8 +113,10 @@ impl FileInfo {
     }
 
     /// Position of the whole word `word` at or after `from`, within a few lines.
+    /// A name with its module, like `token::TokenKind`, is found where it's
+    /// written, usually without it: `TokenKind`.
     fn word_after(&self, from: &Span, word: &str) -> Option<Span> {
-        let word: Vec<char> = word.chars().collect();
+        let word: Vec<char> = written_name(word).chars().collect();
         for line in from.line..(from.line + 20).min(self.lines.len()) {
             let start = if line == from.line { from.col } else { 0 };
             let text = self.line(line);
@@ -129,7 +131,7 @@ impl FileInfo {
 
     /// Position of the whole word `word` before `before`, within a few lines.
     fn word_before(&self, before: &Span, word: &str) -> Option<Span> {
-        let word: Vec<char> = word.chars().collect();
+        let word: Vec<char> = written_name(word).chars().collect();
         for line in (before.line.saturating_sub(5)..=before.line).rev() {
             let text = self.line(line);
             let end = if line == before.line { before.col.min(text.len()) } else { text.len() };
@@ -189,6 +191,21 @@ impl FileInfo {
         }
         None
     }
+}
+
+/// `name` without the module it's from, `TokenKind` for `token::TokenKind`.
+/// An instance's name like `Box<geometry::Point>` stays whole.
+pub fn written_name(name: &str) -> &str {
+    if name.contains('<') {
+        return name;
+    }
+    name.rsplit("::").next().unwrap_or(name)
+}
+
+/// Whether `name` can be written in code. The compiler's own names, like
+/// `for$1$value` of a `for` loop or `?? value`, can't, so they're never shown.
+fn is_written_name(name: &str) -> bool {
+    name.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
 /// Whether the whole word `word` starts at `col` of `text`.
@@ -428,6 +445,17 @@ impl Index {
 
     pub fn key(&self, key: &str) -> Option<usize> {
         self.by_key.get(key).copied()
+    }
+
+    /// The class or enum the written name `name` means in `file`: one with
+    /// exactly that name, or one of a module it sees, which has the module's
+    /// name, like `token::TokenKind` for `TokenKind`.
+    pub fn type_named(&self, file: usize, name: &str) -> Option<usize> {
+        self.key(&format!("enum:{}", name)).or_else(|| self.key(&format!("class:{}", name))).or_else(|| {
+            let suffix = format!("::{}", name);
+            self.globals_for(file).into_iter()
+                .find(|&d| matches!(self.defs[d].kind, DefKind::Class | DefKind::Enum) && self.defs[d].name.ends_with(&suffix))
+        })
     }
 
     /// The template definition of the instance `decl` of a generic.
@@ -672,6 +700,7 @@ impl Index {
             }
             _ => d.signature.clone(),
         };
+        let code = self.written(&code);
         let place = match d.kind {
             DefKind::Variable | DefKind::Param => "",
             _ => d.file.map(|f| self.files[f].name.as_str()).unwrap_or(""),
@@ -681,6 +710,38 @@ impl Index {
         } else {
             format!("```lava\n{}\n```\n\n*in module `{}`*", code, place)
         }
+    }
+
+    /// `code` like it's written, without the modules names are from:
+    /// `func Parser.parse(mut &self) -> Vector<Statement>` for
+    /// `func parser::Parser.parse(mut &self) -> vector::Vector<statement::Statement>`.
+    /// Only module names are left out, `Kind::Round` stays as it is.
+    pub fn written(&self, code: &str) -> String {
+        let modules: HashSet<&str> = self.files.iter()
+            .map(|f| f.name.strip_prefix("std::").unwrap_or(&f.name))
+            .collect();
+        let chars: Vec<char> = code.chars().collect();
+        let mut written = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            let is_word = |c: char| c.is_alphanumeric() || c == '_';
+            // A whole word directly followed by `::`
+            if is_word(chars[i]) && (i == 0 || !is_word(chars[i - 1])) {
+                let end = (i..chars.len()).find(|&j| !is_word(chars[j])).unwrap_or(chars.len());
+                let word: String = chars[i..end].iter().collect();
+                let qualifies = chars.get(end) == Some(&':') && chars.get(end + 1) == Some(&':');
+                if qualifies && modules.contains(word.as_str()) {
+                    i = end + 2;
+                    continue;
+                }
+                written.push_str(&word);
+                i = end;
+                continue;
+            }
+            written.push(chars[i]);
+            i += 1;
+        }
+        written
     }
 
     /// The fields and methods of the class or enum `type_name`, including
@@ -721,6 +782,36 @@ impl Index {
         members
     }
 
+    /// What a `for` loop over a `ty` gives as written in the code, like `&T` for a
+    /// `VectorIter<T>`: the value in the `Option` its `next` returns, or that of
+    /// the iterator its `iter` returns.
+    pub fn item_type(&self, ty: &Type) -> Type {
+        let mut ty = ty.clone();
+        for _ in 0..2 {
+            let name = match &ty {
+                Type::Ref(inner) => match inner.as_ref() {
+                    Type::Generic { name, .. } => name.clone(),
+                    inner => inner.class_name().unwrap_or_default(),
+                },
+                Type::Generic { name, .. } => name.clone(),
+                other => other.class_name().unwrap_or_default(),
+            };
+            let method = |method: &str| self.members(&name).into_iter()
+                .find(|&m| self.defs[m].kind == DefKind::Method && self.defs[m].name == method && self.defs[m].has_body);
+            if let Some(next) = method("next") {
+                return match &self.defs[next].ty {
+                    Type::Generic { name, args } if template_name(name).ends_with("Option") && args.len() == 1 => args[0].clone(),
+                    _ => Type::Unknown,
+                };
+            }
+            match method("iter") {
+                Some(iter) => ty = self.defs[iter].ty.clone(),
+                None => break,
+            }
+        }
+        Type::Unknown
+    }
+
     /// The innermost function or method of `file` whose body contains `line`.
     pub fn function_at(&self, file: usize, line: usize) -> Option<usize> {
         (0..self.defs.len())
@@ -749,6 +840,8 @@ impl Index {
                 (matches!(d.kind, DefKind::Param | DefKind::Variable) && d.function == function || ctor_param(d))
                     && d.file == Some(file)
                     && d.span.line <= line && line <= d.scope_end
+                    // Made by the parser, like the iterator of a `for` loop
+                    && !d.name.contains('$')
             })
             .collect()
     }
@@ -817,11 +910,24 @@ struct Walker<'a> {
     /// Whether the walked code was checked by sema, so it has types. Generic
     /// templates aren't, only their instances.
     checked: bool,
+    /// Last line of the body of the `if` or `while` whose condition is walked,
+    /// where the names an `is` in it binds are visible.
+    is_scope_end: Option<usize>,
 }
 
 impl<'a> Walker<'a> {
     fn new(index: &'a mut Index, file: usize, checked: bool) -> Self {
-        Self { index, file, scopes: vec![HashMap::new()], class: None, function: None, checked }
+        Self { index, file, scopes: vec![HashMap::new()], class: None, function: None, checked, is_scope_end: None }
+    }
+
+    /// Walks `condition` of an `if` or `while` whose body ends at line `end`,
+    /// in a scope of its own for the names an `is` in it binds. The caller
+    /// walks the body and closes the scope.
+    fn condition(&mut self, condition: &Expr, end: usize) {
+        self.scopes.push(HashMap::new());
+        let outer = self.is_scope_end.replace(end);
+        self.expr(condition);
+        self.is_scope_end = outer;
     }
 
     /// Ends the scope of the top-level variables.
@@ -919,6 +1025,18 @@ impl<'a> Walker<'a> {
         let col = call.col + rest[..after].chars().count();
         let name: Vec<char> = self.index.defs[def].name.chars().collect();
         is_word_at(text, col, &name).then(|| Span { line: call.line, col, len: name.len() })
+    }
+
+    /// The type of `value` in a generic template, which sema doesn't check, as
+    /// far as it's written: a variable's, and that of a `for` loop's value
+    fn unchecked_type(&self, value: &Expr) -> Type {
+        let ExprKind::Identifier(name) = &value.kind else { return Type::Unknown };
+        let declared = |name: &str| self.lookup(name).map(|d| self.index.defs[d].ty.clone()).unwrap_or(Type::Unknown);
+        match name.strip_suffix("$value") {
+            // The parser's `for` binds the value to `for$1$value`, its iterator is `for$1`
+            Some(iterator) => self.index.item_type(&declared(iterator)),
+            None => declared(name),
+        }
     }
 
     /// Line of the `}` ending the block that starts at or after `from`.
@@ -1096,7 +1214,7 @@ impl<'a> Walker<'a> {
                     }
                 }
                 let ty = match &value.ty {
-                    Type::Unknown => typedef.clone().unwrap_or(Type::Unknown),
+                    Type::Unknown => typedef.clone().unwrap_or_else(|| self.unchecked_type(value)),
                     ty => ty.clone(),
                 };
                 self.declare_local(name, span, DefKind::Variable, &ty, *mutable, usize::MAX);
@@ -1119,9 +1237,10 @@ impl<'a> Walker<'a> {
                 }
             }
             StmtKind::While { condition, body } => {
-                self.expr(condition);
                 let end = self.block_end(&stmt.span);
+                self.condition(condition, end);
                 self.block(body, end);
+                self.close_scope(end);
             }
             StmtKind::Break | StmtKind::Continue => {}
         }
@@ -1130,9 +1249,11 @@ impl<'a> Walker<'a> {
     /// Walks an `if` starting at `span`. Each branch is its own scope.
     fn if_branches(&mut self, span: &Span, condition: &Expr, then_block: &Block, else_block: Option<&Block>) {
         let file = self.file;
-        self.expr(condition);
         let then_end = self.index.files[file].closing_brace(span);
-        self.value_block(then_block, then_end.map(|(l, _)| l).unwrap_or(span.line));
+        let then_end_line = then_end.map(|(l, _)| l).unwrap_or(span.line);
+        self.condition(condition, then_end_line);
+        self.value_block(then_block, then_end_line);
+        self.close_scope(then_end_line);
         if let Some(else_block) = else_block {
             let else_start = then_end.map(|(line, col)| Span { line, col: col + 1, len: 0 }).unwrap_or(span.clone());
             let else_end = self.block_end(&else_start);
@@ -1157,7 +1278,7 @@ impl<'a> Walker<'a> {
     fn pattern(&mut self, pattern: &Pattern, from: &Span, scope_end: usize) {
         let file = self.file;
         match pattern {
-            Pattern::EnumVariant { enum_name, variant, binding } => {
+            Pattern::EnumVariant { enum_name, variant, payload } => {
                 let enum_key = template_name(enum_name);
                 // The pattern names the template, like `Option` for `Option<int32>`
                 let enum_span = self.index.files[file].word_after(from, &enum_key);
@@ -1170,17 +1291,25 @@ impl<'a> Walker<'a> {
                 if let (Some(def), Some(span)) = (variant_def, variant_span.clone()) {
                     self.reference(span, def, RefKind::Read);
                 }
-                if let (Some(binding), Some(after)) = (binding, variant_span) {
-                    let after = Span { col: after.col + after.len, ..after };
-                    if let Some(span) = self.index.files[file].word_after(&after, binding) {
+                let after_variant = variant_span.map(|s| Span { col: s.col + s.len, ..s }).unwrap_or(after_enum);
+                match payload.as_deref() {
+                    // A name in an unchecked template has no type from sema, the
+                    // variant's like `T` is all there is
+                    Some(Pattern::Literal(Expr { kind: ExprKind::Identifier(name), span, ty: Type::Unknown })) if is_written_name(name) => {
                         let ty = variant_def.map(|d| self.index.defs[d].ty.clone()).unwrap_or(Type::Unknown);
-                        self.declare_local(binding, span, DefKind::Variable, &ty, false, scope_end);
+                        self.declare_local(name, span.clone(), DefKind::Variable, &ty, false, scope_end);
                     }
+                    // Sema's types of this instance, like `Token` of `Ok(token)` on a `Result<Token, String>`
+                    Some(payload) => self.pattern(payload, &after_variant, scope_end),
+                    None => {}
                 }
             }
-            // A name matches anything and binds it
+            // A name matches anything and binds it. The compiler's own, like the value
+            // of a `for` loop, aren't written anywhere
             Pattern::Literal(Expr { kind: ExprKind::Identifier(name), span, ty }) => {
-                self.declare_local(name, span.clone(), DefKind::Variable, ty, false, scope_end);
+                if is_written_name(name) {
+                    self.declare_local(name, span.clone(), DefKind::Variable, ty, false, scope_end);
+                }
             }
             Pattern::Literal(expr) => self.expr(expr),
             Pattern::Wildcard => {}
@@ -1235,6 +1364,14 @@ impl<'a> Walker<'a> {
         let file = self.file;
         match &expr.kind {
             ExprKind::Match { scrutinee, arms } => self.match_arms(scrutinee, arms),
+            // The names are visible in the body of the `if` or `while` it's the condition of
+            // Only in templates sema doesn't check, it makes it a match arm otherwise
+            ExprKind::Leave(stmt) => self.stmt(stmt),
+            ExprKind::Is { value, pattern } => {
+                self.expr(value);
+                let end = self.is_scope_end.unwrap_or(expr.span.line);
+                self.pattern(pattern, &expr.span, end);
+            }
             ExprKind::If { condition, then_block, else_block } =>
                 self.if_branches(&expr.span, condition, then_block, else_block.as_ref()),
             ExprKind::Ternary { condition, then_value, else_value } => {
@@ -1261,6 +1398,11 @@ impl<'a> Walker<'a> {
                     } else if let Some(span) = self.static_call_name(&expr.span, def) {
                         // `Type::function(...)`, whose function is named after the `::`
                         self.reference(span, def, RefKind::Read);
+                    } else if let Some(spelling) = self.index.files[file].spelling_at(&expr.span, &self.index.defs[def].name.clone()) {
+                        // A call by another name than the function's mangled one, like
+                        // `text.try_as<int32>()` calling the impl of `TryAs<String>` for `int32`
+                        let span = Span { len: spelling.chars().count(), ..expr.span.clone() };
+                        self.reference(span, def, RefKind::Read);
                     }
                     if self.index.defs[def].mut_self {
                         match receiver {
@@ -1272,8 +1414,18 @@ impl<'a> Walker<'a> {
                         }
                     }
                 }
+                // A C function can write through what it's lent, like an out-parameter
+                // `&target` or a `&Buffer` it reads into
+                let writes_through = callee.is_some_and(|def| self.index.defs[def].kind == DefKind::Function && !self.index.defs[def].has_body);
                 for param in params {
                     self.expr(param);
+                    if writes_through {
+                        match &param.kind {
+                            ExprKind::Ref(place) => self.mutate_root(place),
+                            ExprKind::Identifier(_) if matches!(param.ty, Type::Ref(_)) => self.mutate_root(param),
+                            _ => {}
+                        }
+                    }
                 }
             }
             ExprKind::FieldAccess { object, field } => {
@@ -1352,7 +1504,7 @@ impl<'a> Walker<'a> {
                 self.builtin(&expr.span, "shared", "builtin:shared");
                 self.expr(inner);
             }
-            ExprKind::Deref(inner) => self.expr(inner),
+            ExprKind::Deref(inner) | ExprKind::Kept(inner) => self.expr(inner),
             ExprKind::NewBuffer(capacity) => {
                 self.builtin(&expr.span, "Buffer", "builtin:Buffer");
                 self.expr(capacity);

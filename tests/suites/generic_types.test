@@ -558,3 +558,36 @@ class Box<T> {
 let a: Box<int64> = Box { value: "text" };
 --- error
 does not match
+
+=== a generic class's methods are only checked if they're called
+class Wrapper<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+
+  pub func doubled(&self) -> T {
+    return self.value + self.value;
+  }
+}
+let n = Wrapper(21);
+print(n.doubled());
+let b = Wrapper(true);
+print(b.value);
+--- output
+42
+true
+
+=== a called method that doesn't work for the type is an error
+class Wrapper<T> {
+  pub value: T = value;
+
+  Constructor(value: T);
+
+  pub func doubled(&self) -> T {
+    return self.value + self.value;
+  }
+}
+let b = Wrapper(true);
+print(b.doubled());
+--- error
+'+' can't be used on values of type 'bool'

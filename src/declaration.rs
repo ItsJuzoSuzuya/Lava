@@ -199,14 +199,16 @@ impl Declare for Declaration {
             DeclarationKind::Function { params, return_type, mangled, external: Some(external), .. } => {
                 let mangled = mangled.as_ref()
                     .expect("function mangled name missing — sema must run first");
-                // Strings, slices and `&Buffer`s are passed as addresses
+                // Strings, slices and `&Buffer`s are passed as addresses, an `Option` of an
+                // extern type as its pointer, null for `None`
                 let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+                let as_pointer = |ty: &Type| ty.is_string() || matches!(ty, Type::Slice(_)) || ctx.nullable_handle(ty);
                 let param_types: Vec<BasicMetadataTypeEnum> = params.iter()
-                    .map(|p| if p.ty.is_string() || matches!(p.ty, Type::Slice(_)) { ptr_ty.into() } else { p.ty.to_llvm(ctx).into() })
+                    .map(|p| if as_pointer(&p.ty) { ptr_ty.into() } else { p.ty.to_llvm(ctx).into() })
                     .collect();
                 let fn_type = match return_type {
-                    // A C string, copied into a String after the call
-                    Some(ty) if ty.is_string() => ptr_ty.fn_type(&param_types, external.variadic),
+                    // A C string, copied into a String after the call, or a pointer that's an `Option`
+                    Some(ty) if ty.is_string() || ctx.nullable_handle(ty) => ptr_ty.fn_type(&param_types, external.variadic),
                     Some(ty) => ty.to_llvm(ctx).fn_type(&param_types, external.variadic),
                     None => ctx.context.void_type().fn_type(&param_types, external.variadic),
                 };
@@ -352,7 +354,7 @@ impl Codegen for Declaration {
             DeclarationKind::Function { type_params, .. } if !type_params.is_empty() => None,
             // The C library has the body
             DeclarationKind::Function { external: Some(_), .. } => None,
-            DeclarationKind::Function { params, body, return_type, mangled, .. } => {
+            DeclarationKind::Function { name, params, body, return_type, mangled, .. } => {
                 let mangled = mangled.as_ref()
                     .expect("function mangled name missing — sema must run first");
                 let function = ctx.module.get_function(&function_symbol(mangled))
@@ -370,7 +372,8 @@ impl Codegen for Declaration {
                 ctx.builder.position_at_end(bb);
 
                 let self_class_name = ctx.current_class.clone();
-                let is_ctor = self_class_name.as_ref().map_or(false, |cn| cn == mangled);
+                // Every constructor is named like its class, the mangled names differ: `Point`, `Point#2`
+                let is_ctor = self_class_name.as_ref().is_some_and(|cn| cn == name);
 
 
                 let ptr_ty = ctx.context.ptr_type(AddressSpace::default());

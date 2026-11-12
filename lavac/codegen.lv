@@ -1,0 +1,19 @@
+import codegen_ctx;
+import llvm;
+import type;
+import std::option::{Option};
+import span;
+
+pub trait Codegen {
+  pub func codegen(&self, ctx: &CodegenContext) -> Option<LLVMValueRef>;
+}
+
+pub enum CodegenError {
+  MissingValue => (type::Type, Span),
+
+  pub func message(&self) -> String {
+    match self {
+      CodegenError::MissingValue(ty, _) => "internal error: an expression of type " + ty.to_string() + " gave no value",
+    }
+  }
+}

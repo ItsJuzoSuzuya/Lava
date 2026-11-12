@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use inkwell::context::Context;
 
 use crate::{codegen_ctx::CodegenContext, declaration::{Declaration, DeclarationKind, ExternItem}, diagnostic::{self, CompileError},
-    expression::{Expr, ExprKind}, module::ModuleGraph, parser::{self, Parser}, sema::Sema, statement::{Stmt, StmtKind}, traits::codegen::{Codegen, Declare},
+    expression::{Expr, ExprKind}, module::ModuleGraph, parser::{self, Parser}, sema::{Phase, Sema}, statement::{Stmt, StmtKind}, traits::codegen::{Codegen, Declare},
     r#type::Type};
 
 /// A module after parsing and checking its semantics.
@@ -22,61 +22,93 @@ pub struct CheckedModule {
     pub checked: bool,
 }
 
-/// Parses and checks every module of `graph`, imports first.
+/// Parses and checks every module of `graph`.
+///
+/// Every module is parsed first. A syntax error stops there: the syntax
+/// errors of all modules are returned without any module. Otherwise each
+/// [`Phase`] of checking runs for all modules, imports first, before the next
+/// one starts, so modules can use each other's types and functions, also when
+/// they import each other.
 ///
 /// Returns the modules with every error found in them. Checking goes on
-/// after a semantic error, but stops at a syntax error, the module with it
-/// isn't included then.
+/// after a semantic error.
 pub fn check_modules(graph: &ModuleGraph) -> (Vec<CheckedModule>, Vec<CompileError>) {
-    // Shared across modules, so declarations of imported modules stay known.
+    // Shared across modules, so declarations of other modules stay known
     let mut sema = Sema::new();
-    let mut done: Vec<CheckedModule> = Vec::new();
+    // The program's own modules' names get the module's name, like `llvm::Module`. The main file's don't
+    let own_modules = || graph.modules.iter().filter(|m| m.std_name().is_none() && m.name != "prelude");
+    let names = |qualified: bool| own_modules().filter(|m| m.qualified() == qualified)
+        .map(|m| (m.name.clone(), m.declared_names())).collect();
+    sema.set_module_names(names(true), names(false));
     // Imports that couldn't be loaded come first, the rest is checked without them
     let mut errors: Vec<CompileError> = graph.errors.clone();
 
+    let mut asts: Vec<Vec<Stmt>> = Vec::new();
     for module in &graph.modules {
-        let parsed = diagnostic::catch(|| Parser::with_renames(module.source.clone(), module.renames()).parse_file());
-        let mut stmts = match parsed {
-            Ok(stmts) => stmts,
-            Err(error) => {
-                errors.push(locate(error, &module.path, graph));
-                return (done, errors);
+        match diagnostic::catch(|| Parser::with_renames(module.source.clone(), module.renames()).parse_file()) {
+            Ok(mut stmts) => {
+                parser::desugar_inherent_impls(&mut stmts, &module.name);
+                asts.push(stmts);
             }
-        };
-        parser::desugar_inherent_impls(&mut stmts, &module.name);
-
-        sema.enter_module(module.name.clone(), module.source.clone(), &module.imports);
-        let own_stmts = stmts.len();
-        // The program's main file is last, its `main` runs after its top-level code
-        let is_root = graph.modules.last().is_some_and(|root| root.path == module.path);
-        let result = diagnostic::catch(|| {
-            if is_root {
-                add_main_call(&mut stmts, &module.source);
-            }
-            sema.check(&mut stmts)
-        });
-
-        let mut module_errors = sema.take_errors();
-        if let Err(error) = &result {
-            module_errors.push(error.clone());
+            Err(error) => errors.push(locate(error, &module.path, graph)),
         }
-        // Instances of generic functions, classes and enums used by this module are
-        // generated with it. With errors there's no code to generate, they can be half done
-        let instances = sema.take_instances();
+    }
+    if asts.len() < graph.modules.len() {
+        return (Vec::new(), errors);
+    }
+
+    let own_stmts: Vec<usize> = asts.iter().map(Vec::len).collect();
+    let mut module_errors: Vec<Vec<CompileError>> = vec![Vec::new(); graph.modules.len()];
+    let mut instances: Vec<Vec<Declaration>> = vec![Vec::new(); graph.modules.len()];
+    // A module whose checking stopped with an error isn't checked any further
+    let mut checked = vec![true; graph.modules.len()];
+    for phase in Phase::ALL {
+        for (i, module) in graph.modules.iter().enumerate() {
+            if !checked[i] {
+                continue;
+            }
+            sema.enter_module(module.name.clone(), module.source.clone(), &module.imports);
+            // The program's main file is last, its `main` runs after its top-level code
+            let is_root = i + 1 == graph.modules.len();
+            let stmts = &mut asts[i];
+            let result = diagnostic::catch(|| {
+                if is_root && phase == Phase::TypeNames {
+                    add_main_call(stmts, &module.source);
+                }
+                sema.check_phase(phase, stmts)
+            });
+            module_errors[i].extend(sema.take_errors());
+            if let Err(error) = result {
+                module_errors[i].push(error);
+                checked[i] = false;
+            }
+        }
+    }
+    // Generic instances only have the methods some module called, so they're complete once
+    // every module is checked. They're generated with the main file, after everything is declared
+    if let Some(last) = instances.last_mut() {
+        *last = sema.take_instances();
+    }
+
+    let mut done: Vec<CheckedModule> = Vec::new();
+    for (((module, mut stmts), own_stmts), (module_errors, instances)) in graph.modules.iter().zip(asts).zip(own_stmts)
+        .zip(module_errors.into_iter().zip(instances))
+    {
+        // With errors there's no code to generate, the instances can be half done
         if module_errors.is_empty() {
             for decl in instances {
                 let span = decl.span.clone();
                 stmts.push(Stmt::new(StmtKind::Declaration(decl), span, Type::Unknown));
             }
         }
-
+        let checked = checked[done.len()];
         done.push(CheckedModule {
             name: module.name.clone(),
             path: module.path.clone(),
             source: module.source.clone(),
             stmts,
             own_stmts,
-            checked: result.is_ok(),
+            checked,
         });
         for error in module_errors {
             let error = locate(error, &module.path, graph);
@@ -232,46 +264,54 @@ impl<'ctx> Program<'ctx> {
         }
 
         let mut libraries: Vec<String> = Vec::new();
-        for module in modules {
-            self.context.source = module.source.clone();
-            let stmts = module.stmts;
-            for stmt in &stmts {
+        for module in &modules {
+            for stmt in &module.stmts {
                 if let StmtKind::Declaration(Declaration { kind: DeclarationKind::Extern(ExternItem::Link(library)), .. }) = &stmt.kind {
                     if !libraries.contains(library) {
                         libraries.push(library.clone());
                     }
                 }
             }
+        }
 
-            // Instances like `Box<int32>` come after the functions using them, so every
-            // struct type is created first. Classes are declared before enums, since
-            // an enum's size depends on the classes in its payloads.
-            let decls: Vec<&Declaration> = stmts.iter()
-                .filter_map(|stmt| match &stmt.kind {
-                    StmtKind::Declaration(decl) => Some(decl),
-                    _ => None,
-                })
-                .collect();
-            for decl in &decls {
-                if let DeclarationKind::Class { name, .. } | DeclarationKind::Enum { name, .. } = &decl.kind {
-                    self.context.struct_type(name);
-                }
+        // Every module's types and functions are declared before any code is
+        // generated, so modules can use each other's, also when they import each
+        // other. Instances like `Box<int32>` come after the functions using them,
+        // so every struct type is created first.
+        let decls: Vec<(usize, &Declaration)> = modules.iter().enumerate()
+            .flat_map(|(i, module)| module.stmts.iter().filter_map(move |stmt| match &stmt.kind {
+                StmtKind::Declaration(decl) => Some((i, decl)),
+                _ => None,
+            }))
+            .collect();
+        for (_, decl) in &decls {
+            if let DeclarationKind::Class { name, .. } | DeclarationKind::Enum { name, .. } = &decl.kind {
+                self.context.struct_type(name);
             }
-            // A class or enum holding another one directly needs that one's layout first
-            let is_type = |decl: &&&Declaration| matches!(decl.kind, DeclarationKind::Class { .. } | DeclarationKind::Enum { .. });
-            let types: Vec<&Declaration> = decls.iter().filter(is_type).copied().collect();
-            for decl in layout_order(&types) {
-                decl.declare(&mut self.context);
-            }
-            for decl in decls.iter().filter(|d| !is_type(d)) {
-                decl.declare(&mut self.context);
-            }
+        }
+        // A class or enum holding another one directly needs that one's layout
+        // first, also across modules. Classes are declared before enums, since an
+        // enum's size depends on the classes in its payloads
+        let is_type = |decl: &Declaration| matches!(decl.kind, DeclarationKind::Class { .. } | DeclarationKind::Enum { .. });
+        let types: Vec<&Declaration> = decls.iter().map(|(_, decl)| *decl).filter(|decl| is_type(decl)).collect();
+        let module_of: std::collections::HashMap<*const Declaration, usize> = decls.iter()
+            .map(|(i, decl)| (*decl as *const Declaration, *i))
+            .collect();
+        for decl in layout_order(&types) {
+            self.context.source = modules[module_of[&(decl as *const Declaration)]].source.clone();
+            decl.declare(&mut self.context);
+        }
+        for (i, decl) in decls.iter().filter(|(_, decl)| !is_type(decl)) {
+            self.context.source = modules[*i].source.clone();
+            decl.declare(&mut self.context);
+        }
 
-            for stmt in &stmts {
+        for module in modules {
+            self.context.source = module.source.clone();
+            for stmt in &module.stmts {
                 stmt.codegen(&mut self.context);
             }
-
-            self.ast.extend(stmts);
+            self.ast.extend(module.stmts);
         }
 
         self.context.compile(object);

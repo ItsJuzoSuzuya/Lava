@@ -27,8 +27,8 @@ pub class Map<V> {
     }
   }
 
-  // A copy of the value of `key`, if there's one.
-  pub func find(&self, key: &String) -> Option<V> {
+  // The value of `key`, if there's one.
+  pub func find(&self, key: &String) -> Option<&V> {
     let index = self.index_of(key);
     if index < 0 {
       return Option::None;
@@ -56,12 +56,12 @@ pub class Map<V> {
   }
 
   // The key at `index`, to go through all entries in the order they were added.
-  pub func key_at(&self, index: uint64) -> String {
+  pub func key_at(&self, index: uint64) -> &String {
     return self.keys.get(index);
   }
 
   // The value at `index`, see `key_at`.
-  pub func value_at(&self, index: uint64) -> V {
+  pub func value_at(&self, index: uint64) -> &V {
     return self.values.get(index);
   }
 

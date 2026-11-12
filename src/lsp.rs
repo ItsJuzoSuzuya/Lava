@@ -395,7 +395,9 @@ impl Server {
         for path in self.published.drain().collect::<Vec<_>>() {
             by_file.entry(path).or_default();
         }
-        for (path, diagnostics) in by_file {
+        for (path, mut diagnostics) in by_file {
+            // Errors first, so editors showing one diagnostic per line show the error
+            diagnostics.sort_by_key(|d| d["severity"].as_u64().unwrap_or(u64::MAX));
             if !diagnostics.is_empty() {
                 self.published.insert(path.clone());
             }
@@ -663,9 +665,17 @@ impl Server {
 
         if let Some(receiver) = prefix.strip_suffix('.') {
             let chain = trailing_chain(receiver);
+            // The line being typed is left out of the analysis. When it declares the name
+            // too, like the binding of the match arm `Some(item) => item.`, the last
+            // analysis where everything parsed still has it
+            let fallback = || self.fallbacks.iter()
+                .filter(|a| a.parsed.contains(&path))
+                .find_map(|a| a.index.file_index(&path).map(|file| (&a.index, file)));
+            let resolved = resolve_chain(index, file, line, &chain).map(|ty| (index, file, ty))
+                .or_else(|| fallback().and_then(|(index, file)| resolve_chain(index, file, line, &chain).map(|ty| (index, file, ty))));
+            let Some((index, file, ty)) = resolved else { return json!([]) };
             // Private members are only usable inside their own class
             let class_here = index.function_at(file, line).and_then(|f| index.defs[f].container);
-            let Some(ty) = resolve_chain(index, file, line, &chain) else { return json!([]) };
             let members: Vec<usize> = index.members(&ty).into_iter()
                 // After `.` come fields and methods, an enum's variants and the
                 // functions without `self` come after `::`
@@ -673,8 +683,18 @@ impl Server {
                 .filter(|&m| index.defs[m].kind != DefKind::Method || index.defs[m].takes_self)
                 .filter(|&m| index.defs[m].public || index.defs[m].container == class_here && class_here.is_some())
                 .collect();
-            let mut names: HashSet<String> = members.iter().map(|&m| index.defs[m].name.clone()).collect();
-            let mut items: Vec<Value> = members.into_iter().map(|m| item(index, m)).collect();
+            let mut names: HashSet<String> = HashSet::new();
+            let mut items: Vec<Value> = Vec::new();
+            for &m in &members {
+                let name = &index.defs[m].name;
+                if !names.insert(name.clone()) {
+                    continue;
+                }
+                // One impl per type it gives, like `try_as` of `TryAs<int32>` and `TryAs<bool>`,
+                // is one entry that asks for the type
+                let same: Vec<usize> = members.iter().copied().filter(|&o| index.defs[o].name == *name).collect();
+                items.push(if same.len() > 1 { overloaded_item(index, &same) } else { item(index, m) });
+            }
             // Standard library methods of `impl String { ... }` blocks, like `text.split(',')`,
             // and functions taking the value first. Picking one imports it if needed:
             // the whole module for a method, the function by its name
@@ -697,7 +717,7 @@ impl Server {
             let chain = trailing_chain(owner);
             let Some(name) = chain.last() else { return json!([]) };
             // The items of a standard library module, which is imported if it isn't yet
-            if index.key(&format!("enum:{}", name)).is_none() && module::std_source(name).is_some() {
+            if index.type_named(file, name).is_none() && module::std_source(name).is_some() {
                 let module_name = format!("std::{}", name);
                 let edit = (!imported.contains(&module_name))
                     .then(|| insertion(import_line, 0, format!("import {};\n", module_name)));
@@ -709,8 +729,7 @@ impl Server {
                 return json!(items);
             }
             // After `Name::` the variants and the functions without `self`, methods are called on values
-            let items: Vec<Value> = index.key(&format!("enum:{}", name))
-                .or_else(|| index.key(&format!("class:{}", name)))
+            let items: Vec<Value> = index.type_named(file, name)
                 .map(|owner| index.members(&index.defs[owner].name).into_iter()
                     .filter(|&m| index.defs[m].kind == DefKind::Variant
                         || index.defs[m].kind == DefKind::Method && !index.defs[m].takes_self)
@@ -738,11 +757,13 @@ impl Server {
         // doesn't hide a function with its name
         let mut names = HashSet::new();
         for def in index.globals_for(file) {
-            // Standard library items like `fs::read` come below, written by their own name
-            if index.defs[def].name.contains("::") {
+            // Standard library items like `fs::read` come below, written by their own name.
+            // Those of the program's own modules, like `lexer::Lexer`, are written as `Lexer`
+            let from_std = index.defs[def].file.is_some_and(|f| index.files[f].name.starts_with("std::"));
+            if index.defs[def].name.contains("::") && from_std {
                 continue;
             }
-            if names.insert(index.defs[def].name.clone()) {
+            if names.insert(short_name(&index.defs[def].name).to_string()) {
                 items.push(item(index, def));
             }
         }
@@ -793,6 +814,7 @@ impl Server {
                 name: format!("std::{}", name),
                 path: module::std_path(name),
                 source: source.to_string(),
+                root: false,
             })
             .collect();
         let builtin = |p: &Path| {
@@ -807,7 +829,7 @@ impl Server {
             if sibling.extension().is_none_or(|e| e != "lv") || sibling == path || stem == "main" || builtin(&sibling) {
                 continue;
             }
-            modules.push(module::Module { imports: vec![], name: stem, source: self.text_of(&sibling), path: sibling });
+            modules.push(module::Module { imports: vec![], name: stem, source: self.text_of(&sibling), path: sibling, root: false });
         }
 
         modules.into_iter()
@@ -891,18 +913,29 @@ impl Server {
 
         let Some((analysis, file)) = self.analysis_for(&path) else { return Value::Null };
         let index = &analysis.index;
+        let member_of = |ty: &str| index.members(ty).into_iter().find(|&m| index.defs[m].name == name);
         let def = if chain.len() > 1 {
-            resolve_chain(index, file, line, &chain[..chain.len() - 1])
-                .and_then(|ty| index.members(&ty).into_iter().find(|&m| index.defs[m].name == name))
+            let owner = &chain[..chain.len() - 1];
+            resolve_chain(index, file, line, owner)
+                .and_then(|ty| member_of(&ty))
+                // A type's function, like `Parser::from_source(`
+                .or_else(|| match owner {
+                    [type_name] => index.type_named(file, type_name).and_then(|t| member_of(&index.defs[t].name)),
+                    _ => None,
+                })
         } else {
+            // Also one of an imported module, which has the module's name like `lexer::tokenize`
+            let suffix = format!("::{}", name);
             index.key(&format!("fn:{}", name))
+                .or_else(|| index.globals_for(file).into_iter()
+                    .find(|&d| index.defs[d].kind == DefKind::Function && index.defs[d].name.ends_with(&suffix)))
                 .or_else(|| index.function_at(file, line)
                     .and_then(|f| index.defs[f].container)
-                    .and_then(|c| index.members(&index.defs[c].name).into_iter().find(|&m| index.defs[m].name == name)))
+                    .and_then(|c| member_of(&index.defs[c].name)))
         };
         let Some(def) = def else { return Value::Null };
 
-        let label = index.defs[def].signature.lines().next().unwrap_or("").to_string();
+        let label = index.written(index.defs[def].signature.lines().next().unwrap_or(""));
         // `self` isn't passed in the parentheses
         let parameters: Vec<String> = signature_params(&label).into_iter().filter(|p| !p.ends_with("&self")).collect();
         json!({
@@ -1203,12 +1236,27 @@ fn short_name(name: &str) -> &str {
     name.rsplit("::").next().unwrap_or(name)
 }
 
+// A method with one impl per type it gives, written with the type like `try_as<int32>()`
+fn overloaded_item(index: &Index, defs: &[usize]) -> Value {
+    let d = &index.defs[defs[0]];
+    let gives: Vec<String> = defs.iter()
+        .filter_map(|&def| index.defs[def].signature.lines().next()?.rsplit_once("-> ").map(|(_, ret)| ret.trim().to_string()))
+        .collect();
+    let mut item = item(index, defs[0]);
+    item["detail"] = json!(format!("{}<T>(..), one per type", d.name));
+    item["documentation"] = json!({ "kind": "markdown", "value": format!("Gives one of:\n\n{}",
+        gives.iter().map(|g| format!("- `{}`", g)).collect::<Vec<_>>().join("\n")) });
+    item["insertText"] = json!(format!("{}<$1>()$0", d.name));
+    item["insertTextFormat"] = json!(2);
+    item
+}
+
 fn item(index: &Index, def: usize) -> Value {
     let d = &index.defs[def];
-    let detail = match d.kind {
+    let detail = index.written(&match d.kind {
         DefKind::Variable | DefKind::Param | DefKind::Field => show_type(&d.ty),
         _ => d.signature.lines().next().unwrap_or("").to_string(),
-    };
+    });
     let callable = matches!(d.kind, DefKind::Function | DefKind::Method)
         || d.kind == DefKind::Builtin && d.signature.contains('(');
     // Editors show `detail` above the documentation, a one line signature would be there twice
@@ -1223,21 +1271,26 @@ fn item(index: &Index, def: usize) -> Value {
             .map(|f| format!("*in module `{}`*", index.files[f].name))
             .unwrap_or_default()
     };
+    // Written without the module's name, `Lexer` for `lexer::Lexer`
+    let name = short_name(&d.name);
     let mut item = json!({
-        "label": d.name,
+        "label": name,
         "kind": completion_kind(d.kind),
-        "detail": detail,
         "documentation": { "kind": "markdown", "value": documentation },
     });
+    // A class or trait is shown whole in the documentation already
+    if d.kind == DefKind::Builtin || d.signature.lines().count() <= 1 {
+        item["detail"] = json!(detail);
+    }
     if callable {
-        item["insertText"] = json!(format!("{}($0)", d.name));
+        item["insertText"] = json!(format!("{}($0)", name));
         item["insertTextFormat"] = json!(2);
     }
     item
 }
 
 const KEYWORDS: &[&str] = &[
-    "as", "break", "class", "Constructor", "continue", "else", "enum", "extern", "false", "for", "func", "if", "impl", "import", "let",
+    "as", "break", "class", "Constructor", "continue", "else", "enum", "extern", "false", "for", "func", "if", "impl", "import", "is", "let",
     "match", "mut", "print", "pub", "return", "self", "trait", "true", "while",
 ];
 
@@ -1305,7 +1358,25 @@ fn resolve_chain(index: &Index, file: usize, line: usize, chain: &[String]) -> O
     // A local variable, the latest declaration before the line wins
     let mut locals = index.locals_at(file, line);
     locals.sort_by_key(|&d| std::cmp::Reverse((index.defs[d].span.line, index.defs[d].span.col)));
-    let mut ty = match locals.into_iter().find(|&d| &index.defs[d].name == first) {
+    let local = locals.into_iter().find(|&d| &index.defs[d].name == first);
+
+    // `Parser::from_source(x).` starts with a type's function, `Kind::Round.` with a variant
+    if let (None, Some(owner), Some(second)) = (local, index.type_named(file, first), rest.first()) {
+        let owner_name = index.defs[owner].name.clone();
+        let member = index.members(&owner_name).into_iter().find(|&m| &index.defs[m].name == second)?;
+        let mut ty = match index.defs[member].kind {
+            DefKind::Variant => Type::Enum(owner_name),
+            _ => index.defs[member].ty.clone(),
+        };
+        for name in &rest[1..] {
+            let owner = type_owner(&ty)?;
+            let member = index.members(&owner).into_iter().find(|&m| &index.defs[m].name == name)?;
+            ty = index.defs[member].ty.clone();
+        }
+        return type_owner(&ty);
+    }
+
+    let mut ty = match local {
         Some(def) => index.defs[def].ty.clone(),
         // A function's result, like `half(4).` or `fs::read(path).`, has the type it returns.
         // `Point.` isn't valid, an enum's name before `::` is handled by the caller

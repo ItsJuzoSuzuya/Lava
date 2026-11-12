@@ -24,10 +24,10 @@ pub class Vector<T> {
 
   pub func pop(mut &self) -> T {
     self.length = self.length - 1;
-    return self.data.get(self.length);
+    return self.data.take(self.length);
   }
 
-  pub func get(&self, index: uint64) -> T {
+  pub func get(&self, index: uint64) -> &T {
     return self.data.get(index);
   }
 
@@ -63,7 +63,7 @@ class Vector<T> {
     self.length = self.length + 1;
   }
 
-  pub func get(&self, index: uint64) -> T {
+  pub func get(&self, index: uint64) -> &T {
     return self.data.get(index);
   }
 
@@ -102,10 +102,10 @@ class Vector<T> {
 
   pub func pop(mut &self) -> T {
     self.length = self.length - 1;
-    return self.data.get(self.length);
+    return self.data.take(self.length);
   }
 
-  pub func get(&self, index: uint64) -> T {
+  pub func get(&self, index: uint64) -> &T {
     return self.data.get(index);
   }
 
@@ -144,7 +144,7 @@ class Vector<T> {
     self.length = self.length + 1;
   }
 
-  pub func get(&self, index: uint64) -> T {
+  pub func get(&self, index: uint64) -> &T {
     return self.data.get(index);
   }
 
@@ -182,7 +182,7 @@ class Vector<T> {
     self.length = self.length + 1;
   }
 
-  pub func get(&self, index: uint64) -> T {
+  pub func get(&self, index: uint64) -> &T {
     return self.data.get(index);
   }
 }
@@ -213,7 +213,7 @@ class Vector<T> {
     self.length = self.length + 1;
   }
 
-  pub func get(&self, index: uint64) -> T {
+  pub func get(&self, index: uint64) -> &T {
     return self.data.get(index);
   }
 }
@@ -275,7 +275,7 @@ pub class Vector<T> {
     self.length = self.length + 1;
   }
 
-  pub func get(&self, index: uint64) -> T {
+  pub func get(&self, index: uint64) -> &T {
     self.check_index(index);
     return self.data.get(index);
   }
@@ -297,7 +297,7 @@ pub class Vector<T> {
 
   pub func remove(mut &self, index: uint64) -> T {
     self.check_index(index);
-    let item = self.data.get(index);
+    let item = self.data.take(index);
 
     mut i = index;
     while i + 1 < self.length {
@@ -353,7 +353,7 @@ class Vector<T> {
     self.length = self.length + 1;
   }
 
-  pub func get(&self, index: uint64) -> T {
+  pub func get(&self, index: uint64) -> &T {
     if index >= self.length {
       panic("index is out of bounds for the Vector");
     }
@@ -436,3 +436,49 @@ for x in v.iter() {
 print(total);
 --- output
 9
+
+=== a Vector of default values
+import std::vector::{Vector};
+import std::option::{Option};
+class Bucket {
+  pub entries: Vector<String> = Vector();
+
+  Constructor();
+}
+mut buckets: Vector<Bucket> = Vector(3);
+buckets[1].entries.push("x");
+let numbers: Vector<int32> = Vector(4);
+let maybe: Vector<Option<String>> = Vector(1);
+print(buckets.len());
+print(buckets[1].entries.len());
+print(numbers[3]);
+print(maybe[0].is_none());
+--- output
+3
+1
+0
+true
+
+=== a Vector of a type without a default still works without a count
+import std::vector::{Vector};
+class Statement {
+  pub line: int32 = line;
+
+  Constructor(line: int32);
+}
+mut stmts = Vector<Statement>();
+stmts.push(Statement(4));
+print(stmts[0].line);
+--- output
+4
+
+=== a Vector of defaults needs a type with a default
+import std::vector::{Vector};
+class Statement {
+  pub line: int32 = line;
+
+  Constructor(line: int32);
+}
+let stmts: Vector<Statement> = Vector(3);
+--- error
+'Statement' has no default value, give it a constructor taking no arguments or an `impl Default`

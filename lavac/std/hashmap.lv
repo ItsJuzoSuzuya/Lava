@@ -1,4 +1,6 @@
 import std::path::{Path};
+import std::vector::{Vector};
+
 // --- HashMaps ---
 //
 // A draft moved here from the prelude, as it was there. It doesn't compile
@@ -8,12 +10,12 @@ pub trait Hash {
   pub func hash(&self) -> int32;
 }
 
-pub class Bucket<T> {
-  pairs: Vector<(int32, T)>;
+pub class Bucket<Key, Value> {
+  pairs: Vector<(Key, Value)>;
 }
 
 pub class HashMap<Key: Hash, Value> {
-  buckets: Bucket<Value>[16] = Bucket[16];
+  buckets: Vector<Bucket<Key, Value>> = Vector(16);
 
   pub func set(key: Key, value: Value) {
     let hash: int32 = key.hash();
@@ -23,12 +25,19 @@ pub class HashMap<Key: Hash, Value> {
 
 impl Hash for String {
   pub func hash(&self) -> int32 {
-    return 20;
+    let p: uint64 = 53;
+    let m: uint64 = 1e9 + 9;
+    mut hash_value: uint64 = 0;
+    mut p_pow: uint64 = 1;
+    for c in self.bytes {
+      hash_value = (hash_value + (c as uint32 + 1) * p_pow) % m;
+      p_pow = (p_pow * p) % m;
+    }
   }
 }
 
 impl Hash for Path {
   pub func hash(&self) -> int32 {
-    return 10;
+    return self.to_string().hash();
   }
 }

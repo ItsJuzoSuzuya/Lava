@@ -1,0 +1,87 @@
+import std::vector::{Vector};
+import statement;
+import std::option::{Option};
+import span;
+import codegen;
+import codegen_ctx;
+import llvm;
+import type;
+import std::math::{min};
+import std::result::{Result};
+
+pub class Expression {
+  pub kind: ExprKind;
+  pub span: Span;
+  pub ty: type::Type;
+
+  pub func codegen_value(&self, ctx: &CodegenContext) -> Option<LLVMValueRef> {
+    match self.kind {
+      ExprKind::Boolean(val) => {
+        let int = val ? 1 : 0;
+        return ctx.context.bool_type().const_int(int as uint64, false);
+      },
+      ExprKind::If(condition, if_case, else_case) => {
+        let current_func = ctx.builder.get_insert_block().get_parent();
+        let then_bb = ctx.context.append_basic_block(current_func, "then");
+        let else_bb = ctx.context.append_basic_block(current_func, "else");
+        let merge_bb = ctx.context.append_basic_block(current_func, "if_end");
+
+        let condition = condition.codegen(ctx) ?? return None;
+        ctx.builder.build_conditional_branch(condition, then_bb, else_bb);
+
+        ctx.builder.position_at_end(then_bb);
+        if_case.codegen_into_bb(ctx, merge_bb);
+
+        ctx.builder.position_at_end(else_bb);
+        if else_case is Some(block) 
+          block.codegen_into_bb(ctx, merge_bb);
+        else 
+          ctx.builder.build_br(merge_bb);
+
+        ctx.builder.position_at_end(merge_bb);
+        return None;
+      },
+      ExprKind::Error => return None,
+    }
+  }
+
+  pub func llvm_string(&self, ctx: &CodegenContext) -> Result<LLVMValueRef, CodegenError> {
+    match self.ty {
+      Type::Boolean => {
+        let v = self.codegen(ctx) ?? return Err(CodegenError::MissingValue(self.ty, self.span));
+        let yes = ctx.builder.build_const_str_ptr("true", "true");
+        let no = ctx.builder.build_const_str_ptr("false", "false");
+        return LLVMBuildSelect(ctx.builder, v, yes, no, "bool_text");
+      }
+    }
+  }
+}
+
+impl Codegen for Expression {
+  pub func codegen(&self, ctx: &CodegenContext) -> Option<LLVMValueRef> {
+    return self.codegen_value(ctx);
+  }
+}
+
+pub enum ExprKind {
+  Boolean => bool,
+  If => (Expression, Block, Option<Block>)
+  Error => String, 
+}
+
+pub class Block {
+  pub stmts: Vector<Statement>;
+  /// The expression ending the block without `;`, the block's value. `None`
+  /// if there's none, like for `{ return x; }`.
+  pub value: Option<Expression>;
+
+  pub func codegen_into_bb(&self, ctx: &CodegenContext, into_bb: BasicBlock) {
+    for stmt in self.stmts {
+      stmt.codegen(ctx);
+    }
+    if self.value is Some(value) 
+      value.codegen(ctx);
+    if !ctx.builder.get_insert_block().has_terminator() 
+      ctx.builder.build_br(into_bb);
+  }
+}

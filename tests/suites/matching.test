@@ -326,3 +326,192 @@ match 5 {
 print("done");
 --- output
 done
+
+=== is binds in the then branch
+import std::option::{Option};
+let a: Option<int32> = Some(4);
+if a is Some(v) {
+  print(v);
+}
+print(a is None);
+--- output
+4
+false
+
+=== is binds in the rest of an && chain
+import std::option::{Option};
+func find(n: int32) -> Option<int32> {
+  return n > 2 ? None : Some(n * 10);
+}
+if find(2) is Some(v) && v > 15 {
+  print(v);
+}
+if find(1) is Some(v) && v > 15 {
+  print(v);
+}
+--- output
+20
+
+=== is keeps the outer name in else and afterwards
+import std::option::{Option};
+let v = 99;
+let a: Option<int32> = None;
+if a is Some(v) {
+  print(v);
+} else {
+  print(v);
+}
+print(v);
+--- output
+99
+99
+
+=== is on a temporary owning value
+import std::result::{Result};
+func parse(n: int32) -> Result<String, String> {
+  return n == 0 ? Err("zero") : Ok("fine");
+}
+if parse(3) is Ok(text) {
+  print(text);
+}
+if parse(0) is Err(message) {
+  print(message);
+}
+--- output
+fine
+zero
+
+=== while with is
+import std::option::{Option};
+func find(n: int32) -> Option<int32> {
+  return n > 2 ? None : Some(n * 10);
+}
+mut i = 0;
+while find(i) is Some(x) {
+  print(x);
+  i = i + 1;
+}
+--- output
+0
+10
+20
+
+=== is in a ternary
+import std::option::{Option};
+let a: Option<int32> = Some(7);
+print(a is Some(w) ? w : -1);
+--- output
+7
+
+=== is binding isn't visible after ||
+import std::option::{Option};
+let a: Option<int32> = Some(7);
+if a is Some(v) || v > 1 {
+  print(1);
+}
+--- error
+unknown identifier 'v'
+
+=== is binding isn't visible in else
+import std::option::{Option};
+let a: Option<int32> = Some(7);
+if a is Some(v) {
+  print(1);
+} else {
+  print(v);
+}
+--- error
+unknown identifier 'v'
+
+=== patterns inside variant patterns
+import std::option::{Option};
+import std::result::{Result};
+func find(n: int32) -> Option<Result<int32, String>> {
+  if n == 0 {
+    return None;
+  }
+  return n > 0 ? Ok(n) : Err("negative");
+}
+func describe(n: int32) -> String {
+  return match find(n) {
+    Some(Ok(1)) => "one",
+    Some(Ok(_)) => "ok",
+    Some(Err(e)) => e,
+    None => "none",
+  };
+}
+print(describe(1));
+print(describe(5));
+print(describe(-2));
+print(describe(0));
+if find(7) is Some(Ok(v)) {
+  print(v);
+}
+--- output
+one
+ok
+negative
+none
+7
+
+=== a nested case missing is reported
+import std::option::{Option};
+import std::result::{Result};
+let a: Option<Result<int32, String>> = None;
+let s = match a {
+  Some(Ok(1)) => "one",
+  Some(Err(e)) => e,
+  None => "none",
+};
+--- error
+has to handle every case
+
+=== tuple matches are complete over several values
+enum Kind {
+  A,
+  B,
+  C;
+}
+func f(x: (Kind, bool)) -> int32 {
+  return match x {
+    (Kind::A, _) => 1,
+    (_, true) => 2,
+    (Kind::B, false) => 3,
+    (Kind::C, false) => 4,
+  };
+}
+func g(x: (bool, int32)) -> int32 {
+  return match x {
+    (true, _) => 1,
+    (false, 1) => 2,
+    (false, _) => 3,
+  };
+}
+print(f((Kind::A, false)));
+print(f((Kind::C, true)));
+print(f((Kind::B, false)));
+print(f((Kind::C, false)));
+print(g((false, 1)));
+--- output
+1
+2
+3
+4
+2
+
+=== a missing tuple combination is reported
+enum Kind {
+  A,
+  B,
+  C;
+}
+func f(x: (Kind, bool)) -> int32 {
+  return match x {
+    (Kind::A, _) => 1,
+    (_, true) => 2,
+    (Kind::B, false) => 3,
+  };
+}
+print(f((Kind::A, false)));
+--- error
+has to handle every case

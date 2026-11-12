@@ -317,7 +317,7 @@ class Point {
 }
 extern func make() -> Point;
 --- error
-a C function can't return 'Class(Point)', only a number, String, extern type or nothing
+a C function can't return 'Class(Point)', only a number, String, extern type, Option of an extern type or nothing
 
 === extern types are C pointers passed through
 extern link "m";
@@ -474,3 +474,107 @@ print(1);
 return 0;
 --- output
 1
+
+=== a C function's null pointer is None of an Option of an extern type
+import std::option::{Option};
+extern type FILE;
+extern func fopen(path: String, mode: String) -> Option<FILE>;
+extern func fflush(file: Option<FILE>) -> int32;
+match fopen("/does/not/exist", "r") {
+  Some(file) => print("opened"),
+  None => print("missing"),
+}
+print(fflush(None));
+--- output
+missing
+0
+
+=== print uses a type's impl Print
+import std::string::{Print};
+class Point {
+  pub x: int32 = x;
+  pub y: int32 = y;
+
+  Constructor(x: int32, y: int32);
+}
+impl Print for Point {
+  func to_string(&self) -> String {
+    return "(" + self.x.to_string() + ", " + self.y.to_string() + ")";
+  }
+}
+enum Light {
+  Red,
+  Green;
+}
+let p = Point(3, 4);
+print(p);
+print("point " + p.to_string());
+print(Light::Green);
+print(42.to_string() + "!");
+print(true.to_string());
+--- output
+(3, 4)
+point (3, 4)
+Green
+42!
+true
+
+=== a class without impl Print can't be printed
+class Q {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+print(Q(1));
+--- error
+'Q' can't be printed, give it an `impl Print` with a `to_string`
+
+=== a C function writes a handle into an out-parameter
+import std::option::{Option};
+extern type CChar;
+extern func strtol(text: String, end: &Option<CChar>, base: int32) -> int64;
+mut end: Option<CChar> = None;
+print(end is None);
+print(strtol("42 apples", &end, 10));
+print(end is Some(_));
+--- output
+true
+42
+true
+
+=== an out-parameter needs a mut variable
+import std::option::{Option};
+extern type CChar;
+extern func strtol(text: String, end: &Option<CChar>, base: int32) -> int64;
+let end: Option<CChar> = None;
+print(strtol("42", &end, 10));
+--- error
+'strtol' writes into 'end', declare it with `mut`
+
+=== a reference to an out-parameter's variable is passed on
+import std::option::{Option};
+extern type CChar;
+extern func strtol(text: String, end: &Option<CChar>, base: int32) -> int64;
+func parse(text: String, mut end: &Option<CChar>) -> int64 {
+  return strtol(text, end, 10);
+}
+mut end: Option<CChar> = None;
+print(parse("42 apples", &end));
+print(end is Some(_));
+--- output
+42
+true
+
+=== a C function writes a text into an out-parameter
+import std::option::{Option};
+extern func strtol(text: String, end: &Option<String>, base: int32) -> int64;
+mut rest: Option<String> = None;
+print(strtol("42 apples", &rest, 10));
+print(rest ?? "nothing");
+print(strtol("7 pears", &rest, 10));
+print(rest ?? "nothing");
+--- output
+42
+ apples
+7
+ pears

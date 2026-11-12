@@ -61,6 +61,25 @@ impl Lexer {
         self.chars.get(pos).copied()
     }
 
+    /// Reads the digits at the current position and returns them without the
+    /// `_`s between them, like `1000000` for `1_000_000`. A `_` only belongs
+    /// to the number if a digit follows it.
+    fn lex_digits(&mut self) -> String {
+        let mut digits = String::new();
+        while let Some(c) = self.char_at(self.pos) {
+            let separator = c == '_' && self.char_at(self.pos + 1).is_some_and(|n| n.is_digit(10));
+            if !c.is_digit(10) && !separator {
+                break;
+            }
+            if c != '_' {
+                digits.push(c);
+            }
+            self.pos += 1;
+            self.col += 1;
+        }
+        digits
+    }
+
     /// Reads the escape sequence at the current position, like `\n`, and
     /// returns the character it stands for.
     fn escape(&mut self) -> Result<char, LexError> {
@@ -235,48 +254,63 @@ impl Lexer {
             return Ok((Token::CharLiteral(value as u8), span));
         }
 
-        // Create [`Token::IntLiteral`] or [`Token::FloatLiteral`] from digits
+        // Create [`Token::IntLiteral`] or [`Token::FloatLiteral`] from digits.
+        // `_` separates digits, like `1_000_000`, and `e` gives a power of ten,
+        // like `1e9`. A number with a '.' or a negative power, like `1e-9`, is a float
         if c.is_digit(10) {
             // Right after a single '.' it's a tuple position, `t.1.0` is `(t.1).0`
             let tuple_position = self.pos > 0 && self.char_at(self.pos - 1) == Some('.')
                 && (self.pos < 2 || self.char_at(self.pos - 2) != Some('.'));
-            while c.is_digit(10){
-                token += &c.to_string();
-                self.pos += 1;
-                self.col += 1;
-                c = self.char_at(self.pos).unwrap_or(' ')
-            }
+            let start_pos = self.pos;
+            let mut digits = self.lex_digits();
 
             // A '.' followed by a digit continues the number as a float
+            c = self.char_at(self.pos).unwrap_or(' ');
             let next_is_digit = self.char_at(self.pos + 1).is_some_and(|n| n.is_digit(10));
+            let mut fraction = None;
             if c == '.' && next_is_digit && !tuple_position {
-                token += ".";
                 self.pos += 1;
                 self.col += 1;
-                c = self.char_at(self.pos).unwrap_or(' ');
-                while c.is_digit(10) {
-                    token += &c.to_string();
-                    self.pos += 1;
-                    self.col += 1;
-                    c = self.char_at(self.pos).unwrap_or(' ')
-                }
-
-                // Digits and a single '.' always parse as f64
-                let t = Token::FloatLiteral(token.parse::<f64>().unwrap());
-                let span = Span { line: start_line, col: start_col, len: token.len() };
-                return Ok((t, span));
+                fraction = Some(self.lex_digits());
             }
 
-            let value = match token.parse::<i64>() {
-                Ok(v) => v,
-                Err(_) => {
-                    let span = Span { line: start_line, col: start_col, len: token.len() };
-                    return Err(LexError { kind: LexErrorKind::NumberOutOfRange(token), span });
+            // `e` followed by a power like `9`, `+9` or `-9`
+            let mut exponent: Option<String> = None;
+            if matches!(self.char_at(self.pos), Some('e' | 'E')) && !tuple_position {
+                let sign = self.char_at(self.pos + 1).filter(|s| *s == '+' || *s == '-');
+                let first = self.pos + 1 + sign.is_some() as usize;
+                if self.char_at(first).is_some_and(|d| d.is_digit(10)) {
+                    self.col += first - self.pos;
+                    self.pos = first;
+                    let power = self.lex_digits();
+                    exponent = Some(if sign == Some('-') { format!("-{}", power) } else { power });
                 }
+            }
+
+            let span = Span { line: start_line, col: start_col, len: self.col - start_col };
+            let negative_power = exponent.as_ref().is_some_and(|e| e.starts_with('-'));
+            if fraction.is_some() || negative_power {
+                if let Some(fraction) = fraction {
+                    digits = format!("{}.{}", digits, fraction);
+                }
+                if let Some(exponent) = exponent {
+                    digits = format!("{}e{}", digits, exponent);
+                }
+                // Digits with a '.' or a power always parse as f64
+                return Ok((Token::FloatLiteral(digits.parse::<f64>().unwrap()), span));
+            }
+
+            let source: String = self.chars[start_pos..self.pos].iter().collect();
+            let value = digits.parse::<i64>().ok().and_then(|value| match &exponent {
+                None => Some(value),
+                Some(power) => power.parse::<u32>().ok()
+                    .and_then(|power| 10i64.checked_pow(power))
+                    .and_then(|scale| value.checked_mul(scale)),
+            });
+            return match value {
+                Some(value) => Ok((Token::IntLiteral(value), span)),
+                None => Err(LexError { kind: LexErrorKind::NumberOutOfRange(source), span }),
             };
-            let t = Token::IntLiteral(value);
-            let span = Span { line: start_line, col: start_col, len: token.len() };
-            return Ok((t, span));
         }
 
         // Keywords and identifiers start with a letter or '_', anything else is unknown
@@ -462,6 +496,26 @@ mod tests {
         assert_eq!(lex_all("1.5 0.25 10.0"), vec![
             Token::FloatLiteral(1.5), Token::FloatLiteral(0.25), Token::FloatLiteral(10.0),
         ]);
+    }
+
+    #[test]
+    fn digit_separators() {
+        assert_eq!(lex_all("1_000_000_009 2_5.0_5"), vec![Token::IntLiteral(1_000_000_009), Token::FloatLiteral(25.05)]);
+        // A `_` without a digit after it starts a name
+        assert_eq!(lex_all("1_ x"), vec![Token::IntLiteral(1), ident("_"), ident("x")]);
+    }
+
+    #[test]
+    fn powers_of_ten() {
+        assert_eq!(lex_all("1e9 3E2 2e+3 0e5"), vec![
+            Token::IntLiteral(1_000_000_000), Token::IntLiteral(300), Token::IntLiteral(2000), Token::IntLiteral(0),
+        ]);
+        assert_eq!(lex_all("1.5e3 1e-9"), vec![Token::FloatLiteral(1500.0), Token::FloatLiteral(1e-9)]);
+        assert_eq!(lex_all("1e9 + 9"), vec![Token::IntLiteral(1_000_000_000), Token::Plus, Token::IntLiteral(9)]);
+        // Without digits after it, `e` is a name
+        assert_eq!(lex_all("2e"), vec![Token::IntLiteral(2), ident("e")]);
+        let error = lex_error("1e19");
+        assert!(matches!(error.kind, LexErrorKind::NumberOutOfRange(ref n) if n == "1e19"));
     }
 
     #[test]

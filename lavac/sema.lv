@@ -1,0 +1,13 @@
+import modules;
+import std::result::{Result};
+import std::vector::{Vector};
+pub class Sema {
+  Constructor();
+
+  pub func check(&self, source: &String) -> Result<Module, Vector<SemanticError>> {
+    return Err(Vector<SemanticError>());
+  }
+}
+
+pub enum SemanticError {
+}

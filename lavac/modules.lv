@@ -5,6 +5,8 @@ import std::option::{Option};
 import std::string;
 import std::hashmap;
 import std::hashmap::{HashMap};
+import lexer;
+import program;
 
 /// A module imported by another one, like `import math;` or
 /// `import std::fs::{read};` at `span`.
@@ -31,17 +33,6 @@ pub class Module {
   pub func strip_std(&self) -> Option<String> {
       return self.full_name.strip_prefix("std::");
   }
-
-  /// What the parser renames this module's names to. A standard library
-  /// module's top-level declarations get its name, `read` in `std::fs`
-  /// becomes `fs::read`, so modules can declare the same names and code
-  /// using them says which one it means.
-  pub func renames(mut &self) -> HashMap<String, String> {
-      let module_name = self.strip_std();
-      top_level_names(&self.source).into_iter()
-          .map(|name| (name.clone(), format!("{}::{}", std_name, name)))
-          .collect()
-  }
 }
 
 /// All modules reachable from a root source file.
@@ -55,17 +46,12 @@ pub class Module {
 /// the modules importing them.
 pub class ModuleGraph {
   pub modules: Vector<Module> = Vector();
+  pub module_errors: Vector<CompileError> = Vector();
+
   overlay: HashMap<Path,String> = HashMap();
+
   
   Constructor(root_path: &Path) {
-
+    
   }
-}
-
-/// Names of the functions, classes, enums and traits `source` declares at the
-/// top level. Lexing errors end the list, they're reported when parsing.
-pub func top_level_names(source: &String) -> Vec<String> {
-  mut lexer = Lexer(source);
-  mut names = Vector<String>();
-  while lexer.get_next_token()
 }

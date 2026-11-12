@@ -690,7 +690,7 @@ impl Get for &int32 {
   }
 }
 --- error
-traits can't be implemented for 'Ref(int32)'
+traits can't be implemented for '&int32'
 
 === implementing a trait twice is an error
 trait Get {
@@ -1165,3 +1165,124 @@ impl Showable for Box {
 }
 --- error
 'Box' is missing method 'showable' of trait 'Showable'
+
+=== a trait function without self is called on the value it takes
+import std::option::{Option};
+trait Make<From> {
+  func make(value: &From) -> Option<Self>;
+}
+impl Make<int64> for uint8 {
+  func make(value: &int64) -> Option<uint8> {
+    value < 0 || value > 255 ? None : Some(value as uint8)
+  }
+}
+let big: int64 = 300;
+let fits: int64 = 200;
+print(big.make<uint8>() ?? 7);
+print(fits.make<uint8>() ?? 7);
+--- output
+7
+200
+
+=== text turns into numbers, bools and own types with try_as
+import std::convert::{TryAs};
+import std::option::{Option};
+class Point {
+  pub x: int32;
+  pub y: int32;
+}
+impl TryAs<Point> for String {
+  func try_as(&self) -> Option<Point> {
+    match self.index_of(",") {
+      Some(at) => {
+        let x = self.slice(0, at).try_as<int32>();
+        let y = self.slice(at + 1, self.len()).try_as<int32>();
+        match (x, y) {
+          (Some(x), Some(y)) => Some(Point(x, y)),
+          _ => None,
+        }
+      },
+      None => None,
+    }
+  }
+}
+func takes(n: int64) {
+  print(n);
+}
+let n = "42".try_as() ?? 0;
+print(n + 1);
+let big: int64 = "9000000000".try_as() ?? 0;
+print(big);
+takes("7".try_as() ?? 0);
+print("300".try_as<uint8>() ?? 255);
+print("1.5e3".try_as() ?? 0.0);
+print("true".try_as<bool>() ?? false);
+let p = "3,4".try_as<Point>() ?? Point(0, 0);
+print(p.x * p.y);
+print("bad".try_as<Point>().is_none());
+--- output
+43
+9000000000
+7
+255
+1500.000000
+true
+12
+true
+
+=== try_as needs an impl for the two types
+import std::convert;
+let b = true;
+let n = b.try_as<int32>() ?? 0;
+--- error
+'bool' has no 'try_as' giving 'int32', it needs an `impl TryAs<int32> for bool`
+
+=== try_as needs to know the type it gives
+import std::convert;
+let n = "1".try_as();
+--- error
+'try_as' of 'String' can give several types, write which one like `try_as<int32>()`
+
+=== the default value of a type
+import std::default::{Default};
+class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+impl Default for Point {
+  func default() -> Point {
+    return Point(5);
+  }
+}
+class Empty {
+  pub n: int32 = 3;
+
+  Constructor();
+}
+func fresh<T: Default>() -> T {
+  return T::default();
+}
+print(fresh<int64>());
+print(fresh<String>().len());
+print(fresh<Point>().x);
+print(fresh<Empty>().n);
+--- output
+0
+0
+5
+3
+
+=== a type without a default doesn't meet a Default bound
+import std::default::{Default};
+class S {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+}
+func fresh<T: Default>() -> T {
+  return T::default();
+}
+let s = fresh<S>();
+--- error
+'S' doesn't implement trait 'Default'

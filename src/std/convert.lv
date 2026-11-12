@@ -1,0 +1,184 @@
+// std::convert: turning a value into one of another type, if it fits.
+//
+//   import std::convert;
+//
+//   let n = text.try_as() ?? 0;            // the type comes from the default, int32
+//   let big: int64 = text.try_as() ?? 0;   // or from where it goes
+//   let small = "300".try_as<uint8>() ?? 255;
+//
+// Own types join in with an impl: `impl TryAs<Point> for String { ... }`
+// makes `line.try_as<Point>()` work.
+
+import std::option::{Option};
+import std::string::{is_digit};
+
+// This value as a `Target`, or `None` if it doesn't make one, like a text
+// that's no number. A type has one impl per type it turns into.
+pub trait TryAs<Target> {
+  func try_as(&self) -> Option<Target>;
+}
+
+// --- Text to numbers ---
+
+impl TryAs<int64> for String {
+  func try_as(&self) -> Option<int64> {
+    self.parse_int()
+  }
+}
+
+impl TryAs<int32> for String {
+  func try_as(&self) -> Option<int32> {
+    match self.parse_int() {
+      Some(n) => fits(n, -2147483648, 2147483647) ? Some(n as int32) : None,
+      None => None,
+    }
+  }
+}
+
+impl TryAs<int16> for String {
+  func try_as(&self) -> Option<int16> {
+    match self.parse_int() {
+      Some(n) => fits(n, -32768, 32767) ? Some(n as int16) : None,
+      None => None,
+    }
+  }
+}
+
+impl TryAs<int8> for String {
+  func try_as(&self) -> Option<int8> {
+    match self.parse_int() {
+      Some(n) => fits(n, -128, 127) ? Some(n as int8) : None,
+      None => None,
+    }
+  }
+}
+
+// Up to the largest `int64`, the text is read as one
+impl TryAs<uint64> for String {
+  func try_as(&self) -> Option<uint64> {
+    match self.parse_int() {
+      Some(n) => n >= 0 ? Some(n as uint64) : None,
+      None => None,
+    }
+  }
+}
+
+impl TryAs<uint32> for String {
+  func try_as(&self) -> Option<uint32> {
+    match self.parse_int() {
+      Some(n) => fits(n, 0, 4294967295) ? Some(n as uint32) : None,
+      None => None,
+    }
+  }
+}
+
+impl TryAs<uint16> for String {
+  func try_as(&self) -> Option<uint16> {
+    match self.parse_int() {
+      Some(n) => fits(n, 0, 65535) ? Some(n as uint16) : None,
+      None => None,
+    }
+  }
+}
+
+impl TryAs<uint8> for String {
+  func try_as(&self) -> Option<uint8> {
+    match self.parse_int() {
+      Some(n) => fits(n, 0, 255) ? Some(n as uint8) : None,
+      None => None,
+    }
+  }
+}
+
+// A decimal number like `-2.5`, `3` or `1.5e3`
+impl TryAs<float64> for String {
+  func try_as(&self) -> Option<float64> {
+    parse_float(self)
+  }
+}
+
+impl TryAs<float32> for String {
+  func try_as(&self) -> Option<float32> {
+    match parse_float(self) {
+      Some(x) => Some(x as float32),
+      None => None,
+    }
+  }
+}
+
+// `"true"` or `"false"`
+impl TryAs<bool> for String {
+  func try_as(&self) -> Option<bool> {
+    if self == "true" {
+      return Some(true);
+    }
+    if self == "false" {
+      return Some(false);
+    }
+    None
+  }
+}
+
+// --- Used above ---
+
+// Whether `n` is from `min` up to `max`.
+func fits(n: int64, min: int64, max: int64) -> bool {
+  return n >= min && n <= max;
+}
+
+// The number in `text`: an optional sign, digits with an optional fraction,
+// and an optional exponent like `e-3`. `None` for anything else.
+func parse_float(text: &String) -> Option<float64> {
+  mut i: uint64 = 0;
+  mut negative = false;
+  if i < text.len() && (text.char_at(i) == '-' || text.char_at(i) == '+') {
+    negative = text.char_at(i) == '-';
+    i += 1;
+  }
+  mut value = 0.0;
+  mut digits = 0;
+  while i < text.len() && is_digit(text.char_at(i)) {
+    value = value * 10.0 + (text.char_at(i) as uint8 - '0') as float64;
+    digits += 1;
+    i += 1;
+  }
+  if i < text.len() && text.char_at(i) == '.' {
+    i += 1;
+    mut scale = 0.1;
+    while i < text.len() && is_digit(text.char_at(i)) {
+      value = value + (text.char_at(i) as uint8 - '0') as float64 * scale;
+      scale = scale / 10.0;
+      digits += 1;
+      i += 1;
+    }
+  }
+  if digits == 0 {
+    return None;
+  }
+  if i < text.len() && (text.char_at(i) == 'e' || text.char_at(i) == 'E') {
+    i += 1;
+    mut exponent_negative = false;
+    if i < text.len() && (text.char_at(i) == '-' || text.char_at(i) == '+') {
+      exponent_negative = text.char_at(i) == '-';
+      i += 1;
+    }
+    mut exponent = 0;
+    mut exponent_digits = 0;
+    while i < text.len() && is_digit(text.char_at(i)) {
+      exponent = exponent * 10 + (text.char_at(i) as uint8 - '0') as int32;
+      exponent_digits += 1;
+      i += 1;
+    }
+    if exponent_digits == 0 {
+      return None;
+    }
+    while exponent > 0 {
+      value = exponent_negative ? value / 10.0 : value * 10.0;
+      exponent -= 1;
+    }
+  }
+  if i != text.len() {
+    return None;
+  }
+  Some(negative ? -value : value)
+}

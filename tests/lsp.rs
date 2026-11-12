@@ -367,6 +367,119 @@ fn completion_in_field_defaults() {
 }
 
 #[test]
+fn completion_shows_imported_items_by_their_written_name() {
+    let (mut client, dir, main, _) = started("module_names");
+    fs::write(dir.join("shapes.lv"), "pub class Circle {\n  pub radius: int32 = radius;\n\n  Constructor(radius: int32);\n\n  pub func area(&self) -> int32 {\n    return self.radius * self.radius * 3;\n  }\n}\n").unwrap();
+
+    let labels = |items: &Value| -> Vec<String> {
+        items.as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect()
+    };
+
+    // `shapes::Circle` is written `Circle` after `import shapes;`
+    let source = "import shapes;\nlet c = Circle(2);\nprint(c.area());\n\n";
+    client.change(&main, 2, source);
+    let everything = labels(&client.result("textDocument/completion", at(&main, 3, 0)));
+    assert!(everything.contains(&"Circle".to_string()), "{:?}", everything);
+    assert!(!everything.iter().any(|label| label.contains("::")), "{:?}", everything);
+
+    let typed = "import shapes;\nlet c = Circle(2);\nprint(c.area());\nc.\n";
+    client.change(&main, 3, typed);
+    let members = labels(&client.result("textDocument/completion", at(&main, 3, 2)));
+    assert!(members.contains(&"area".to_string()), "{:?}", members);
+
+    stop(client, dir);
+}
+
+#[test]
+fn colon_access_into_other_modules() {
+    let (mut client, dir, main, _) = started("colon_access");
+    fs::write(dir.join("shapes.lv"), "pub enum Kind {\n  Round,\n  Square;\n}\n\npub class Point {\n  pub x: int32 = x;\n\n  Constructor(x: int32);\n\n  pub func origin() -> Point {\n    return Point(0);\n  }\n}\n").unwrap();
+    let shapes = format!("file://{}", dir.join("shapes.lv").display());
+
+    let labels = |items: &Value| -> Vec<String> {
+        items.as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect()
+    };
+
+    let source = "import shapes;\nlet k = Kind::Round;\nlet p = Point::origin();\nprint(p.x);\n";
+    client.change(&main, 2, source);
+
+    // Hover and definition on the variant and on the function without `self`
+    let hover = client.result("textDocument/hover", at(&main, 1, 15));
+    assert!(hover["contents"]["value"].as_str().unwrap_or("").contains("Round"), "{}", hover);
+    let definition = client.result("textDocument/definition", at(&main, 2, 16));
+    assert_eq!(definition["uri"], shapes, "{}", definition);
+    assert_eq!(definition["range"]["start"]["line"], 10, "{}", definition);
+
+    // Completion after `Name::`
+    let typed = "import shapes;\nlet k = Kind::Round;\nlet p = Point::origin();\nprint(p.x);\nKind::\n";
+    client.change(&main, 3, typed);
+    let variants = labels(&client.result("textDocument/completion", at(&main, 4, 6)));
+    assert!(variants.contains(&"Round".to_string()) && variants.contains(&"Square".to_string()), "{:?}", variants);
+    let typed = "import shapes;\nlet k = Kind::Round;\nlet p = Point::origin();\nprint(p.x);\nPoint::\n";
+    client.change(&main, 4, typed);
+    let functions = labels(&client.result("textDocument/completion", at(&main, 4, 7)));
+    assert!(functions.contains(&"origin".to_string()), "{:?}", functions);
+
+    stop(client, dir);
+}
+
+#[test]
+fn methods_on_the_result_of_a_function_without_self() {
+    let (mut client, dir, main, _) = started("static_chain");
+    fs::write(dir.join("parsing.lv"), "pub class Parser {\n  pub source: String = source;\n\n  Constructor(source: String);\n\n  pub func from_source(source: String) -> Parser {\n    return Parser(source);\n  }\n\n  // Parses the whole source\n  pub func parse(mut &self) -> int32 {\n    return 1;\n  }\n}\n").unwrap();
+
+    let labels = |items: &Value| -> Vec<String> {
+        items.as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect()
+    };
+
+    let source = "import parsing;\nlet n = Parser::from_source(\"x\").parse();\nprint(n);\n";
+    client.change(&main, 2, source);
+    // Written like in code, without the module: `Parser.parse`, not `parsing::Parser.parse`
+    let hover = client.result("textDocument/hover", at(&main, 1, 34));
+    let hover = hover["contents"]["value"].as_str().unwrap_or("").to_string();
+    assert!(hover.contains("pub func Parser.parse(mut &self) -> int32") && hover.contains("*in module `parsing`*"), "{}", hover);
+    let help = client.result("textDocument/signatureHelp", at(&main, 1, 28));
+    assert_eq!(help["signatures"][0]["label"], "pub func Parser.from_source(source: String) -> Parser", "{}", help);
+
+    let typed = "import parsing;\nlet n = Parser::from_source(\"x\").parse();\nprint(n);\nParser::from_source(\"y\").\n";
+    client.change(&main, 3, typed);
+    let members = labels(&client.result("textDocument/completion", at(&main, 3, 25)));
+    assert!(members.contains(&"parse".to_string()), "{:?}", members);
+
+    stop(client, dir);
+}
+
+#[test]
+fn completion_on_pattern_bindings() {
+    let (mut client, dir, main, _) = started("pattern_bindings");
+
+    let labels = |items: &Value| -> Vec<String> {
+        items.as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect()
+    };
+
+    // A binding of a generic enum's variant has the instance's type, `Point`, not `T`
+    let source = format!(
+        "import std::option::{{Option}};\n{}func find(x: int32) -> Option<Point> {{\n  return Some(Point {{ x: x }});\n}}\nif find(1) is Some(found) {{\n  print(found.double());\n}}\nmatch find(2) {{\n  Some(other) => print(other.double()),\n  None => print(0),\n}}\n",
+        MAIN,
+    );
+    client.change(&main, 2, &source);
+    let is_line = source.lines().position(|l| l.contains("found.double")).unwrap() as u64;
+    let match_line = source.lines().position(|l| l.contains("other.double")).unwrap() as u64;
+
+    let typed = source.replace("found.double());", "found.");
+    client.change(&main, 3, &typed);
+    let members = labels(&client.result("textDocument/completion", at(&main, is_line, 14)));
+    assert!(members.contains(&"double".to_string()), "{:?}", members);
+
+    let typed = source.replace("other.double()),", "other.");
+    client.change(&main, 4, &typed);
+    let members = labels(&client.result("textDocument/completion", at(&main, match_line, 29)));
+    assert!(members.contains(&"double".to_string()), "{:?}", members);
+
+    stop(client, dir);
+}
+
+#[test]
 fn completion_imports_what_it_suggests() {
     let (mut client, dir, main, _) = started("auto_import");
     fs::write(dir.join("shapes.lv"), "pub func area(w: int32, h: int32) -> int32 {\n  return w * h;\n}\nfunc hidden() {}\n").unwrap();
@@ -420,7 +533,8 @@ fn completion_imports_what_it_suggests() {
     assert_eq!(read["insertText"], "read($0)");
     assert!(import_of(&read).is_none());
 
-    // After `text.` the methods std::string adds to `String`, which import the module
+    // After `text.` the methods std::string adds to `String`. It's always loaded
+    // with std::convert, so they need no import
     let with_text = format!("{}let text = \"a,b\";\n", MAIN);
     client.change(&main, 6, &with_text);
     client.diagnostics(&main);
@@ -428,8 +542,8 @@ fn completion_imports_what_it_suggests() {
     let items = client.result("textDocument/completion", at(&main, 22, 5));
     let split = find(&items, "split").expect("split of std::string is offered after `text.`");
     assert_eq!(split["insertText"], "split($0)");
-    assert_eq!(import_of(&split).as_deref(), Some("import std::string;\n"));
-    assert_eq!(split["detail"], "split(separator: char) -> Vector<String>");
+    assert!(import_of(&split).is_none());
+    assert_eq!(split["detail"], "pub func String.split(&self, separator: char) -> Vector<String>");
     assert!(find(&items, "read").is_none(), "fs::read doesn't take a String first");
 
     // `import std::` lists the modules

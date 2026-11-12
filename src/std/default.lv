@@ -1,0 +1,98 @@
+// std::default: the value a type starts out with.
+//
+//   import std::default::{Default};
+//
+//   func fresh<T: Default>() -> T {
+//     return T::default();
+//   }
+//
+//   let buckets: Vector<Bucket> = Vector(16);   // 16 default buckets
+//
+// Numbers start at 0, `bool` at `false`, `String` empty and `Option` as
+// `None`. A class has a default if it has a constructor taking no arguments,
+// like `Constructor();` with defaults for every field. Other types join in
+// with an impl: `impl Default for Point { ... }`, which also wins over such a
+// constructor.
+
+// The value of a new, empty one.
+pub trait Default {
+  func default() -> Self;
+}
+
+impl Default for int8 {
+  func default() -> int8 {
+    return 0;
+  }
+}
+
+impl Default for int16 {
+  func default() -> int16 {
+    return 0;
+  }
+}
+
+impl Default for int32 {
+  func default() -> int32 {
+    return 0;
+  }
+}
+
+impl Default for int64 {
+  func default() -> int64 {
+    return 0;
+  }
+}
+
+impl Default for uint8 {
+  func default() -> uint8 {
+    return 0;
+  }
+}
+
+impl Default for uint16 {
+  func default() -> uint16 {
+    return 0;
+  }
+}
+
+impl Default for uint32 {
+  func default() -> uint32 {
+    return 0;
+  }
+}
+
+impl Default for uint64 {
+  func default() -> uint64 {
+    return 0;
+  }
+}
+
+impl Default for float32 {
+  func default() -> float32 {
+    return 0.0;
+  }
+}
+
+impl Default for float64 {
+  func default() -> float64 {
+    return 0.0;
+  }
+}
+
+impl Default for bool {
+  func default() -> bool {
+    return false;
+  }
+}
+
+impl Default for char {
+  func default() -> char {
+    return 0 as char;
+  }
+}
+
+impl Default for String {
+  func default() -> String {
+    return "";
+  }
+}

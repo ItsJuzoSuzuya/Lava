@@ -57,35 +57,41 @@ pub fn lint(index: &Index, modules: &[CheckedModule]) -> Vec<Warning> {
 fn lint_names(index: &Index, files: &[usize], warnings: &mut Vec<Warning>) {
     for def in &index.defs {
         let Some(file) = def.file.filter(|f| files.contains(f)) else { continue };
+        // As written, without the module's name, like `help` for `helper::help`
+        let name = def.name.rsplit("::").next().unwrap_or(&def.name);
+        // Names the compiler makes up, like `for$1` of a `for` loop, can't be written
+        if name.contains('$') {
+            continue;
+        }
         let mut warn = |code, message: String| warnings.push(Warning { file, span: def.span.clone(), message, code });
-        let ignored = def.name.starts_with('_');
+        let ignored = name.starts_with('_');
         let used = def.reads > 0;
 
         match def.kind {
             DefKind::Variable if !ignored && !used => {
                 let message = if def.writes > 0 {
-                    format!("variable '{}' is assigned but never read", def.name)
+                    format!("variable '{}' is assigned but never read", name)
                 } else {
-                    format!("variable '{}' is never used", def.name)
+                    format!("variable '{}' is never used", name)
                 };
                 warn("unused_variable", message);
             }
-            DefKind::Param if !ignored && !used && def.name != "self" => {
+            DefKind::Param if !ignored && !used && name != "self" => {
                 // Trait methods have to take what the trait says, even if they don't need it
                 let function = def.function.map(|f| &index.defs[f]);
                 if function.is_some_and(|f| f.has_body && !f.in_trait) {
-                    warn("unused_parameter", format!("parameter '{}' is never used", def.name));
+                    warn("unused_parameter", format!("parameter '{}' is never used", name));
                 }
             }
             // `main` is called by the program itself
-            DefKind::Function if !ignored && !used && !def.public && def.name != "main" => {
-                warn("unused_function", format!("function '{}' is never used", def.name));
+            DefKind::Function if !ignored && !used && !def.public && name != "main" => {
+                warn("unused_function", format!("function '{}' is never used", name));
             }
             DefKind::Method if !ignored && !used && !def.public && !def.in_trait => {
-                warn("unused_method", format!("method '{}' is never used", def.name));
+                warn("unused_method", format!("method '{}' is never used", name));
             }
             DefKind::Field if !ignored && !used && !def.public => {
-                warn("unused_field", format!("field '{}' is never read", def.name));
+                warn("unused_field", format!("field '{}' is never read", name));
             }
             _ => {}
         }
@@ -93,14 +99,14 @@ fn lint_names(index: &Index, files: &[usize], warnings: &mut Vec<Warning>) {
         let can_be_mut = matches!(def.kind, DefKind::Variable | DefKind::Param);
         if can_be_mut && def.mutable && !def.unchecked && def.writes == 0 && def.mutations == 0 && !def.borrowed {
             let function = def.function.map(|f| &index.defs[f]);
-            if def.name == "self" {
+            if name == "self" {
                 // A trait can require `mut &self` even where an impl doesn't change anything
                 if function.is_some_and(|f| !f.in_trait) {
                     warn("unused_mut", format!("'{}' doesn't change 'self', it can take '&self'",
                         function.map(|f| f.name.as_str()).unwrap_or("method")));
                 }
             } else {
-                warn("unused_mut", format!("'{}' is never changed, it can be declared with 'let'", def.name));
+                warn("unused_mut", format!("'{}' is never changed, it can be declared with 'let'", name));
             }
         }
 
@@ -108,14 +114,14 @@ fn lint_names(index: &Index, files: &[usize], warnings: &mut Vec<Warning>) {
             // An `extern func` has the C function's name
             DefKind::Function if !def.has_body => ("", true),
             DefKind::Function | DefKind::Method | DefKind::Field | DefKind::Param | DefKind::Variable =>
-                ("snake_case", is_snake_case(&def.name)),
+                ("snake_case", is_snake_case(&name)),
             DefKind::Class | DefKind::Enum | DefKind::Trait | DefKind::Variant =>
-                ("PascalCase", is_pascal_case(&def.name)),
+                ("PascalCase", is_pascal_case(&name)),
             _ => ("", true),
         };
         if !ok {
-            let suggestion = if expected == "snake_case" { to_snake_case(&def.name) } else { to_pascal_case(&def.name) };
-            warn("naming", format!("'{}' should be {}, like '{}'", def.name, expected, suggestion));
+            let suggestion = if expected == "snake_case" { to_snake_case(&name) } else { to_pascal_case(&name) };
+            warn("naming", format!("'{}' should be {}, like '{}'", name, expected, suggestion));
         }
     }
 }
@@ -278,9 +284,9 @@ impl CodeLints<'_> {
                 }
             }
             ExprKind::FieldAccess { object: inner, .. } | ExprKind::Convert { value: inner, .. } | ExprKind::SliceOf(inner)
-            | ExprKind::Negation(inner) | ExprKind::Unique(inner) | ExprKind::Shared(inner) | ExprKind::Deref(inner) | ExprKind::NewBuffer(inner)
+            | ExprKind::Negation(inner) | ExprKind::Unique(inner) | ExprKind::Shared(inner) | ExprKind::Deref(inner) | ExprKind::Kept(inner) | ExprKind::NewBuffer(inner)
             | ExprKind::Print(inner) | ExprKind::Ref(inner) | ExprKind::EnumInit { value: inner, .. }
-            | ExprKind::Not(inner) => self.expr(inner),
+            | ExprKind::Not(inner) | ExprKind::Is { value: inner, .. } => self.expr(inner),
             ExprKind::StructInit { fields, .. } => {
                 for (_, value) in fields {
                     self.expr(value);
@@ -307,7 +313,11 @@ impl CodeLints<'_> {
                 self.expr(else_value);
             }
             ExprKind::If { condition, then_block, else_block } => {
-                if let ExprKind::Boolean(value) = condition.kind {
+                // A `for` loop is an `if true { ... }` around the loop, see `Parser::parse_for`
+                let for_loop = matches!(then_block.stmts.first(),
+                    Some(Stmt { kind: StmtKind::Instantiation { name, .. }, .. }) if name.starts_with("for$"));
+                if let (ExprKind::Boolean(value), false) = (&condition.kind, for_loop) {
+                    let value = *value;
                     let message = match (value, else_block.is_some()) {
                         (true, true) => "the condition is always true, the else branch never runs",
                         (true, false) => "the condition is always true, the 'if' isn't needed",

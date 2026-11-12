@@ -1,4 +1,5 @@
 import span;
+import std::string::{char_to_string, float_to_string, int_to_string};
 pub enum TokenKind {
   BoolTy,
   CharTy,
@@ -136,9 +137,110 @@ pub enum TokenKind {
         _               => TokenKind::Identifier(token.clone())
     }
   }
+
+  /// The token as it's written in source, for error messages.
+  pub func to_string(&self) -> String {
+    return match self {
+      TokenKind::BoolTy         => "bool",
+      TokenKind::CharTy         => "char",
+      TokenKind::Float32Ty      => "float32",
+      TokenKind::Float64Ty      => "float64",
+      TokenKind::Int8Ty         => "int8",
+      TokenKind::Int16Ty        => "int16",
+      TokenKind::Int32Ty        => "int32",
+      TokenKind::Int64Ty        => "int64",
+      TokenKind::StringTy       => "String",
+      TokenKind::UInt8Ty        => "uint8",
+      TokenKind::UInt16Ty       => "uint16",
+      TokenKind::UInt32Ty       => "uint32",
+      TokenKind::UInt64Ty       => "uint64",
+
+      TokenKind::Break          => "break",
+      TokenKind::Class          => "class",
+      TokenKind::ConstructorLit => "Constructor",
+      TokenKind::Continue       => "continue",
+      TokenKind::Else           => "else",
+      TokenKind::Enum           => "enum",
+      TokenKind::Extern         => "extern",
+      TokenKind::False          => "false",
+      TokenKind::For            => "for",
+      TokenKind::Func           => "func",
+      TokenKind::If             => "if",
+      TokenKind::Impl           => "impl",
+      TokenKind::Let            => "let",
+      TokenKind::Match          => "match",
+      TokenKind::Mut            => "mut",
+      TokenKind::Print          => "print",
+      TokenKind::Pub            => "pub",
+      TokenKind::Return         => "return",
+      TokenKind::SelfRef        => "self",
+      TokenKind::Trait          => "trait",
+      TokenKind::True           => "true",
+      TokenKind::While          => "while",
+      TokenKind::Import         => "import",
+      TokenKind::As             => "as",
+
+      TokenKind::AndAnd           => "&&",
+      TokenKind::Arrow            => "->",
+      TokenKind::CaretEq          => "^=",
+      TokenKind::ColonColon       => "::",
+      TokenKind::DivideEq         => "/=",
+      TokenKind::DotDot           => "..",
+      TokenKind::EqEq             => "==",
+      TokenKind::GtEq             => ">=",
+      TokenKind::LtEq             => "<=",
+      TokenKind::MinusEq          => "-=",
+      TokenKind::MultiplyEq       => "*=",
+      TokenKind::NotEq            => "!=",
+      TokenKind::OrOr             => "||",
+      TokenKind::PercentEq        => "%=",
+      TokenKind::PlusEq           => "+=",
+      TokenKind::QuestionQuestion => "??",
+      TokenKind::ThickArrow       => "=>",
+
+      TokenKind::Assign    => "=",
+      TokenKind::BAnd      => "&",
+      TokenKind::Bang      => "!",
+      TokenKind::Caret     => "^",
+      TokenKind::Colon     => ":",
+      TokenKind::Comma     => ",",
+      TokenKind::Divide    => "/",
+      TokenKind::Dot       => ".",
+      TokenKind::Gt        => ">",
+      TokenKind::LBrace    => "{",
+      TokenKind::LBracket  => "[",
+      TokenKind::LParen    => "(",
+      TokenKind::Lt        => "<",
+      TokenKind::Minus     => "-",
+      TokenKind::Multiply  => "*",
+      TokenKind::Percent   => "%",
+      TokenKind::Plus      => "+",
+      TokenKind::Question  => "?",
+      TokenKind::RBrace    => "}",
+      TokenKind::RBracket  => "]",
+      TokenKind::RParen    => ")",
+      TokenKind::Semicolon => ";",
+
+      TokenKind::CharLiteral(value)    => "'" + char_to_string(value as char) + "'",
+      TokenKind::FloatLiteral(value)   => float_to_string(value),
+      TokenKind::Identifier(name)      => name.clone(),
+      TokenKind::IntLiteral(value)     => int_to_string(value),
+      TokenKind::StringLiteral(text)   => "\"" + text + "\"",
+
+      TokenKind::EOF => "end of file",
+    };
+  }
 }
 
 pub class Token {
-  kind: TokenKind;
-  span: Span;
+  pub kind: TokenKind;
+  pub span: Span;
+
+  pub func is_eof(&self) -> bool {
+    return self.kind == TokenKind::EOF;
+  }
+
+  pub func as_string(&self) -> String {
+    return self.kind.to_string();
+  }
 }

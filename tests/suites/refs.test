@@ -58,9 +58,124 @@ func f(x: &int32) -> int32 {
 let a: int64 = 5;
 print(f(&a));
 --- error
-type 'Ref(int64)' does not match 'Ref(int32)' in function argument
+type '&int64' does not match '&int32' in function argument
 
 === reference of a literal is an error
 let r = &5;
 --- error
 '&' only refers to a variable or field
+
+=== get gives a reference to the element, kept in a variable
+import std::vector::{Vector};
+mut v = Vector<String>();
+v.push("a");
+v.push("b");
+let first = v.get(0);
+print(first + v[1]);
+print(v.at(1));
+print(v.at(5));
+--- output
+ab
+b
+None
+
+=== ?? on a reference keeps the default for it
+import std::vector::{Vector};
+mut v = Vector<String>();
+v.push("a");
+let fallback = "f";
+mut i = 0;
+while i < 2 {
+  let s = v.at(i as uint64) ?? "past" + "!";
+  print(s);
+  i += 1;
+}
+print(v.at(3) ?? fallback);
+mut n = Vector<int32>();
+n.push(4);
+print((n.at(0) ?? 0) + 1);
+--- output
+a
+past!
+f
+5
+
+=== == compares what values hold, also through references
+import std::option::{Option};
+class Point {
+  pub x: int32;
+  pub y: int32;
+}
+enum Shape {
+  Named => String,
+  Empty;
+}
+let a = Point(1, 2);
+let r = &a;
+print(r == Point(1, 2));
+print(a != Point(1, 3));
+print(Shape::Named("x") == Shape::Named("x"));
+print(Shape::Named("x") == Shape::Empty);
+print((1, "a") == (1, "a"));
+print(unique(5) == unique(5));
+let s: Option<int32> = Some(3);
+print(s == Some(3));
+--- output
+true
+true
+true
+false
+true
+true
+true
+
+=== contains goes through the elements with ==
+import std::vector::{Vector};
+class Point {
+  pub x: int32;
+  pub y: int32;
+}
+mut v = Vector<Point>();
+v.push(Point(1, 2));
+v.push(Point(5, 5));
+print(v.contains(Point(5, 5)));
+print(v.contains(Point(6, 5)));
+--- output
+true
+false
+
+=== a for loop in an iterator's method goes on with self
+import std::option::{Option};
+class Count {
+  n: int32 = 0;
+  Constructor();
+  pub func next(mut &self) -> Option<int32> {
+    if self.n >= 3
+      return None;
+    self.n += 1;
+    return Some(self.n);
+  }
+  pub func walk(mut &self) {
+    for item in self {
+      print(item);
+    }
+  }
+}
+mut c = Count();
+c.walk();
+--- output
+1
+2
+3
+
+=== Buffer methods through a reference
+func capacity(b: &Buffer<int32>) -> uint64 {
+  return b.capacity();
+}
+mut b = Buffer<Buffer<int32>>(2);
+b.set(1, Buffer<int32>(3));
+print(b.get(1).capacity());
+print(capacity(b.get(1)));
+--- output
+3
+3

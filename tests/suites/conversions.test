@@ -239,7 +239,7 @@ func f(x: &float64) {
 let a: int32 = 5;
 f(&a);
 --- error
-type 'Ref(int32)' does not match 'Ref(float64)' in function argument
+type '&int32' does not match '&float64' in function argument
 
 === value doesn't convert to a ref of another type
 func f(x: &float64) {
@@ -248,4 +248,4 @@ func f(x: &float64) {
 let a: int32 = 5;
 f(a);
 --- error
-type 'int32' does not match 'Ref(float64)' in function argument
+type 'int32' does not match '&float64' in function argument

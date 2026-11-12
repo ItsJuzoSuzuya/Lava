@@ -816,3 +816,75 @@ print(Color::Red.is_red());
 --- output
 false
 true
+
+=== a class can have several constructors, picked by their number of arguments
+class Point {
+  pub x: int32 = 0;
+  pub y: int32 = 0;
+
+  Constructor();
+  Constructor(x: int32, y: int32) {
+    self.x = x;
+    self.y = y;
+  }
+  Constructor(both: int32) {
+    self.x = both;
+    self.y = both;
+  }
+}
+let a = Point();
+let b = Point(1, 2);
+let c = Point(7);
+print(a.x);
+print(b.y);
+print(c.x + c.y);
+--- output
+0
+2
+14
+
+=== two constructors taking the same number of arguments are an error
+class P {
+  pub x: int32 = 0;
+
+  Constructor(a: int32);
+  Constructor(b: int32);
+}
+--- error
+'P' has two constructors taking 1 argument
+
+=== a field default every constructor runs needs their parameters
+class P {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+  Constructor();
+}
+let p = P();
+--- error
+the default of field 'x' runs in every constructor, but it fails in `Constructor()`
+
+=== self is passed on and returned as a value
+import std::result::{Result};
+class Q {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+
+  pub func give(&self) -> int32 {
+    return take(self);
+  }
+
+  pub func again(&self) -> Result<Q, String> {
+    return self;
+  }
+}
+func take(q: Q) -> int32 {
+  return q.x;
+}
+let q = Q(3);
+print(q.give());
+print(q.again() is Ok(v) ? v.x : 0);
+--- output
+3
+3

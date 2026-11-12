@@ -285,7 +285,7 @@ pub class Parser {
     return Result::Err(self.error("an expression"));
   }
 
-  func peek(&self) -> Token {
+  func peek(&self) -> &Token {
     return self.tokens.get(self.pos);
   }
 

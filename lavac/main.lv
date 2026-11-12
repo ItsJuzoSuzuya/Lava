@@ -11,8 +11,9 @@ import program;
 import codegen_ctx;
 
 func main() -> int32 {
-  let args = args().collect();
+  CodegenContext::initialize_native_target();
 
+  let args = args().collect();
   match args[1] {
     "run" => {
       let main = main_file(args.at(2) ?? "main.lv");
@@ -24,8 +25,8 @@ func main() -> int32 {
   ExitCode::Success.to_int()
 }
 
-func main_file(file: String) -> Path {
-  let path = Path(file);
+func main_file(file: &String) -> Path {
+  let path = Path(file.clone());
   
   if path.is_dir() 
     return path.join("main.lv");
@@ -44,33 +45,43 @@ func build_command(args: &Vector<String>) -> Result<ExitCode, String> {
         rest => (rest.clone(), None),
     };
 
-    let file = files.len() > 2 ? files[2] : "main.lv";
+    let file = files.len() > 2 ? files[2].clone() : "main.lv";
     let main = main_file(file);
 
     let executable = build(&main, output);
     Ok(ExitCode::Success)
 }
 
-func build(main: &Path, output: Option<Path>) -> Result<Path,String> {
+func build(main: &Path, output: Option<Path>) -> Result<Path,Vector<CompileError>> {
   let dir = main.parent();
   let name = main.file_name();
   let build_dir = dir.join("build");
 
-  match create_dir_all(&build_dir) {
-    Err(err) => return Err(err)
-  }
+  if create_dir_all(&build_dir) is Err(err) 
+    panic("filesystem error: couldnt create build directory as " + build_dir.to_string() + " \n" + err);
 
   let object = build_dir.join(name + ".0");
   let executable = output ?? build_dir.join(name);
-
   let context = Context();
-  mut graph = ModuleGraph(main);
-  let program = Program(CodegenContext(context), &graph);
-  let compiled = program.build(&object);
 
-  Ok(executable)
+  let program = Program(CodegenContext(&context));
+  mut graph = ModuleGraph(main);
+  if program.build(graph) is Err(err)
+    return Err(err);
+
+  return executable;
 }
 
 func run(file: Path) {
-  let executable = build(file, None);
+  let build = build(file, None);
+  match build {
+    Ok(executable) => run(executable)
+    Err(errors) => print_errors(errors)
+  };
+}
+
+func print_errors(errors: &Vector<CompileError>) {
+  for err in errors {
+    panic("[Compile Error] " + err.message());
+  }
 }

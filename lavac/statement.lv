@@ -1,0 +1,39 @@
+import span;
+import expression;
+import codegen;
+import codegen_ctx;
+import llvm;
+import std::option::{Option};
+import std::math::{exp};
+
+pub class Statement {
+  pub kind: StmtKind;
+  span: Span;
+}
+
+impl Codegen for Statement {
+  pub func codegen(&self, ctx: &CodegenContext) -> Option<LLVMValueRef> {
+    match self.kind {
+      StmtKind::Print(expr) => {
+        let print_fn = ctx.print_fn();
+        let f = expr.llvm_string(ctx) ?? return None;
+        let format = ctx.builder.build_const_str_ptr(expr.ty.formatter() ?? return None, "format");
+
+        let called = ctx.call_fn("printf", &[format, f]);
+        return ctx.builder.build_return(called);
+      }
+      StmtKind::Return(expr) => ctx.builder.build_return(expr.codegen(ctx)),
+      StmtKind::Value(expr) => return expr.codegen(ctx),
+      StmtKind::Expression(expr) => return expr.codegen(ctx)
+    }
+
+    return None;
+  }
+}
+
+pub enum StmtKind {
+  Print => Expression,
+  Return => Expression,
+  Expression => Expression,
+  Value => Expression
+}

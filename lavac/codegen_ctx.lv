@@ -1,8 +1,18 @@
 import llvm;
+import std::option::{Option};
 pub class CodegenContext {
   pub context: &Context;
   pub builder: Builder = context.new_builder();
   pub module: Module = context.create_module("mod");
+
+  // Registers the X86 backend, before a target can be looked up or code written.
+  // Like `LLVMInitializeNativeTarget` in C, which can't be called from here
+  pub func initialize_native_target() {
+    LLVMInitializeX86TargetInfo();
+    LLVMInitializeX86Target();
+    LLVMInitializeX86TargetMC();
+    LLVMInitializeX86AsmPrinter();
+  }
 
   pub func build_entry(&self) {
     let i32_type = self.context.i32_type();
@@ -11,5 +21,27 @@ pub class CodegenContext {
     let main_fn = self.module.add_function("main", main_fn_type, Linkage::External);
     let entry_block = self.context.append_basic_block(main_fn, "entry_block");
     self.builder.position_at_end(entry_block);
+  }
+
+  pub func print_fn(&self) -> Function {
+    return self.printf_function();
+  }
+
+  pub func call_fn(&self, name: String, args: &[LLVMValueRef]) -> Option<LLVMValueRef> {
+    let (fn, ty) = self.module.get_function(name) ?? return None;
+    let return_val_ref = LLVMBuildCall2(self.builder, ty, fn, args, args.len() as uint32, "call_" + name);
+    return LLVMGetTypeKind(LLVMGetReturnType(ty)) == 0 
+      ? None
+      : return_val_ref;
+  }
+
+  /// Defines C's printf function.
+  /// Only defines it once and reuses it.
+  func printf_function(&self) -> Function {
+    if LLVMGetNamedFunction(self.module, "printf") is Some(fn) 
+      return fn;
+
+    let printf_fn_ty = self.context.i32_type().as_fn_type(&[self.context.ptr_type(AddressSpace::default())], true);
+    return LLVMAddFunction(self.module, "printf", printf_fn_ty);
   }
 }

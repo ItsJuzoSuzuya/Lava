@@ -219,3 +219,70 @@ func one(x: int32) -> int32 {
 print(one(1, 2));
 --- error
 argument
+
+=== return a call of a function without a value
+func log(text: String) {
+  print(text);
+}
+func check(n: int32) {
+  if n < 0 {
+    return log("negative");
+  }
+  log("fine");
+}
+check(-1);
+check(1);
+--- output
+negative
+fine
+
+=== every way through a function giving a value returns one
+func a(n: int32) -> int32 {
+  if n > 0 {
+    return 1;
+  } else {
+    return 2;
+  }
+}
+func b(n: int32) -> int32 {
+  match n {
+    0 => return 0,
+    _ => return 1,
+  }
+}
+func c(n: int32) -> int32 {
+  while true {
+    if n > 0 {
+      return n;
+    }
+  }
+}
+func e(n: int32) -> int32 {
+  n * 2
+}
+print(a(1) + b(0) + c(3) + e(2));
+--- output
+8
+
+=== a function giving a value that can reach its end is an error
+func g(n: int32) -> int32 {
+  if n > 0 {
+    return 1;
+  }
+}
+print(g(1));
+--- error
+'g' can reach its end without giving a 'int32', it needs a `return` there
+
+=== a loop that can stop doesn't return
+func g(n: int32) -> int32 {
+  while true {
+    if n > 0 {
+      break;
+    }
+    return 1;
+  }
+}
+print(g(1));
+--- error
+'g' can reach its end without giving a 'int32'

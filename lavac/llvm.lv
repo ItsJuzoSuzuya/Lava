@@ -1,93 +1,11 @@
-import std::vector::{Vector};
-// LLVM's C API (llvm-c/Core.h), linked from libLLVM. Names and parameters
-// are the C ones: LLVMBool is int32, unsigned is uint32, arrays are slices.
-//
-//   import llvm;
-//
-//   let context = LLVMContextCreate();
-//   let module = LLVMModuleCreateWithNameInContext("main", context);
-//   let builder = LLVMCreateBuilderInContext(context);
-//   let i32 = LLVMInt32TypeInContext(context);
-//   let main = LLVMAddFunction(module, "main", LLVMFunctionType(i32, &Vector<LLVMTypeRef>(), 0, 0));
-//   LLVMPositionBuilderAtEnd(builder, LLVMAppendBasicBlockInContext(context, main, "entry"));
-//   LLVMBuildRet(builder, LLVMConstInt(i32, 42, 0));
-//   LLVMWriteBitcodeToFile(module, "main.bc");
-
+import std::option;
+import std::path::{Path};
+import std::option::{Option};
 extern link "LLVM";
 
 pub extern type LLVMContextRef;
-pub extern type LLVMModuleRef;
-pub extern type LLVMBuilderRef;
-pub extern type LLVMTypeRef;
-pub extern type LLVMValueRef;
-pub extern type LLVMBasicBlockRef;
-
-// AddressSpace
-
-pub class AddressSpace {
-  pub value: uint32;
-
-  pub func default() -> AddressSpace {
-    return AddressSpace(0);
-  }
-}
-
-// Linkage
-
-pub extern func LLVMSetLinkage(global: LLVMValueRef, linkage: int32);
-pub extern func LLVMGetLinkage(global: LLVMValueRef);
-
-pub enum Linkage {
-  External,
-  Internal,
-  Private
-
-  pub func to_int(&self) -> int32 {
-    match self {
-      Linkage::External => 0,
-      Linkage::Internal => 8,
-      Linkage::Private => 9,
-    }
-  }
-}
-
-// Context and module
-
 pub extern func LLVMContextCreate() -> LLVMContextRef;
 pub extern func LLVMContextDispose(context: LLVMContextRef);
-pub extern func LLVMModuleCreateWithNameInContext(name: String, context: LLVMContextRef) -> LLVMModuleRef;
-pub extern func LLVMDisposeModule(module: LLVMModuleRef);
-pub extern func LLVMSetTarget(module: LLVMModuleRef, triple: String);
-pub extern func LLVMGetDefaultTargetTriple() -> String;
-pub extern func LLVMPrintModuleToString(module: LLVMModuleRef) -> String;
-pub extern func LLVMDumpModule(module: LLVMModuleRef);
-// 0 if it worked
-pub extern func LLVMWriteBitcodeToFile(module: LLVMModuleRef, path: String) -> int32;
-// Prints what's wrong to stderr with `action` 1, gives 1 if something is
-pub extern func LLVMVerifyFunction(function: LLVMValueRef, action: int32) -> int32;
-
-pub extern type BasicBlock: LLVMBasicBlockRef;
-
-pub extern type Builder: LLVMBuilderRef {
-  pub func position_at_end(&self, block: BasicBlock) {
-    LLVMPositionBuilderAtEnd(self, block);
-  }
-}
-
-pub extern type Function: LLVMValueRef;
-
-pub extern type Module: LLVMModuleRef {
-  pub func new(name: String, context: LLVMContextRef) -> Module {
-    LLVMModuleCreateWithNameInContext(name, context);
-  }
-
-  pub func add_function(&self, name: String, fn_type: FunctionType, linkage: Linkage) -> Function {
-    let fn = LLVMAddFunction(self, name, fn_type);
-    LLVMSetLinkage(fn, linkage.to_int());
-    return fn;
-  }
-}
-
 pub class Context {
   ref: LLVMContextRef = LLVMContextCreate();
 
@@ -112,12 +30,94 @@ pub class Context {
     return LLVMPointerTypeInContext(self.ref, address_space.value);
   }
 
-
+  pub func bool_type(&self) -> IntType {
+    return IntType::new(self.ref, 1);
+  }
 }
 
-// Types: kinds of `LLVMTypeRef`, each one can be used where an `LLVMTypeRef`
-// or `Type` is expected, also in `&[...]`
+pub extern type LLVMModuleRef;
+pub extern func LLVMModuleCreateWithNameInContext(name: String, context: LLVMContextRef) -> Module;
+pub extern func LLVMDisposeModule(module: LLVMModuleRef);
+pub extern func LLVMPrintModuleToString(module: LLVMModuleRef) -> String;
+// Writes the module as text IR, like `main.ll`. 0 if it worked, else the message is written into `error`
+pub extern func LLVMPrintModuleToFile(module: LLVMModuleRef, path: String, error: &Option<String>) -> int32;
+pub extern func LLVMDumpModule(module: LLVMModuleRef);
+// Checks the module, gives 1 if something is wrong, 0 if it's valid. What's wrong is written
+// into `error`, with `action` 1 it's also printed to stderr, with 2 only written
+pub extern func LLVMVerifyModule(module: LLVMModuleRef, action: int32, error: &Option<String>) -> int32;
+pub extern type Module: LLVMModuleRef {
+  pub func new(name: String, context: LLVMContextRef) -> Module {
+    return LLVMModuleCreateWithNameInContext(name, context);
+  }
 
+  pub func add_function(&self, name: String, fn_type: FunctionType, linkage: Linkage) -> Function {
+    let fn = LLVMAddFunction(self, name, fn_type);
+    LLVMSetLinkage(fn, linkage.to_int());
+    return fn;
+  }
+
+  pub func get_function(&self, name: String) -> Option<(Function, FunctionType)> {
+    let function = LLVMGetNamedFunction(self, name) ?? return None;
+    return (function, LLVMGlobalGetValueType(function));
+  }
+
+  pub func write_to_file(&self, path: String, mut error: &Option<String>) -> int32 {
+    return LLVMPrintModuleToFile(self, path, error);
+  }
+
+  pub func set_target(&self, triple: TargetTriple) {
+    LLVMSetTarget(self, triple.arch);
+  }
+
+  pub func set_layout(&self, layout: LLVMTargetDataRef) {
+    LLVMSetModuleDataLayout(self, layout);
+  }
+
+  // 2: the problems are only written into `error`, the caller reports them
+  pub func verify(&self, mut error: &Option<String>) -> int32 {
+    return LLVMVerifyModule(self, 2, error);
+  }
+}
+
+pub extern type LLVMBuilderRef;
+pub extern func LLVMCreateBuilderInContext(context: LLVMContextRef) -> Builder;
+pub extern func LLVMDisposeBuilder(builder: LLVMBuilderRef);
+pub extern func LLVMPositionBuilderAtEnd(builder: Builder, block: BasicBlock);
+pub extern type Builder: LLVMBuilderRef {
+  pub func position_at_end(&self, block: BasicBlock) {
+    LLVMPositionBuilderAtEnd(self, block);
+  }
+
+  pub func get_insert_block(&self) -> BasicBlock {
+    return LLVMGetInsertBlock(self);
+  }
+
+  pub func get_return_type(&self, fn_type: LLVMTypeRef) -> int32 {
+    let r_ty = LLVMGetReturnType(fn_type);
+    return LLVMGetTypeKind(r_ty);
+  }
+
+  pub func build_conditional_branch(&self, condition: LLVMValueRef, then_bb: BasicBlock, else_bb: BasicBlock) {
+    LLVMBuildCondBr(self, condition, then_bb, else_bb);
+  }
+
+  pub func build_br(&self, dest: BasicBlock) {
+    LLVMBuildBr(self, dest);
+  }
+
+  pub func build_return(&self, value: Option<LLVMValueRef>) -> LLVMValueRef {
+    return match value {
+      Some(val) => LLVMBuildRet(self, val)
+      None => LLVMBuildRetVoid(self)
+    };
+  }
+
+  pub func build_const_str_ptr(&self, string: String, name: String) -> LLVMValueRef {
+    return LLVMBuildGlobalStringPtr(self, string, name);
+  }
+}
+
+pub extern type LLVMTypeRef;
 pub extern type Type: LLVMTypeRef;
 pub extern type FunctionType: Type;
 pub extern type PointerType: Type;
@@ -130,8 +130,225 @@ pub extern type IntType: Type {
   pub func as_fn_type(&self, params: &[Type], variadic: bool) -> FunctionType {
     return LLVMFunctionType(self, params, params.len() as uint32, variadic ? 1 : 0);
   }
+
+  pub func const_int(&self, val: uint64, sign_extend: bool) -> LLVMValueRef {
+    return LLVMConstInt(self, val, sign_extend ? 1 : 0);
+  }
 }
 
+pub extern type LLVMValueRef;
+pub extern type Function: LLVMValueRef;
+
+pub extern type LLVMBasicBlockRef;
+pub extern func LLVMAppendBasicBlockInContext(context: LLVMContextRef, function: LLVMValueRef, name: String) -> BasicBlock;
+pub extern func LLVMGetBasicBlockParent(BB: LLVMBasicBlockRef) -> Function;
+pub extern func LLVMGetBasicBlockTerminator(BB: LLVMBasicBlockRef) -> Option<LLVMValueRef>;
+pub extern func LLVMGetInsertBlock(builder: LLVMBuilderRef) -> BasicBlock;
+pub extern type BasicBlock: LLVMBasicBlockRef {
+  pub func get_parent(&self) -> Function {
+    return LLVMGetBasicBlockParent(self);
+  }
+
+  pub func has_terminator(&self) -> bool {
+    return LLVMGetBasicBlockTerminator(self).is_some();
+  }
+}
+
+// AddressSpace
+pub class AddressSpace {
+  pub value: uint32;
+
+  pub func default() -> AddressSpace {
+    return AddressSpace(0);
+  }
+}
+
+// Linkage
+pub extern func LLVMSetLinkage(global: LLVMValueRef, linkage: int32);
+pub extern func LLVMGetLinkage(global: LLVMValueRef);
+pub enum Linkage {
+  External,
+  Internal,
+  Private
+
+  pub func to_int(&self) -> int32 {
+    match self {
+      Linkage::External => 0,
+      Linkage::Internal => 8,
+      Linkage::Private => 9,
+    }
+  }
+}
+
+/// Targets
+
+pub extern func LLVMSetTarget(module: LLVMModuleRef, triple: String);
+pub extern func LLVMGetDefaultTargetTriple() -> String;
+
+pub extern type LLVMTargetRef;
+pub extern type LLVMTargetMachineRef;
+pub extern type LLVMTargetDataRef;
+
+// Registers the X86 backend. `LLVMInitializeNativeTarget` is inline in C and
+// can't be called, these are what it calls on X86
+pub extern func LLVMInitializeX86TargetInfo();
+pub extern func LLVMInitializeX86Target();
+pub extern func LLVMInitializeX86TargetMC();
+pub extern func LLVMInitializeX86AsmPrinter();
+
+// A registered target by name, like "x86-64"
+pub extern func LLVMGetTargetFromName(name: String) -> Option<Target>;
+// 0 if it worked: the target is written into `target`, a message into `error`.
+// Both are out-parameters, `mut` variables passed like `&target`
+pub extern func LLVMGetTargetFromTriple(triple: String, target: &Option<Target>, error: &Option<String>) -> int32;
+
+pub extern func LLVMGetHostCPUName() -> String;
+pub extern func LLVMGetHostCPUFeatures() -> String;
+
+// `level`, `reloc` and `code_model` like `LLVMCodeGenOptLevel::Default.to_int()`
+pub extern func LLVMCreateTargetMachine(target: LLVMTargetRef, triple: String, cpu: String, features: String, level: int32, reloc: int32, code_model: int32) -> TargetMachine;
+pub extern func LLVMDisposeTargetMachine(machine: TargetMachine);
+
+// The machine's data layout, for `LLVMSetModuleDataLayout`
+pub extern func LLVMCreateTargetDataLayout(machine: TargetMachine) -> LLVMTargetDataRef;
+pub extern func LLVMSetModuleDataLayout(module: LLVMModuleRef, layout: LLVMTargetDataRef);
+pub extern func LLVMDisposeTargetData(layout: LLVMTargetDataRef);
+
+// Writes `module` as an object file or assembly, 0 if it worked. `file_type` like
+// `LLVMCodeGenFileType::Object.to_int()`, a message is written into `error`
+pub extern func LLVMTargetMachineEmitToFile(machine: TargetMachine, module: LLVMModuleRef, path: String, file_type: int32, error: &Option<String>) -> int32;
+
+// LLVMCodeGenOptLevel, how much the machine code is optimized.
+pub enum LLVMCodeGenOptLevel {
+  None,
+  Less,
+  Default,
+  Aggressive;
+
+  // Its value in C.
+  pub func to_int(&self) -> int32 {
+    match self {
+      LLVMCodeGenOptLevel::None => 0,
+      LLVMCodeGenOptLevel::Less => 1,
+      LLVMCodeGenOptLevel::Default => 2,
+      LLVMCodeGenOptLevel::Aggressive => 3,
+    }
+  }
+}
+
+// LLVMRelocMode, how addresses are relocated. `PIC` for normal executables on Linux.
+pub enum LLVMRelocMode {
+  Default,
+  Static,
+  PIC,
+  DynamicNoPic;
+
+  // Its value in C.
+  pub func to_int(&self) -> int32 {
+    match self {
+      LLVMRelocMode::Default => 0,
+      LLVMRelocMode::Static => 1,
+      LLVMRelocMode::PIC => 2,
+      LLVMRelocMode::DynamicNoPic => 3,
+    }
+  }
+}
+
+// LLVMCodeModel, how big code and data may be.
+pub enum LLVMCodeModel {
+  Default,
+  JITDefault,
+  Tiny,
+  Small,
+  Kernel,
+  Medium,
+  Large;
+
+  // Its value in C.
+  pub func to_int(&self) -> int32 {
+    match self {
+      LLVMCodeModel::Default => 0,
+      LLVMCodeModel::JITDefault => 1,
+      LLVMCodeModel::Tiny => 2,
+      LLVMCodeModel::Small => 3,
+      LLVMCodeModel::Kernel => 4,
+      LLVMCodeModel::Medium => 5,
+      LLVMCodeModel::Large => 6,
+    }
+  }
+}
+
+// LLVMCodeGenFileType, what `LLVMTargetMachineEmitToFile` writes.
+pub enum LLVMCodeGenFileType {
+  Assembly,
+  Object;
+
+  // Its value in C.
+  pub func to_int(&self) -> int32 {
+    match self {
+      LLVMCodeGenFileType::Assembly => 0,
+      LLVMCodeGenFileType::Object => 1,
+    }
+  }
+}
+
+pub extern type TargetMachine: LLVMTargetMachineRef {
+  pub func create(target: Target, triple: TargetTriple) -> TargetMachine {
+    let cpu = LLVMGetHostCPUName();
+    let features = LLVMGetHostCPUFeatures();
+    let level = LLVMCodeGenOptLevel::None.to_int();
+    let reloc = LLVMRelocMode::PIC.to_int();
+    let code_model = LLVMCodeModel::Default.to_int();
+    return LLVMCreateTargetMachine(target, triple.arch, cpu, features, level, reloc, code_model);
+  }
+
+  pub func new_layout(&self) -> LLVMTargetDataRef {
+    return LLVMCreateTargetDataLayout(self);
+  }
+
+  pub func compile(&self, module: Module, path: Path) -> Option<String> {
+    mut error: Option<String> = None;
+    LLVMTargetMachineEmitToFile(self, module, path.to_string(), LLVMCodeGenFileType::Object.to_int(), &error);
+    return error;
+  }
+
+}
+
+pub class TargetTriple {
+  pub arch: String = LLVMGetDefaultTargetTriple();
+
+  // The machine this runs on, like "x86_64-pc-linux-gnu"
+  Constructor();
+
+  // Another triple, like for cross-compiling
+  Constructor(arch: String) {
+    self.arch = arch;
+  }
+}
+
+pub extern type Target: LLVMTargetRef {
+  pub func from_name(name: String) -> Option<Target> {
+    return LLVMGetTargetFromName(name);
+  }
+
+  pub func from_triple(triple: &TargetTriple) -> Option<Target> {
+    mut target: Option<Target> = None;
+    mut error: Option<String> = None;
+    if LLVMGetTargetFromTriple(triple.arch, &target, &error) != 0 {
+      return None;
+    }
+    return target;
+  }
+}
+
+
+
+// 0 if it worked
+pub extern func LLVMWriteBitcodeToFile(module: LLVMModuleRef, path: String) -> int32;
+// Prints what's wrong to stderr with `action` 1, gives 1 if something is
+pub extern func LLVMVerifyFunction(function: LLVMValueRef, action: int32) -> int32;
+
+// Context Types
 pub extern func LLVMVoidTypeInContext(context: LLVMContextRef) -> LLVMTypeRef;
 pub extern func LLVMInt1TypeInContext(context: LLVMContextRef) -> IntType;
 pub extern func LLVMInt8TypeInContext(context: LLVMContextRef) -> IntType;
@@ -148,28 +365,23 @@ pub extern func LLVMStructTypeInContext(context: LLVMContextRef, elements: &[LLV
 pub extern func LLVMStructCreateNamed(context: LLVMContextRef, name: String) -> LLVMTypeRef;
 pub extern func LLVMStructSetBody(ty: LLVMTypeRef, elements: &[LLVMTypeRef], count: uint32, packed: int32);
 pub extern func LLVMTypeOf(value: LLVMValueRef) -> LLVMTypeRef;
+pub extern func LLVMGetReturnType(fn_type: LLVMTypeRef) -> LLVMTypeRef;
+pub extern func LLVMGetTypeKind(ty: LLVMTypeRef) -> int32;   // 0 is LLVMVoidTypeKind
 
 // Constants and globals
-
 pub extern func LLVMConstInt(ty: LLVMTypeRef, value: uint64, sign_extend: int32) -> LLVMValueRef;
 pub extern func LLVMConstReal(ty: LLVMTypeRef, value: float64) -> LLVMValueRef;
 pub extern func LLVMConstNull(ty: LLVMTypeRef) -> LLVMValueRef;
 pub extern func LLVMAddGlobal(module: LLVMModuleRef, ty: LLVMTypeRef, name: String) -> LLVMValueRef;
 pub extern func LLVMSetInitializer(global: LLVMValueRef, value: LLVMValueRef);
+pub extern func LLVMGlobalGetValueType(global: LLVMValueRef) -> FunctionType;
 
-// Functions and blocks
-
+// Functions 
 pub extern func LLVMAddFunction(module: LLVMModuleRef, name: String, ty: LLVMTypeRef) -> Function;
 pub extern func LLVMGetParam(function: LLVMValueRef, index: uint32) -> LLVMValueRef;
-pub extern func LLVMAppendBasicBlockInContext(context: LLVMContextRef, function: LLVMValueRef, name: String) -> BasicBlock;
+pub extern func LLVMGetNamedFunction(module: Module, name: String) -> Option<Function>;
 
 // Builder
-
-pub extern func LLVMCreateBuilderInContext(context: LLVMContextRef) -> Builder;
-pub extern func LLVMDisposeBuilder(builder: LLVMBuilderRef);
-pub extern func LLVMPositionBuilderAtEnd(builder: Builder, block: BasicBlock);
-pub extern func LLVMGetInsertBlock(builder: LLVMBuilderRef) -> LLVMBasicBlockRef;
-
 pub extern func LLVMBuildRet(builder: LLVMBuilderRef, value: LLVMValueRef) -> LLVMValueRef;
 pub extern func LLVMBuildRetVoid(builder: LLVMBuilderRef) -> LLVMValueRef;
 pub extern func LLVMBuildBr(builder: LLVMBuilderRef, block: LLVMBasicBlockRef) -> LLVMValueRef;

@@ -129,3 +129,189 @@ pub func f() -> int32 {
 }
 --- error
 return "text";
+
+=== modules importing each other use each other's types and functions
+import expression;
+import statement;
+mut outer = Expression(1);
+mut inner = Expression(10);
+inner.block.push(Statement(Expression(100)));
+outer.block.push(Statement(inner));
+outer.block.push(Statement(Expression(1000)));
+print(sum_expression(&outer));
+--- file expression.lv
+import std::vector::{Vector};
+import statement;
+pub class Expression {
+  pub value: int32 = value;
+  pub block: Vector<Statement> = Vector<Statement>();
+
+  Constructor(value: int32);
+}
+pub func sum_expression(expr: &Expression) -> int32 {
+  mut total = expr.value;
+  for stmt in expr.block {
+    total = total + sum_statement(stmt);
+  }
+  return total;
+}
+--- file statement.lv
+import expression;
+pub class Statement {
+  pub expr: Expression = expr;
+
+  Constructor(expr: Expression);
+}
+pub func sum_statement(stmt: &Statement) -> int32 {
+  return sum_expression(&stmt.expr);
+}
+--- output
+1111
+
+=== syntax errors of every module are reported
+import a;
+print(1);
+--- file a.lv
+import b;
+let x = ;
+--- file b.lv
+let y = );
+--- error
+not a valid expression
+
+=== items of two modules with the same name are written with the module's name
+import llvm;
+import modules;
+let m = modules::Module("abc");
+print(m.source);
+print(llvm::describe());
+print(modules::describe());
+print(length(&m));
+--- file llvm.lv
+pub extern type Module;
+pub func describe() -> String {
+  return "llvm module";
+}
+--- file modules.lv
+pub class Module {
+  pub source: String = source;
+
+  Constructor(source: String);
+}
+pub func describe() -> String {
+  return "source module";
+}
+pub func length(module: &Module) -> uint64 {
+  return module.source.len();
+}
+--- output
+abc
+llvm module
+source module
+3
+
+=== a name two imported modules declare needs the module's name
+import a;
+import b;
+print(describe());
+--- file a.lv
+pub func describe() -> String {
+  return "a";
+}
+--- file b.lv
+pub func describe() -> String {
+  return "b";
+}
+--- error
+'describe' is in both 'a' and 'b', write `a::describe` or `b::describe`
+
+=== an imported item is picked by listing it
+import a::{describe};
+import b;
+print(describe());
+--- file a.lv
+pub func describe() -> String {
+  return "a";
+}
+--- file b.lv
+pub func describe() -> String {
+  return "b";
+}
+--- output
+a
+
+=== fields, variants and methods can be named like a module's items
+import lexer;
+func position() -> int32 {
+  return 7;
+}
+mut l = Lexer {};
+l.advance();
+print(l.position);
+print(position());
+let n = Name("x");
+print(n.text);
+print(l.kind is Kind::Name);
+--- file lexer.lv
+pub enum Kind {
+  Name,
+  Number;
+}
+pub class Name {
+  pub text: String = text;
+
+  Constructor(text: String);
+}
+pub func position(line: int32) -> int32 {
+  return line * 100;
+}
+pub class Lexer {
+  pub position: int32 = 0;
+  pub kind: Kind = Kind::Name;
+
+  pub func advance(mut &self) {
+    self.position = position(self.position + 1);
+  }
+}
+--- output
+100
+7
+x
+true
+
+=== a path with the module, and a pattern taking the enum from the matched value
+import type;
+import other;
+import shapes;
+func describe(ty: type::Type) -> String {
+  return match ty {
+    Type::Boolean => "bool",
+    type::Type::Int => "int",
+  };
+}
+print(describe(type::Type::Boolean));
+print(describe(type::Type::Int));
+print(shapes::Point::origin().x);
+--- file type.lv
+import shapes;
+pub enum Type {
+  Boolean,
+  Int;
+}
+--- file other.lv
+import shapes;
+pub extern type Type;
+--- file shapes.lv
+pub class Point {
+  pub x: int32 = x;
+
+  Constructor(x: int32);
+
+  pub func origin() -> Point {
+    return Point(7);
+  }
+}
+--- output
+bool
+int
+7

@@ -360,3 +360,33 @@ true
 false
 true
 2
+
+=== a tuple payload is created and matched without extra parentheses
+enum Kind {
+  Name,
+  Number;
+}
+enum ParseError {
+  UnexpectedToken => (Kind, String),
+  Lex => String;
+}
+func message(error: ParseError) -> String {
+  return match error {
+    ParseError::UnexpectedToken(Kind::Name, got) => "expected a name, got " + got,
+    ParseError::UnexpectedToken(_, got) => "unexpected " + got,
+    ParseError::Lex(message) => message,
+  };
+}
+print(message(ParseError::UnexpectedToken(Kind::Name, "42")));
+print(message(ParseError::UnexpectedToken(Kind::Number, "x")));
+print(message(ParseError::Lex("bad")));
+--- output
+expected a name, got 42
+unexpected x
+bad
+
+=== a generic enum has no constructor
+import std::option::{Option};
+mut x = Option<int32>();
+--- error
+'Option' is an enum, it has no constructor: make one with a variant, like `Option::Some`

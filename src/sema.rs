@@ -134,9 +134,9 @@ impl SemanticError {
             SemanticError::EmptyArrayType { span } =>
                 (span.line, span.col, "the type of an empty array can't be inferred, give it like `let a: int32[0] = {};`".to_string()),
             SemanticError::ExternType { ty, span } =>
-                (span.line, span.col, format!("'{}' can't be passed to a C function, use a number, char, String, extern type, or a slice or &Buffer of numbers or chars", ty)),
+                (span.line, span.col, format!("'{}' can't be passed to a C function, use a number, char, String, extern type, Option of an extern type, or a slice or &Buffer of numbers or chars", ty)),
             SemanticError::ExternReturnType { ty, span } =>
-                (span.line, span.col, format!("a C function can't return '{}', only a number, String, extern type or nothing", ty)),
+                (span.line, span.col, format!("a C function can't return '{}', only a number, String, extern type, Option of an extern type or nothing", ty)),
             SemanticError::ModuleNotImported { module, span } =>
                 (span.line, span.col, format!("module '{}' isn't imported, add 'import std::{};'", module, module)),
             SemanticError::UnknownImport { item, module, span } =>
@@ -155,8 +155,14 @@ impl SemanticError {
                 (span.line, span.col, format!("Too many arguments provided for function '{}' in '{}'", func_name, parent)),
             SemanticError::TraitMethodMismatch { method, trait_name, span } =>
                 (span.line, span.col, format!("method '{}' doesn't match its signature in trait '{}'", method, trait_name)),
-            SemanticError::TraitNotImplemented { ty, trait_name, span } =>
-                (span.line, span.col, format!("'{}' doesn't implement trait '{}'", ty, trait_name)),
+            SemanticError::TraitNotImplemented { ty, trait_name, span } => {
+                // As written, `Default` for `default::Default`
+                let written = match trait_name.split_once("::") {
+                    Some((module, rest)) if !module.contains('<') => rest,
+                    _ => trait_name.as_str(),
+                };
+                (span.line, span.col, format!("'{}' doesn't implement trait '{}'", crate::analysis::show_type(&ty), written))
+            }
             SemanticError::TypeMismatch { lhs, rhs, span, context } =>
                 (span.line, span.col, format!("type '{}' does not match '{}' in {}", lhs, rhs, context)),
             SemanticError::UnknownEnum { name, span } =>
@@ -205,11 +211,12 @@ struct GenericDecl {
 }
 
 /// The names a module sees from the standard library, see
-/// [`Sema::std_modules`] and [`Sema::aliases`].
+/// [`Sema::imported_modules`] and [`Sema::aliases`].
 #[derive(Clone, Default)]
 struct Imports {
-    std_modules: Vec<String>,
+    imported_modules: Vec<String>,
     aliases: HashMap<String, String>,
+    ambiguous: HashMap<String, Vec<String>>,
 }
 
 /// An instance of a generic class or enum whose method bodies still have to
@@ -223,6 +230,27 @@ struct PendingInstance {
     imports: Imports,
 }
 
+/// A method of an instance of a generic class or enum, like `push` of
+/// `Vector<Token>`. It's only checked once something calls it, so an instance
+/// only needs what its used methods need, like `T` having a default only for
+/// a constructor filling elements with defaults. See [`Sema::use_method`].
+struct LazyMethod {
+    /// Index of its instance in [`Sema::type_instance_decls`].
+    instance: usize,
+    method: Declaration,
+    /// The instance's module and imports, with the instance as the class.
+    template: GenericDecl,
+    subst: HashMap<String, Type>,
+}
+
+/// What [`Sema::check_type_instance`] passes on to the class or enum being
+/// checked: its methods are registered as [`LazyMethod`]s instead of checked.
+struct LazyInstance {
+    instance: usize,
+    template: GenericDecl,
+    subst: HashMap<String, Type>,
+}
+
 /// The type an impl method returns for a trait method returning `impl Trait`.
 /// Whether it implements the trait is checked at the end of the module, when
 /// all impls are known, see [`Sema::check_opaque_returns`].
@@ -233,6 +261,35 @@ struct OpaqueReturn {
     method: String,
     span: Span,
     source: String,
+}
+
+/// The steps of checking a program, see [`Sema::check_phase`]. Each runs for
+/// every module before the next one starts, so every module knows the types
+/// and functions of all others, also of the ones importing it back, like an
+/// `expression` and a `statement` module using each other's types.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Phase {
+    /// The names of classes, enums and extern types.
+    TypeNames,
+    /// The types written in declarations, resolved to the ones they mean.
+    Signatures,
+    Traits,
+    GenericImpls,
+    /// Impls without type parameters, checked against their trait.
+    Impls,
+    /// Fields, functions and methods with their signatures.
+    Declarations,
+    /// Checks on the declared types, like a class containing itself.
+    Validation,
+    /// Statements and function bodies.
+    Bodies,
+}
+
+impl Phase {
+    pub const ALL: [Phase; 8] = [
+        Phase::TypeNames, Phase::Signatures, Phase::Traits, Phase::GenericImpls,
+        Phase::Impls, Phase::Declarations, Phase::Validation, Phase::Bodies,
+    ];
 }
 
 /// Who owns the value a match looks at, so its bindings know whether they
@@ -267,6 +324,34 @@ pub struct Sema {
     /// Which generic impls were applied to which instance, by index into
     /// [`Sema::generic_impls`] and instance name.
     applied_impls: HashSet<(usize, String)>,
+    /// Every `Buffer` type with a known element type seen so far, which the
+    /// generic impls for `Buffer<T>` apply to.
+    buffer_types: Vec<Type>,
+    /// The mangled names of each class's constructors in order, like `Point`
+    /// and `Point#2`, by class name. See [`Sema::add_constructor`].
+    constructors: HashMap<String, Vec<String>>,
+    /// Checked instances of generic classes and enums, like `Vector<Token>`,
+    /// with the methods checked so far, for codegen.
+    type_instance_decls: Vec<Declaration>,
+    /// Methods of instances nothing called yet, by mangled name.
+    lazy_methods: HashMap<String, LazyMethod>,
+    /// Every function and method a call went to, by mangled name, with where
+    /// it was called first and that module's source, for errors.
+    used_functions: HashMap<String, (Span, String)>,
+    /// Lazy methods something called, waiting to be checked.
+    used_methods: Vec<String>,
+    /// Set while an instance of a generic class or enum is checked, see [`LazyInstance`].
+    lazy_instance: Option<LazyInstance>,
+    /// Whether the impls of every module are known, which they are from
+    /// [`Phase::Declarations`] on. Before, a missing impl may still come.
+    impls_known: bool,
+    /// Bounds of generic types that weren't met while impls weren't known
+    /// yet: the type, the trait, where, and in which module. Checked again
+    /// with that module's bodies.
+    deferred_bounds: Vec<(Type, String, Span, String)>,
+    /// Generic impls by index and the instance they didn't apply to while
+    /// impls weren't known yet, because a bound wasn't met.
+    deferred_impls: Vec<(usize, Type)>,
     /// Types returned for `impl Trait` that still have to be checked.
     opaque_returns: Vec<OpaqueReturn>,
     /// Names of the traits each type implements, by type name.
@@ -300,6 +385,13 @@ pub struct Sema {
     binding_roots: HashMap<String, String>,
     /// Who owns the value the patterns being checked bind into, see [`Owner`].
     pattern_owner: Owner,
+    /// Names bound by `value is pattern` expressions that are still in scope,
+    /// the most recent last, with what they meant before.
+    is_bindings: Vec<IsBinding>,
+    /// Whether the expression checked next is a condition whose `is` bindings
+    /// stay in scope afterwards, like the left side of `&&` or the condition of
+    /// an `if`. Anywhere else they're gone once the expression is checked.
+    keep_is_bindings: bool,
     /// Whether the expression checked next only reads its value instead of
     /// taking it, see [`Sema::check_borrowed`].
     borrowing: bool,
@@ -321,9 +413,25 @@ pub struct Sema {
     handles: HashSet<String>,
     /// The extern type each one with `extern type Name: Base` is a kind of.
     handle_bases: HashMap<String, String>,
-    /// Names of the standard library modules the current module imports,
-    /// `fs` for `import std::fs;`. Their items are used like `fs::read`.
-    std_modules: Vec<String>,
+    /// The type the method call being resolved should give, from its type
+    /// argument or where its value goes. Picks between impls of one trait for
+    /// different types, like `text.try_as<int32>()`, see [`Sema::find_method`].
+    method_target: Option<Type>,
+    /// Whether [`Sema::method_target`] picked the method, so its type argument was used up.
+    method_target_used: Cell<bool>,
+    /// Names of the modules the current module imports, `fs` for
+    /// `import std::fs;` and `llvm` for `import llvm;`. Their items are used
+    /// like `fs::read` or `llvm::Module`.
+    imported_modules: Vec<String>,
+    /// The top-level names of each of the program's own modules, without the
+    /// module's name, by module name. See [`Sema::set_module_names`].
+    module_names: HashMap<String, Vec<String>>,
+    /// The top-level names of the program's own modules that keep their
+    /// names, like the main file, by module name.
+    plain_names: HashMap<String, Vec<String>>,
+    /// Names several modules the current module imports declare, with those
+    /// modules. They have to be written with the module's name, like `llvm::Module`.
+    ambiguous: HashMap<String, Vec<String>>,
     /// Items of standard library modules the current module uses without the
     /// module's name, like `read` for `fs::read` after `import std::fs::{read};`.
     aliases: HashMap<String, String>,
@@ -338,9 +446,22 @@ pub struct Sema {
     used_unknown: Cell<bool>,
 }
 
+/// A name bound by `value is pattern`, with what the name meant before, to
+/// put back once the binding is out of scope.
+struct IsBinding {
+    name: String,
+    scope: Option<(Type, bool)>,
+    /// The moved paths of the earlier variable, like `p` or `p.left`.
+    moved: Vec<String>,
+    borrowed: bool,
+    root: Option<String>,
+}
+
 /// What [`Sema::recover`] puts back when checking a statement fails halfway.
 struct Snapshot {
     scope: HashMap<String, (Type, bool)>,
+    is_bindings: usize,
+    method_target: Option<Type>,
     moved: HashSet<String>,
     borrowed: HashSet<String>,
     binding_roots: HashMap<String, String>,
@@ -366,14 +487,16 @@ impl Sema {
         let mut sema = Self {
             scope: HashMap::new(), functions: HashMap::new(), classes: HashMap::new(), enums: HashMap::new(),
             traits: HashMap::new(), impls: HashMap::new(), current_class: None, current_trait: None,
-            generic_traits: HashMap::new(), trait_substs: HashMap::new(), generic_impls: Vec::new(), applied_impls: HashSet::new(),
+            generic_traits: HashMap::new(), trait_substs: HashMap::new(), generic_impls: Vec::new(), applied_impls: HashSet::new(), buffer_types: Vec::new(), constructors: HashMap::new(),
+            type_instance_decls: Vec::new(), lazy_methods: HashMap::new(), used_functions: HashMap::new(), used_methods: Vec::new(), lazy_instance: None,
+            impls_known: false, deferred_bounds: Vec::new(), deferred_impls: Vec::new(),
             opaque_returns: Vec::new(),
             generic_functions: HashMap::new(), generic_types: HashMap::new(), type_instances: HashMap::new(),
             pending_instances: Vec::new(), instances: Vec::new(), type_subst: HashMap::new(), expected_type: None,
             moved: HashSet::new(), borrowed: HashSet::new(), binding_roots: HashMap::new(),
-            pattern_owner: Owner::Temporary, borrowing: false, field_object: false,
+            pattern_owner: Owner::Temporary, is_bindings: Vec::new(), keep_is_bindings: false, borrowing: false, field_object: false,
             source: String::new(), module: String::new(), current_return_type: None, oversized_literals: HashMap::new(), loop_depth: 0,
-            externs: HashMap::new(), handles: HashSet::new(), handle_bases: HashMap::new(), std_modules: Vec::new(), aliases: HashMap::new(), imported_items: Vec::new(),
+            externs: HashMap::new(), handles: HashSet::new(), handle_bases: HashMap::new(), method_target: None, method_target_used: Cell::new(false), imported_modules: Vec::new(), module_names: HashMap::new(), plain_names: HashMap::new(), ambiguous: HashMap::new(), aliases: HashMap::new(), imported_items: Vec::new(),
             errors: Vec::new(), used_unknown: Cell::new(false),
         };
         for builtin in runtime::builtins() {
@@ -392,24 +515,66 @@ impl Sema {
         self.source = source;
         self.scope.clear();
         self.moved.clear();
-        self.std_modules.clear();
+        self.imported_modules.clear();
         self.aliases.clear();
+        self.ambiguous.clear();
         self.imported_items.clear();
+        // Which of the program's own imported modules declare each name
+        let mut declared_by: HashMap<String, Vec<String>> = HashMap::new();
         for import in imports {
-            let Some(std_name) = import.name.strip_prefix("std::") else { continue };
-            self.std_modules.push(std_name.to_string());
+            // `fs` for `std::fs`, the program's own modules are named like their file
+            let (module, own) = match import.name.strip_prefix("std::") {
+                Some(std_name) => (std_name, false),
+                None => (import.name.as_str(), true),
+            };
+            if !self.imported_modules.iter().any(|m| m == module) {
+                self.imported_modules.push(module.to_string());
+            }
             for (item, span) in &import.items {
-                let qualified = format!("{}::{}", std_name, item);
+                let qualified = format!("{}::{}", module, item);
                 self.aliases.insert(item.clone(), qualified.clone());
                 self.imported_items.push((qualified, import.name.clone(), span.clone()));
+            }
+            if let (true, Some(names)) = (own, self.module_names.get(module)) {
+                for name in names {
+                    let modules = declared_by.entry(name.clone()).or_default();
+                    if !modules.iter().any(|m| m == module) {
+                        modules.push(module.to_string());
+                    }
+                }
+            }
+        }
+        // A name only one imported module declares is used without the module's name, like
+        // `Lexer` after `import lexer;`. Listed items come first, and in a module whose names
+        // stay as they are, like the main file, its own names. The other modules' own names
+        // have their module's name already
+        let own_names = self.plain_names.get(&self.module).cloned().unwrap_or_default();
+        for (name, modules) in declared_by {
+            if self.aliases.contains_key(&name) || own_names.contains(&name) {
+                continue;
+            }
+            match modules.as_slice() {
+                [module] => { self.aliases.insert(name.clone(), format!("{}::{}", module, name)); }
+                _ => { self.ambiguous.insert(name, modules); }
             }
         }
     }
 
-    /// Whether the items of the standard library module `name` can be used
-    /// like `name::item` in the current module.
+    /// Gives sema the top-level names of the program's own modules by module.
+    /// Those of `qualified` get the module's name, like `Module` in `llvm`
+    /// becomes `llvm::Module`, so a module importing one can use them without
+    /// it, see [`Sema::enter_module`]. Those of `plain`, like the main file,
+    /// keep their names.
+    pub fn set_module_names(&mut self, qualified: HashMap<String, Vec<String>>, plain: HashMap<String, Vec<String>>) {
+        self.module_names = qualified;
+        self.plain_names = plain;
+    }
+
+    /// Whether the items of the module `name` can be used like `name::item` in
+    /// the current module: it's imported, or it's the current module.
     fn sees_module(&self, name: &str) -> bool {
-        self.std_modules.iter().any(|m| m == name) || self.module.strip_prefix("std::") == Some(name)
+        self.imported_modules.iter().any(|m| m == name)
+            || self.module.strip_prefix("std::") == Some(name) || self.module == name
     }
 
     /// The mangled name of the function `function` of the class, enum or
@@ -438,6 +603,11 @@ impl Sema {
     /// How the current module writes the item `name`, for errors: `Option` for
     /// `option::Option` after `import std::option::{Option};`, else `name`.
     fn written_name(&self, name: &str) -> String {
+        // The module's own item, like `llvm::LLVMModule` in `llvm.lv`, is written without it
+        let own = format!("{}::", self.module.strip_prefix("std::").unwrap_or(&self.module));
+        if let Some(short) = name.strip_prefix(&own).filter(|short| !short.contains("::")) {
+            return short.to_string();
+        }
         self.aliases.iter()
             .find(|(_, qualified)| qualified.as_str() == name)
             .map(|(short, _)| short.clone())
@@ -462,6 +632,12 @@ impl Sema {
 
     /// Whether `name` stands for a standard library module where it's
     /// written like `name::item`, and not for an enum.
+    /// Whether `name` is an enum, also a generic one like `Option`.
+    fn is_enum_name(&self, name: &str) -> bool {
+        self.enums.contains_key(name)
+            || self.generic_types.get(name).is_some_and(|generic| matches!(generic.decl.kind, DeclarationKind::Enum { .. }))
+    }
+
     fn is_module_prefix(&self, name: &str) -> bool {
         !self.enums.contains_key(name) && !self.generic_types.contains_key(name)
             && (self.sees_module(name) || module::std_source(name).is_some())
@@ -489,7 +665,24 @@ impl Sema {
             }
             return name.to_string();
         }
-        self.aliases.get(name).cloned().unwrap_or_else(|| name.to_string())
+        if let Some(qualified) = self.aliases.get(name) {
+            return qualified.clone();
+        }
+        self.check_unambiguous(name, span);
+        name.to_string()
+    }
+
+    /// Stops with an error if several imported modules declare `name`, it has
+    /// to be written with the module's name then, like `llvm::Module`.
+    fn check_unambiguous(&self, name: &str, span: &Span) {
+        let Some(modules) = self.ambiguous.get(name) else { return };
+        let options: Vec<String> = modules.iter().map(|module| format!("`{}::{}`", module, name)).collect();
+        let modules: Vec<String> = modules.iter().map(|module| format!("'{}'", module)).collect();
+        diagnostic::throw(
+            format!("'{}' is in both {}, write {}", name, modules.join(" and "), options.join(" or ")),
+            Some(span.clone()),
+            &self.source,
+        )
     }
 
     /// Type of the variable `name`, for using it in an expression.
@@ -598,12 +791,31 @@ impl Sema {
     /// Turns `expr`, an `a ?? b`, into `match a { Some(value) => value, None => b }`,
     /// or the same with `Ok` and `Err` for a `Result`. `b` only runs if needed.
     ///
+    /// `expected` is the type the whole expression should have. In
+    /// `text.try_as() ?? 0` it, or else the default's type, says what `try_as` gives.
+    ///
     /// # Panics
     ///
     /// Panics if `a` is neither an `Option` nor a `Result`.
-    fn rewrite_default(&mut self, expr: &mut Expr) {
+    fn rewrite_default(&mut self, expr: &mut Expr, expected: Option<&Type>) {
         let span = expr.span.clone();
         let ExprKind::BinaryExpr { lhs, rhs, .. } = &mut expr.kind else { return };
+        let picks_by_type = match &lhs.kind {
+            ExprKind::FunctionCall { name, receiver: Some(receiver), type_args, .. } if type_args.is_empty() =>
+                self.is_static_trait_function(name) || self.has_impls_by_type(receiver, name),
+            _ => false,
+        };
+        if let ExprKind::FunctionCall { type_args, .. } = &mut lhs.kind {
+            // `?? return x` has no type to pick by
+            let leaves = matches!(rhs.kind, ExprKind::Leave(_));
+            if picks_by_type {
+                let wanted = expected.filter(|ty| **ty != Type::Unknown).cloned()
+                    .or_else(|| (!leaves).then(|| self.probe_type(rhs)));
+                if let Some(wanted) = wanted {
+                    type_args.push(wanted);
+                }
+            }
+        }
         let ty = self.probe_type(lhs);
         let template = match &ty {
             Type::Enum(instance) => self.type_instances.get(instance).map(|(template, _)| template.clone()),
@@ -624,16 +836,44 @@ impl Sema {
         let binding = "?? value".to_string();
         let placeholder = || Expr::new(ExprKind::Boolean(false), span.clone());
         let scrutinee = std::mem::replace(lhs.as_mut(), placeholder());
-        let default = std::mem::replace(rhs.as_mut(), placeholder());
+        let mut default = std::mem::replace(rhs.as_mut(), placeholder());
+
+        // `v.at(5) ?? "none"` gives a `&String`: the default isn't copied either, a
+        // variable is referenced and any other value is kept for the reference
+        let present_ty = match &ty {
+            Type::Enum(instance) => self.type_instances.get(instance).and_then(|(_, args)| args.first().cloned()),
+            _ => None,
+        };
+        if let (Some(Type::Ref(value_ty)), false) = (present_ty, matches!(default.kind, ExprKind::Leave(_))) {
+            if !matches!(self.probe_type(&default), Type::Ref(_)) {
+                default = if matches!(default.kind, ExprKind::Identifier(_) | ExprKind::FieldAccess { .. }) {
+                    Expr::new(ExprKind::Ref(Box::new(default)), span.clone())
+                } else {
+                    self.check_expr_expecting(&mut default, &value_ty);
+                    self.coerce(&mut default, &value_ty);
+                    let kept_ty = Type::Ref(Box::new(default.ty.clone()));
+                    let default_span = default.span.clone();
+                    Expr { kind: ExprKind::Kept(Box::new(default)), span: default_span, ty: kept_ty }
+                };
+            }
+        }
         let arms = vec![
             MatchArm {
-                pattern: Pattern::EnumVariant { enum_name: enum_name.clone(), variant: present.to_string(), binding: Some(binding.clone()) },
+                pattern: Pattern::EnumVariant {
+                    enum_name: enum_name.clone(),
+                    variant: present.to_string(),
+                    payload: Some(Box::new(Pattern::name(&binding, span.clone()))),
+                },
                 block: Block::of_value(Expr::new(ExprKind::Identifier(binding), span.clone())),
                 span: span.clone(),
             },
             MatchArm {
-                pattern: Pattern::EnumVariant { enum_name, variant: missing.to_string(), binding: None },
-                block: Block::of_value(default),
+                pattern: Pattern::EnumVariant { enum_name, variant: missing.to_string(), payload: None },
+                // `?? return x`, `?? break` and `?? continue` leave, like an arm `None => break`
+                block: match default.kind {
+                    ExprKind::Leave(stmt) => Block { stmts: vec![*stmt], value: None },
+                    _ => Block::of_value(default),
+                },
                 span: span.clone(),
             },
         ];
@@ -751,6 +991,49 @@ impl Sema {
         }
     }
 
+    /// Checks `value is pattern` and adds the names of the pattern to the
+    /// scope, remembering what they meant before for [`Sema::drop_is_bindings`].
+    fn check_is(&mut self, value: &mut Expr, pattern: &mut Pattern, span: &Span) -> Type {
+        // Only read like a match's scrutinee, a `&` is matched by the value it refers to
+        let value_ty = match self.check_borrowed(value, None) {
+            Type::Ref(inner) => *inner,
+            other => other,
+        };
+        for name in pattern.names() {
+            let binding = IsBinding {
+                scope: self.scope.get(&name).cloned(),
+                moved: self.moved.iter().filter(|path| path_root(path) == name).cloned().collect(),
+                borrowed: self.borrowed.contains(&name),
+                root: self.binding_roots.get(&name).cloned(),
+                name,
+            };
+            self.is_bindings.push(binding);
+        }
+        self.pattern_owner = self.owner_of(value);
+        self.check_pattern(pattern, &value_ty, span);
+        Type::Bool
+    }
+
+    /// Takes the names bound by `is` since there were `mark` of them out of
+    /// the scope again, the names they hid mean what they meant before.
+    fn drop_is_bindings(&mut self, mark: usize) {
+        while self.is_bindings.len() > mark {
+            let binding = self.is_bindings.pop().expect("there are more than `mark`");
+            let name = binding.name;
+            match binding.scope {
+                Some(entry) => { self.scope.insert(name.clone(), entry); }
+                None => { self.scope.remove(&name); }
+            }
+            self.moved.retain(|path| path_root(path) != name);
+            self.moved.extend(binding.moved);
+            if binding.borrowed { self.borrowed.insert(name.clone()); } else { self.borrowed.remove(&name); }
+            match binding.root {
+                Some(root) => { self.binding_roots.insert(name, root); }
+                None => { self.binding_roots.remove(&name); }
+            }
+        }
+    }
+
     /// Whether `expr` creates a built-in `Buffer` like `Buffer<int32>(8)`. A user
     /// type or function with that name takes precedence.
     fn is_buffer_call(&self, expr: &Expr) -> bool {
@@ -799,6 +1082,7 @@ impl Sema {
         self.check_argument(&mut capacity, &Type::UINT64, "Buffer capacity");
 
         let ty = Type::Buffer(Box::new(element));
+        self.see_buffer(&ty);
         expr.kind = ExprKind::NewBuffer(Box::new(capacity));
         ty
     }
@@ -807,7 +1091,7 @@ impl Sema {
     /// `Buffer<T>`, and returns its result type:
     ///
     /// ```text
-    /// get(index: uint64) -> T                  a copy of the element
+    /// get(index: uint64) -> &T                 the element, it stays in the Buffer
     /// take(mut &self, index: uint64) -> T      the element itself, the slot is left empty
     /// set(mut &self, index: uint64, value: T)
     /// capacity() -> uint64
@@ -828,7 +1112,7 @@ impl Sema {
             _ => unreachable!("only Buffer receivers get here"),
         };
         let (params, result, changes_self) = match method {
-            "get" => (vec![Type::UINT64], element, false),
+            "get" => (vec![Type::UINT64], Type::Ref(Box::new(element)), false),
             "take" => (vec![Type::UINT64], element, true),
             "set" => (vec![Type::UINT64, element], Type::Void, true),
             "capacity" => (vec![], Type::UINT64, false),
@@ -950,8 +1234,13 @@ impl Sema {
     ///
     /// They are ordinary declarations and have to be declared and generated
     /// like the module's own ones.
+    /// The instances of generic functions, classes, enums and impls created so
+    /// far. A class's or enum's only have the methods something called, see
+    /// [`LazyMethod`], so this is taken once every module is checked.
     pub fn take_instances(&mut self) -> Vec<Declaration> {
-        std::mem::take(&mut self.instances)
+        let mut instances = std::mem::take(&mut self.instances);
+        instances.append(&mut self.type_instance_decls);
+        instances
     }
 
     pub fn push_class(&mut self, name: String, fields: Vec<Field>) {
@@ -967,10 +1256,39 @@ impl Sema {
     }
 
 
-    /// Checks the statements of a whole module. Its errors are collected,
-    /// see [`Sema::take_errors`].
-    pub fn check(&mut self, ast: &mut Vec<Stmt>) {
-        // Imported modules are checked already, their items are known
+    /// Runs the step `phase` of checking on the statements of a whole module.
+    /// Every step runs for all modules before the next one starts, see
+    /// [`Phase`]. Errors are collected, see [`Sema::take_errors`].
+    pub fn check_phase(&mut self, phase: Phase, ast: &mut Vec<Stmt>) {
+        // Every module's impls are known once declaring starts. Generic impls whose
+        // bounds weren't met yet get another try
+        if phase == Phase::Declarations && !self.impls_known {
+            self.impls_known = true;
+            for (index, instance_ty) in std::mem::take(&mut self.deferred_impls) {
+                self.recover(|s| s.apply_generic_impl(index, &instance_ty));
+            }
+        }
+        match phase {
+            Phase::Bodies => self.check_bodies(ast),
+            declaring => self.declare_phase(declaring, ast),
+        }
+    }
+
+    /// Checks the code of a module whose declarations, and those of every
+    /// other module, are known: its statements and function bodies, and the
+    /// generic instances they create.
+    fn check_bodies(&mut self, ast: &mut Vec<Stmt>) {
+        // Bounds of the types this module's declarations use, now that every impl is known
+        let module = self.module.clone();
+        let (own, others): (Vec<_>, Vec<_>) = std::mem::take(&mut self.deferred_bounds).into_iter()
+            .partition(|(_, _, _, of)| *of == module);
+        self.deferred_bounds = others;
+        for (ty, trait_name, span, _) in own {
+            if !self.implements(&ty, &trait_name) {
+                self.recover(|s| SemanticError::TraitNotImplemented { ty, trait_name, span }.throw(&s.source));
+            }
+        }
+        // Every module's items are declared by now
         for (qualified, module, span) in self.imported_items.clone() {
             let exists = self.functions.contains_key(&qualified) || self.generic_functions.contains_key(&qualified)
                 || self.classes.contains_key(&qualified) || self.enums.contains_key(&qualified)
@@ -981,11 +1299,19 @@ impl Sema {
                 self.recover(|s| SemanticError::UnknownImport { item, module, span }.throw(&s.source));
             }
         }
-        self.check_stmts(ast);
+        for stmt in ast.iter_mut() {
+            self.check_stmt(stmt);
+        }
 
-        // Checking one instance's methods can create more instances
-        while let Some(pending) = self.pending_instances.pop() {
-            self.recover(|s| s.check_type_instance(pending));
+        // Checking one instance or method can create more instances and call more methods
+        loop {
+            if let Some(pending) = self.pending_instances.pop() {
+                self.recover(|s| s.check_type_instance(pending));
+            } else if let Some(method) = self.used_methods.pop() {
+                self.recover(|s| s.check_lazy_method(&method));
+            } else {
+                break;
+            }
         }
         self.check_opaque_returns();
 
@@ -1012,7 +1338,7 @@ impl Sema {
     /// An error inside makes errors of the parts around it follow from it too.
     fn recover<T>(&mut self, check: impl FnOnce(&mut Self) -> T) -> Option<T> {
         let snapshot = Snapshot {
-            scope: self.scope.clone(), moved: self.moved.clone(), borrowed: self.borrowed.clone(),
+            scope: self.scope.clone(), is_bindings: self.is_bindings.len(), method_target: self.method_target.clone(), moved: self.moved.clone(), borrowed: self.borrowed.clone(),
             binding_roots: self.binding_roots.clone(), pattern_owner: self.pattern_owner.clone(),
             borrowing: self.borrowing, field_object: self.field_object, expected_type: self.expected_type.clone(),
             current_return_type: self.current_return_type.clone(), loop_depth: self.loop_depth,
@@ -1038,6 +1364,11 @@ impl Sema {
         }
         self.used_unknown.set(true);
         self.scope = snapshot.scope;
+        self.is_bindings.truncate(snapshot.is_bindings);
+        self.keep_is_bindings = false;
+        // A call stopped by the error leaves its wanted type behind, it's not the next call's
+        self.method_target = snapshot.method_target;
+        self.method_target_used.set(false);
         self.moved = snapshot.moved;
         self.borrowed = snapshot.borrowed;
         self.binding_roots = snapshot.binding_roots;
@@ -1052,56 +1383,69 @@ impl Sema {
         self.type_subst = snapshot.type_subst;
         self.module = snapshot.module;
         self.source = snapshot.source;
-        self.std_modules = snapshot.imports.std_modules;
+        self.imported_modules = snapshot.imports.imported_modules;
         self.aliases = snapshot.imports.aliases;
+        self.ambiguous = snapshot.imports.ambiguous;
         None
     }
 
+    /// Checks statements with their own declarations, like a function body:
+    /// every declaring phase, then the statements.
     fn check_stmts(&mut self, ast: &mut Vec<Stmt>) {
-        // Types are resolved before declaring, so the declared signatures use the final types
-        self.recover(|s| s.declare_type_names(ast));
-        for stmt in ast.iter_mut() {
-            if let StmtKind::Declaration(decl) = &mut stmt.kind {
-                self.recover(|s| s.canonicalize_decl(decl));
-            }
-        }
-        // All traits are known before any impl is checked against them
-        for stmt in ast.iter() {
-            let StmtKind::Declaration(decl) = &stmt.kind else { continue };
-            let DeclarationKind::Trait { name, type_params, methods } = &decl.kind else { continue };
-            if type_params.is_empty() {
-                self.traits.insert(name.clone(), methods.clone());
-            } else {
-                self.generic_traits.insert(name.clone(), self.template(decl));
-            }
-        }
-        // Generic impls apply to the instances of their target, also to those created already
-        for stmt in ast.iter() {
-            if let StmtKind::Declaration(decl) = &stmt.kind {
-                if matches!(&decl.kind, DeclarationKind::Impl { type_params, .. } if !type_params.is_empty()) {
-                    self.recover(|s| s.register_generic_impl(decl));
-                }
-            }
-        }
-        for stmt in ast.iter_mut() {
-            if let StmtKind::Declaration(decl) = &mut stmt.kind {
-                if matches!(&decl.kind, DeclarationKind::Impl { type_params, .. } if type_params.is_empty()) {
-                    self.recover(|s| s.complete_impl(decl));
-                }
-            }
-        }
-        for stmt in ast.iter_mut() {
-            if let StmtKind::Declaration(decl) = &mut stmt.kind {
-                self.recover(|s| s.declare_decl(decl));
-            }
-        }
-        for stmt in ast.iter_mut() {
-            if let StmtKind::Declaration(decl) = &stmt.kind {
-                self.recover(|s| s.validate_decl_types(decl, &stmt.span));
-            }
+        for phase in Phase::ALL.into_iter().filter(|phase| *phase != Phase::Bodies) {
+            self.declare_phase(phase, ast);
         }
         for stmt in ast.iter_mut() {
             self.check_stmt(stmt);
+        }
+    }
+
+    /// Runs the declaring step `phase` on the declarations of `ast`.
+    fn declare_phase(&mut self, phase: Phase, ast: &mut Vec<Stmt>) {
+        match phase {
+            Phase::TypeNames => { self.recover(|s| s.declare_type_names(ast)); }
+            // Types are resolved before declaring, so the declared signatures use the final types
+            Phase::Signatures => for stmt in ast.iter_mut() {
+                if let StmtKind::Declaration(decl) = &mut stmt.kind {
+                    self.recover(|s| s.canonicalize_decl(decl));
+                }
+            },
+            // All traits are known before any impl is checked against them
+            Phase::Traits => for stmt in ast.iter() {
+                let StmtKind::Declaration(decl) = &stmt.kind else { continue };
+                let DeclarationKind::Trait { name, type_params, methods } = &decl.kind else { continue };
+                if type_params.is_empty() {
+                    self.traits.insert(name.clone(), methods.clone());
+                } else {
+                    self.generic_traits.insert(name.clone(), self.template(decl));
+                }
+            },
+            // Generic impls apply to the instances of their target, also to those created already
+            Phase::GenericImpls => for stmt in ast.iter() {
+                if let StmtKind::Declaration(decl) = &stmt.kind {
+                    if matches!(&decl.kind, DeclarationKind::Impl { type_params, .. } if !type_params.is_empty()) {
+                        self.recover(|s| s.register_generic_impl(decl));
+                    }
+                }
+            },
+            Phase::Impls => for stmt in ast.iter_mut() {
+                if let StmtKind::Declaration(decl) = &mut stmt.kind {
+                    if matches!(&decl.kind, DeclarationKind::Impl { type_params, .. } if type_params.is_empty()) {
+                        self.recover(|s| s.complete_impl(decl));
+                    }
+                }
+            },
+            Phase::Declarations => for stmt in ast.iter_mut() {
+                if let StmtKind::Declaration(decl) = &mut stmt.kind {
+                    self.recover(|s| s.declare_decl(decl));
+                }
+            },
+            Phase::Validation => for stmt in ast.iter_mut() {
+                if let StmtKind::Declaration(decl) = &stmt.kind {
+                    self.recover(|s| s.validate_decl_types(decl, &stmt.span));
+                }
+            },
+            Phase::Bodies => unreachable!("bodies aren't declarations"),
         }
     }
 
@@ -1188,6 +1532,8 @@ impl Sema {
                 }.throw(&self.source));
             // `-> impl Iterator<T>` in the trait takes any type implementing that trait
             let mut expected = trait_method.kind.clone();
+            // `Self` in the trait is this impl's target
+            self.fill_in_self(&mut expected, target, &span);
             if let (
                 DeclarationKind::Function { return_type: Some(Type::Opaque(bound)), .. },
                 DeclarationKind::Function { return_type: Some(returned), .. },
@@ -1235,6 +1581,7 @@ impl Sema {
 
             let mut copy = trait_method.clone();
             copy.visibility = Visibility::Public;
+            self.fill_in_self(&mut copy.kind, target, &span);
             if let DeclarationKind::Function { params, parent, visibility, .. } = &mut copy.kind {
                 // In the trait `self` stands for any implementing type, here it's the target
                 for p in params.iter_mut().filter(|p| p.name == "self") {
@@ -1284,9 +1631,107 @@ impl Sema {
     /// # Panics
     ///
     /// Panics if the trait is unknown, or the number of type arguments is wrong.
+    /// Like [`Sema::has_method`], but only a method taking `self` counts. A
+    /// function without, like `try_as` of an impl for the receiver's type, doesn't.
+    fn has_self_method(&mut self, receiver: &Expr, name: &str, span: &Span) -> bool {
+        let ty = peel(self.probe_type(receiver));
+        let Some(owner) = ty.owner_name() else { return self.has_method(receiver, name, span) };
+        let method = self.find_method(&owner, name, span);
+        self.functions.get(&method).is_some_and(|(params, ..)| params.first().is_some_and(|p| p.name == "self"))
+            || self.generic_functions.contains_key(&method)
+    }
+
+    /// Whether the type of `receiver` has the method `name` from several impls
+    /// of one trait, like `try_as` of `TryAs<int32>` and `TryAs<bool>` for
+    /// `String`, so the type a call should give picks one.
+    fn has_impls_by_type(&mut self, receiver: &Expr, name: &str) -> bool {
+        let ty = peel(self.probe_type(receiver));
+        let Some(owner) = ty.owner_name() else { return false };
+        self.impls.get(&owner).into_iter().flatten()
+            .filter(|tr| self.functions.contains_key(&format!("{}_{}_{}", owner, tr, name)))
+            .count() > 1
+    }
+
+    /// Whether some trait has a function `name` without `self`, like `try_as`
+    /// of `TryAs`, which is called on the value it takes: `text.try_as<int32>()`.
+    fn is_static_trait_function(&self, name: &str) -> bool {
+        self.traits.values().flatten().any(|m| matches!(&m.kind,
+            DeclarationKind::Function { name: n, params, .. } if n == name && params.first().is_none_or(|p| p.name != "self")))
+    }
+
+    /// The mangled name of the trait function `name` of the impl for `target`
+    /// whose first parameter takes a `from`, like `int32_TryAs<String>_try_as`.
+    fn static_trait_impl(&self, name: &str, from: &Type, target: &Type) -> Option<String> {
+        let owner = target.owner_name()?;
+        self.impls.get(&owner)?.iter()
+            .map(|tr| format!("{}_{}_{}", owner, tr, name))
+            .find(|mangled| self.functions.get(mangled).is_some_and(|(params, ..)| match params.first() {
+                Some(p) if p.name != "self" => p.ty == *from || matches!(&p.ty, Type::Ref(inner) if **inner == *from),
+                _ => false,
+            }))
+    }
+
+    /// The instance of the generic enum `template` in `expected`: `expected`
+    /// itself, or the value of an `Option` or `Result` around it, like
+    /// `Result<int32, String>` in `Option<Result<int32, String>>`.
+    fn expected_instance_of(&self, template: &str, expected: Option<&Type>) -> Option<Type> {
+        let mut ty = expected?.clone();
+        loop {
+            let Type::Enum(instance) = &ty else { return None };
+            if self.type_instances.get(instance)?.0 == template {
+                return Some(ty);
+            }
+            ty = self.result_types(&ty).map(|(ok, _)| ok).or_else(|| self.option_value_type(&ty))?;
+        }
+    }
+
+    /// Whether `ty` is an `Option` of an extern type, like `Option<LLVMValueRef>`.
+    /// C passes it as a pointer that's null for `None`.
+    fn nullable_handle(&self, ty: &Type) -> bool {
+        self.option_value_type(ty).is_some_and(|value| matches!(value, Type::Handle(_)))
+    }
+
+    /// Whether `&ty` is an out-parameter of a C function: an `Option` of an
+    /// extern type C writes a handle into, or an `Option<String>` C writes a
+    /// `char *` into, which becomes a copy.
+    fn is_out_param(&self, ty: &Type) -> bool {
+        self.nullable_handle(ty) || self.option_value_type(ty).is_some_and(|value| value.is_string())
+    }
+
+    /// The `T` and `E` of `Result<T, E>`, if `ty` is an instance of `Result`.
+    fn result_types(&self, ty: &Type) -> Option<(Type, Type)> {
+        let Type::Enum(instance) = ty else { return None };
+        let (template, args) = self.type_instances.get(instance)?;
+        (template.ends_with("Result") && args.len() == 2).then(|| (args[0].clone(), args[1].clone()))
+    }
+
+    /// The `T` of `Option<T>`, if `ty` is an instance of `Option`.
+    fn option_value_type(&self, ty: &Type) -> Option<Type> {
+        let Type::Enum(instance) = ty else { return None };
+        let (template, args) = self.type_instances.get(instance)?;
+        (template.ends_with("Option") && args.len() == 1).then(|| args[0].clone())
+    }
+
+    /// Replaces `Self` in the signature of the trait function `function` by
+    /// `target`, the type of the impl it's checked against or copied into.
+    fn fill_in_self(&mut self, function: &mut DeclarationKind, target: &Type, span: &Span) {
+        let DeclarationKind::Function { params, return_type, .. } = function else { return };
+        for p in params.iter_mut().filter(|p| p.name != "self" && has_self_type(&p.ty)) {
+            p.ty = self.canonicalize_type(&replace_self(&p.ty, target), span);
+        }
+        if let Some(ty) = return_type.as_mut().filter(|ty| has_self_type(ty)) {
+            *ty = self.canonicalize_type(&replace_self(ty, target), span);
+        }
+    }
+
     fn trait_instance(&mut self, name: &str, args: &[Type], span: &Span) -> String {
+        // A trait the module imports is that one, even if another module declares one with its name
         let known = |s: &Self, name: &str| s.traits.contains_key(name) || s.generic_traits.contains_key(name);
-        let name = if known(self, name) { name.to_string() } else { self.resolve_name(name, span) };
+        let name = match self.aliases.get(name) {
+            Some(imported) => imported.clone(),
+            None if known(self, name) => name.to_string(),
+            None => self.resolve_name(name, span),
+        };
         let Some(generic) = self.generic_traits.get(&name).cloned() else {
             if !self.traits.contains_key(&name) {
                 SemanticError::UnknownTrait { name, span: span.clone() }.throw(&self.source);
@@ -1334,6 +1779,15 @@ impl Sema {
         let Type::Generic { name, .. } = target else {
             diagnostic::throw(format!("a generic impl needs a generic target like `Box<T>`, '{}' isn't one", target), Some(decl.span.clone()), &self.source)
         };
+        // The built-in `Buffer<T>`, like `impl<T> Iterable<T> for Buffer<T>`
+        if name == "Buffer" && !self.generic_types.contains_key("Buffer") {
+            let index = self.generic_impls.len();
+            self.generic_impls.push(self.template(&decl));
+            for buffer in self.buffer_types.clone() {
+                self.apply_generic_impl(index, &buffer);
+            }
+            return;
+        }
         if !self.generic_types.contains_key(name.as_str()) {
             *name = self.resolve_name(name, &decl.span);
         }
@@ -1349,26 +1803,55 @@ impl Sema {
             .map(|(instance, _)| instance.clone())
             .collect();
         for instance in existing {
-            self.apply_generic_impl(index, &instance);
+            let instance_ty = self.instance_type(&instance);
+            self.apply_generic_impl(index, &instance_ty);
         }
+    }
+
+    /// The type of the instance of a generic class or enum called `instance`.
+    fn instance_type(&self, instance: &str) -> Type {
+        if self.enums.contains_key(instance) { Type::Enum(instance.to_string()) } else { Type::Class(instance.to_string()) }
     }
 
     /// Applies every generic impl of the template of `instance` to it.
     fn apply_generic_impls(&mut self, instance: &str) {
         let Some((template, _)) = self.type_instances.get(instance).cloned() else { return };
+        let instance_ty = self.instance_type(instance);
+        self.apply_generic_impls_of(&template, &instance_ty);
+    }
+
+    /// Applies every generic impl whose target is written with `template`, like
+    /// `Box<T>`, to `instance_ty`, an instance of it.
+    fn apply_generic_impls_of(&mut self, template: &str, instance_ty: &Type) {
         let matching: Vec<usize> = self.generic_impls.iter().enumerate()
             .filter(|(_, generic)| matches!(&generic.decl.kind,
-                DeclarationKind::Impl { target: Type::Generic { name, .. }, .. } if *name == template))
+                DeclarationKind::Impl { target: Type::Generic { name, .. }, .. } if name == template))
             .map(|(index, _)| index)
             .collect();
         for index in matching {
-            self.apply_generic_impl(index, instance);
+            self.apply_generic_impl(index, instance_ty);
         }
     }
 
-    /// Creates the impl of the generic impl at `index` for the class or enum
-    /// `instance`, like `impl Iterator<int32> for VectorIter<int32>`, declares
-    /// its methods and checks its bodies at the end of the module.
+    /// Notes the `Buffer` type `ty` and applies the generic impls for
+    /// `Buffer<T>` to it the first time it shows up. Anything else, or a
+    /// `Buffer` whose element type is still a type parameter, is ignored.
+    fn see_buffer(&mut self, ty: &Type) {
+        let Type::Buffer(element) = ty else { return };
+        if contains_type_param(element) || matches!(element.as_ref(), Type::Unknown) || self.buffer_types.contains(ty) {
+            return;
+        }
+        if self.generic_types.contains_key("Buffer") {
+            return;
+        }
+        self.buffer_types.push(ty.clone());
+        self.apply_generic_impls_of("Buffer", ty);
+    }
+
+    /// Creates the impl of the generic impl at `index` for `instance_ty`, an
+    /// instance of a generic class or enum or a `Buffer`, like
+    /// `impl Iterator<int32> for VectorIter<int32>`, declares its methods and
+    /// checks its bodies at the end of the module.
     ///
     /// An impl whose type parameters have bounds the instance's type arguments
     /// don't meet doesn't apply, so `impl<T: Show> Show for Box<T>` only gives
@@ -1378,8 +1861,8 @@ impl Sema {
     ///
     /// Panics if a type parameter of the impl doesn't appear in its target,
     /// or the impl doesn't match its trait.
-    fn apply_generic_impl(&mut self, index: usize, instance: &str) {
-        if !self.applied_impls.insert((index, instance.to_string())) {
+    fn apply_generic_impl(&mut self, index: usize, instance_ty: &Type) {
+        if !self.applied_impls.insert((index, instance_ty.to_string())) {
             return;
         }
         let generic = self.generic_impls[index].clone();
@@ -1387,9 +1870,8 @@ impl Sema {
         let DeclarationKind::Impl { type_params, target, .. } = &mut decl.kind else { return };
 
         // `VectorIter<T>` against the instance `VectorIter<int32>` gives `T = int32`
-        let instance_ty = if self.enums.contains_key(instance) { Type::Enum(instance.to_string()) } else { Type::Class(instance.to_string()) };
         let mut subst = HashMap::new();
-        self.bind_type_params(target, &instance_ty, &mut subst);
+        self.bind_type_params(target, instance_ty, &mut subst);
         for param in type_params.iter() {
             let Some(ty) = subst.get(&param.name) else {
                 diagnostic::throw(
@@ -1399,6 +1881,11 @@ impl Sema {
                 )
             };
             if !param.bounds.iter().all(|bound| self.implements(ty, bound)) {
+                // Tried again once every module's impls are known, see `Sema::check_phase`
+                if !self.impls_known {
+                    self.applied_impls.remove(&(index, instance_ty.to_string()));
+                    self.deferred_impls.push((index, instance_ty.clone()));
+                }
                 return;
             }
         }
@@ -1434,7 +1921,16 @@ impl Sema {
                 if name == "byte" && !known && !self.generic_types.contains_key(name) {
                     return Type::Int { bits: 8, signed: false };
                 }
-                let name = &if known { name.clone() } else { self.resolve_name(name, span) };
+                // `Self` in a trait is the type implementing it, filled in by its impls
+                if name == "Self" && !known {
+                    return self.type_subst.get("Self").cloned().unwrap_or_else(|| Type::Param("Self".to_string()));
+                }
+                // A type the module imports is that one, even if another module declares one with its name
+                let name = &match self.aliases.get(name) {
+                    Some(imported) => imported.clone(),
+                    None if known => name.clone(),
+                    None => self.resolve_name(name, span),
+                };
                 if self.handles.contains(name) {
                     Type::Handle(name.clone())
                 } else if self.enums.contains_key(name) {
@@ -1442,10 +1938,10 @@ impl Sema {
                 } else if self.classes.contains_key(name) {
                     Type::Class(name.clone())
                 } else if self.generic_types.contains_key(name) {
-                    SemanticError::MissingTypeArgs { name: name.clone(), span: span.clone() }.throw(&self.source)
+                    SemanticError::MissingTypeArgs { name: self.written_name(name), span: span.clone() }.throw(&self.source)
                 } else {
                     SemanticError::UnknownType {
-                        name: name.clone(),
+                        name: self.written_name(name),
                         span: span.clone(),
                     }.throw(&self.source)
                 }
@@ -1466,11 +1962,13 @@ impl Sema {
                         }.throw(&self.source);
                     }
                     let arg = Box::new(args[0].clone());
-                    return match name.as_str() {
+                    let ty = match name.as_str() {
                         "Unique" => Type::Unique(arg),
                         "Shared" => Type::Shared(arg),
                         _ => Type::Buffer(arg),
                     };
+                    self.see_buffer(&ty);
+                    return ty;
                 }
                 // Inside a generic template the arguments can still be type parameters
                 if args.iter().any(contains_type_param) {
@@ -1480,7 +1978,11 @@ impl Sema {
             }
             Type::Unique(inner) => Type::Unique(Box::new(self.canonicalize_type(inner, span))),
             Type::Shared(inner) => Type::Shared(Box::new(self.canonicalize_type(inner, span))),
-            Type::Buffer(inner) => Type::Buffer(Box::new(self.canonicalize_type(inner, span))),
+            Type::Buffer(inner) => {
+                let ty = Type::Buffer(Box::new(self.canonicalize_type(inner, span)));
+                self.see_buffer(&ty);
+                ty
+            }
             Type::Array(element, len) => Type::Array(Box::new(self.canonicalize_type(element, span)), *len),
             Type::Slice(element) => Type::Slice(Box::new(self.canonicalize_type(element, span))),
             Type::Tuple(items) => Type::Tuple(items.iter().map(|item| self.canonicalize_type(item, span)).collect()),
@@ -1552,9 +2054,15 @@ impl Sema {
             }
             DeclarationKind::Impl { target, methods, .. } => {
                 *target = self.canonicalize_type(target, &decl.span);
+                // `Self` in the impl's methods is its target
+                let outer_self = self.type_subst.insert("Self".to_string(), target.clone());
                 for m in methods.iter_mut() {
                     self.canonicalize_decl(m);
                 }
+                match outer_self {
+                    Some(outer) => self.type_subst.insert("Self".to_string(), outer),
+                    None => self.type_subst.remove("Self"),
+                };
             }
             DeclarationKind::Extern(ExternItem::Type { name, methods, .. }) => {
                 for m in methods.iter_mut() {
@@ -1668,6 +2176,8 @@ impl Sema {
                 if !type_params.is_empty() => {}
             DeclarationKind::Class { name, fields, methods, .. } => {
                 self.push_class(name.clone(), fields.clone());
+                // Its constructors are collected while its methods are declared
+                self.constructors.remove(name.as_str());
                 let prev_class = self.current_class.take();
                 self.current_class = Some(name.clone());
                 for method in methods.iter_mut() {
@@ -1693,8 +2203,12 @@ impl Sema {
                     let passable = match &p.ty {
                         Type::Int { .. } | Type::Float { .. } | Type::Char | Type::Handle(_) => true,
                         ty if ty.is_string() => true,
-                        // A char is a C `char`, so a `&Buffer<char>` is a `char *`
-                        Type::Ref(inner) => matches!(inner.as_ref(), Type::Buffer(element) if element.is_number() || **element == Type::Char),
+                        // An `Option` of an extern type is a pointer that's null for `None`
+                        ty if self.nullable_handle(ty) => true,
+                        // A char is a C `char`, so a `&Buffer<char>` is a `char *`. An `&Option` of an
+                        // extern type is an out-parameter, a pointer C writes a handle through
+                        Type::Ref(inner) => matches!(inner.as_ref(), Type::Buffer(element) if element.is_number() || **element == Type::Char)
+                            || self.is_out_param(inner),
                         Type::Slice(element) => element.is_number() || matches!(element.as_ref(), Type::Char | Type::Handle(_)),
                         _ => false,
                     };
@@ -1703,7 +2217,7 @@ impl Sema {
                     }
                 }
                 let ret = return_type.clone().unwrap_or(Type::Void);
-                if !(ret.is_number() || ret == Type::Void || ret.is_string() || matches!(ret, Type::Handle(_))) {
+                if !(ret.is_number() || ret == Type::Void || ret.is_string() || matches!(ret, Type::Handle(_)) || self.nullable_handle(&ret)) {
                     SemanticError::ExternReturnType { ty: ret, span: decl.span.clone() }.throw(&self.source);
                 }
                 self.push_func(name.clone(), params.clone(), ret, visibility.clone());
@@ -1721,6 +2235,11 @@ impl Sema {
                 let m = match (&self.current_class, &self.current_trait) {
                     (Some(cls), Some(tr)) => format!("{}_{}_{}", cls, tr, name),
                     (Some(cls), None) if cls != name => format!("{}_{}", cls, name),
+                    // A class's first constructor has its name, the others a number after it
+                    _ if is_ctor => {
+                        let span = decl.span.clone();
+                        self.add_constructor(name, params, &span)
+                    }
                     _ => name.clone(),
                 };
                 self.push_func(m.clone(), params.clone(), ret, visibility.clone());
@@ -1747,6 +2266,109 @@ impl Sema {
                 }
                 self.current_class = prev_class;
             }
+        }
+    }
+
+    /// What `owner::default()` calls, with its type: the `default` of the
+    /// owner's `impl Default`, or its constructor taking no arguments. `owner`
+    /// is a type, like `T` in a generic or `Bucket`. `None` if it's no type,
+    /// like a module whose function is called `default`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the type has no default value.
+    fn default_call(&self, owner: &str, span: &Span) -> Option<(String, Type)> {
+        // A type's own function called `default` is called like any other
+        if self.static_function(owner, "default").is_some() {
+            return None;
+        }
+        let ty = match self.type_subst.get(owner) {
+            Some(ty) => ty.clone(),
+            None => {
+                let name = self.aliases.get(owner).cloned().unwrap_or_else(|| owner.to_string());
+                if self.enums.contains_key(&name) {
+                    Type::Enum(name)
+                } else if self.classes.contains_key(&name) {
+                    Type::Class(name)
+                } else {
+                    return None;
+                }
+            }
+        };
+        let owner_name = ty.owner_name()?;
+        let from_impl = format!("{}_{}_default", owner_name, DEFAULT_TRAIT);
+        if let Some((_, ret, ..)) = self.functions.get(&from_impl) {
+            return Some((from_impl, ret.clone()));
+        }
+        if let Some(constructor) = self.default_constructor(&ty) {
+            return Some((constructor, ty));
+        }
+        diagnostic::throw(
+            format!("'{}' has no default value, give it a constructor taking no arguments or an `impl Default`",
+                crate::analysis::show_type(&ty)),
+            Some(span.clone()),
+            &self.source,
+        )
+    }
+
+    /// The constructor of the class `ty` that takes no arguments, if it has one.
+    fn default_constructor(&self, ty: &Type) -> Option<String> {
+        let Type::Class(class) = ty else { return None };
+        let constructors = self.constructors.get(class).cloned().unwrap_or_else(|| vec![class.clone()]);
+        constructors.into_iter().find(|ctor| self.functions.get(ctor).is_some_and(|(params, ..)| argument_range(params).0 == 0))
+    }
+
+    /// Adds a constructor with `params` to the class `class` and returns its
+    /// mangled name: the class's name for the first one, like `Point`, and
+    /// `Point#2`, `Point#3` for the others.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another constructor of the class takes the same number of
+    /// arguments, a call couldn't tell them apart.
+    fn add_constructor(&mut self, class: &str, params: &[Param], span: &Span) -> String {
+        let range = argument_range(params);
+        let existing = self.constructors.get(class).cloned().unwrap_or_default();
+        for other in &existing {
+            let other_range = self.functions.get(other).map(|(params, ..)| argument_range(params)).unwrap_or((0, 0));
+            if range.0 <= other_range.1 && other_range.0 <= range.1 {
+                let count = range.0.max(other_range.0);
+                diagnostic::throw(
+                    format!("'{}' has two constructors taking {} argument{}, a call couldn't tell them apart",
+                        self.written_name(class), count, if count == 1 { "" } else { "s" }),
+                    Some(span.clone()),
+                    &self.source,
+                );
+            }
+        }
+        let mangled = match existing.len() {
+            0 => class.to_string(),
+            n => format!("{}#{}", class, n + 1),
+        };
+        self.constructors.entry(class.to_string()).or_default().push(mangled.clone());
+        mangled
+    }
+
+    /// The constructor of the class `class` a call with `count` arguments
+    /// goes to, if the class has several. `None` if it has one or none, the
+    /// call is checked against that as usual.
+    ///
+    /// # Panics
+    ///
+    /// Panics if none of its constructors takes `count` arguments.
+    fn pick_constructor(&self, class: &str, count: usize, span: &Span) -> Option<String> {
+        let constructors = self.constructors.get(class).filter(|constructors| constructors.len() > 1)?;
+        let fits = |ctor: &&String| self.functions.get(*ctor).is_some_and(|(params, ..)| {
+            let (min, max) = argument_range(params);
+            min <= count && count <= max
+        });
+        match constructors.iter().find(fits) {
+            Some(ctor) => Some(ctor.clone()),
+            None => diagnostic::throw(
+                format!("'{}' has no constructor taking {} argument{}", self.written_name(class), count, if count == 1 { "" } else { "s" }),
+                Some(span.clone()),
+                &self.source,
+            ),
         }
     }
 
@@ -2009,8 +2631,9 @@ impl Sema {
         let module = std::mem::replace(&mut self.module, template.module.clone());
         let source = std::mem::replace(&mut self.source, template.source.clone());
         // Names in the template mean what they mean in its own module
-        let std_modules = std::mem::replace(&mut self.std_modules, template.imports.std_modules.clone());
+        let imported_modules = std::mem::replace(&mut self.imported_modules, template.imports.imported_modules.clone());
         let aliases = std::mem::replace(&mut self.aliases, template.imports.aliases.clone());
+        let ambiguous = std::mem::replace(&mut self.ambiguous, template.imports.ambiguous.clone());
 
         let result = f(self);
 
@@ -2022,14 +2645,15 @@ impl Sema {
         self.current_return_type = return_ty;
         self.module = module;
         self.source = source;
-        self.std_modules = std_modules;
+        self.imported_modules = imported_modules;
         self.aliases = aliases;
+        self.ambiguous = ambiguous;
         result
     }
 
     /// What the current module imports, for checking its generics' instances later.
     fn imports(&self) -> Imports {
-        Imports { std_modules: self.std_modules.clone(), aliases: self.aliases.clone() }
+        Imports { imported_modules: self.imported_modules.clone(), aliases: self.aliases.clone(), ambiguous: self.ambiguous.clone() }
     }
 
     /// Returns the instance of the generic class or enum `name` for the type
@@ -2063,6 +2687,12 @@ impl Sema {
         for param in &type_params {
             for bound in &param.bounds {
                 if !self.implements(&subst[&param.name], bound) {
+                    // Another module's impl can still come, like `impl Hash for String`
+                    // for a `HashMap<String, V>` in a signature
+                    if !self.impls_known {
+                        self.deferred_bounds.push((subst[&param.name].clone(), bound.clone(), span.clone(), self.module.clone()));
+                        continue;
+                    }
                     SemanticError::TraitNotImplemented {
                         ty: subst[&param.name].clone(),
                         trait_name: bound.clone(),
@@ -2143,10 +2773,100 @@ impl Sema {
     fn check_type_instance(&mut self, pending: PendingInstance) {
         let PendingInstance { mut decl, subst, module, source, imports } = pending;
         let template = GenericDecl { decl: decl.clone(), module, source, imports, class: None, outer_subst: HashMap::new() };
+        // A class's or enum's methods are only checked once something calls them, impls fully
+        let name = match &decl.kind {
+            DeclarationKind::Class { name, .. } | DeclarationKind::Enum { name, .. } => Some(name.clone()),
+            _ => None,
+        };
+        let Some(name) = name else {
+            self.in_template_context(subst, &template, |sema| {
+                sema.check_decl(&mut decl);
+            });
+            self.instances.push(decl);
+            return;
+        };
+        let instance = self.type_instance_decls.len();
+        let methods_template = GenericDecl { class: Some(name), ..template.clone() };
+        self.lazy_instance = Some(LazyInstance { instance, template: methods_template, subst: subst.clone() });
         self.in_template_context(subst, &template, |sema| {
             sema.check_decl(&mut decl);
         });
-        self.instances.push(decl);
+        self.lazy_instance = None;
+        self.type_instance_decls.push(decl);
+    }
+
+    /// Registers the methods of the instance being checked, see [`LazyInstance`],
+    /// to be checked once they're called. `methods` keeps the generic ones,
+    /// which are templates.
+    fn register_lazy_methods(&mut self, methods: &mut Vec<Declaration>, lazy: LazyInstance) {
+        for method in std::mem::take(methods) {
+            let mangled = match &method.kind {
+                DeclarationKind::Function { type_params, mangled: Some(mangled), .. } if type_params.is_empty() => mangled.clone(),
+                _ => {
+                    methods.push(method);
+                    continue;
+                }
+            };
+            // Codegen calls `equals` itself for `==`, sema never sees that call
+            if self.used_functions.contains_key(&mangled) || function_name(&method) == "equals" {
+                self.used_methods.push(mangled.clone());
+            }
+            self.lazy_methods.insert(mangled, LazyMethod {
+                instance: lazy.instance,
+                method,
+                template: lazy.template.clone(),
+                subst: lazy.subst.clone(),
+            });
+        }
+    }
+
+    /// Notes that a call goes to the function or method `mangled`. A method of
+    /// an instance of a generic class or enum gets checked then, see [`LazyMethod`].
+    fn use_method(&mut self, mangled: &str, span: &Span) {
+        if self.used_functions.contains_key(mangled) {
+            return;
+        }
+        self.used_functions.insert(mangled.to_string(), (span.clone(), self.source.clone()));
+        if self.lazy_methods.contains_key(mangled) {
+            self.used_methods.push(mangled.to_string());
+        }
+    }
+
+    /// Checks the lazy method `mangled` something called and adds it to its instance.
+    ///
+    /// If its code doesn't work for the instance's types, like `Vector<Statement>(3)`
+    /// needing a default `Statement`, the call needing it gets an error too, next
+    /// to the one in the method.
+    fn check_lazy_method(&mut self, mangled: &str) {
+        let Some(LazyMethod { instance, mut method, template, subst }) = self.lazy_methods.remove(mangled) else { return };
+        let errors_before = self.errors.len();
+        let result = diagnostic::catch(|| self.in_template_context(subst, &template, |sema| {
+            sema.check_decl(&mut method);
+        }));
+        let failed = result.is_err() || self.errors.len() > errors_before;
+        if let Err(error) = result {
+            self.errors.push(error);
+        }
+        if failed {
+            if let Some((span, source)) = self.used_functions.get(mangled).cloned() {
+                let class = template.class.clone().unwrap_or_default();
+                let what = match function_name(&method) {
+                    name if name == class => "this constructor".to_string(),
+                    name => format!("'{}'", name),
+                };
+                self.errors.push(CompileError {
+                    message: format!("{} of '{}' can't be used, its code doesn't work for these types, see the error in it",
+                        what, crate::analysis::show_type(&Type::Class(class))),
+                    span: Some(span),
+                    source,
+                    file: None,
+                });
+            }
+            return;
+        }
+        if let DeclarationKind::Class { methods, .. } | DeclarationKind::Enum { methods, .. } = &mut self.type_instance_decls[instance].kind {
+            methods.push(method);
+        }
     }
 
     /// The generic result type of a generic class or enum's constructors, like
@@ -2171,9 +2891,15 @@ impl Sema {
     fn instantiate_constructor(&mut self, name: &str, type_args: &[Type], args: &mut [Expr], expected: Option<&Type>, span: &Span) -> String {
         let generic = self.generic_types.get(name).cloned().unwrap();
         let DeclarationKind::Class { type_params, methods, .. } = &generic.decl.kind else {
-            unreachable!("only generic classes have constructors");
+            // `Option<T>()`: an enum's values are made with its variants
+            diagnostic::throw(
+                format!("'{}' is an enum, it has no constructor: make one with a variant, like `{}::{}`",
+                    self.written_name(name), self.written_name(name), first_variant(&generic.decl).unwrap_or("Variant")),
+                Some(span.clone()),
+                &self.source,
+            )
         };
-        let constructor_params = constructor_params(name, methods);
+        let constructor_params = constructor_params(name, methods, args.len());
 
         let declared: Vec<Type> = constructor_params.iter().map(|p| p.ty.clone()).collect();
         self.check_generic_args(args, &declared);
@@ -2200,7 +2926,8 @@ impl Sema {
         let DeclarationKind::Class { type_params, methods, .. } = &generic.decl.kind else {
             SemanticError::UnknownFunction { fn_name: class.to_string(), span: span.clone() }.throw(&self.source)
         };
-        let constructor_params = constructor_params(class, methods);
+        let names: Vec<String> = fields.iter().map(|(field, _)| field.clone()).collect();
+        let constructor_params = constructor_params_named(class, methods, &names);
 
         for (_, value) in fields.iter_mut() {
             self.check_expr(value);
@@ -2245,6 +2972,19 @@ impl Sema {
         let mut bindings: Vec<(Type, &Expr)> = Vec::new();
         if check_value {
             self.check_expr(value);
+        }
+        // Where an `Option` or `Result` around it is expected, like `Ok(n)` returned as an
+        // `Option<Result<int32, String>>`, it's the instance inside, which becomes `Some(...)` by itself
+        let inner = self.expected_instance_of(name, expected);
+        let expected = inner.as_ref().or(expected);
+        // Where an instance of this enum is expected, it's that one, like `Ok(value)` with
+        // `value: &int64` returned as a `Result<int64, String>` reads the number
+        if let (true, Some(Type::Enum(instance))) = (type_args.is_empty(), expected) {
+            if self.type_instances.get(instance).is_some_and(|(template, _)| template == name) {
+                return instance.clone();
+            }
+        }
+        if check_value {
             bindings.push((payload, value));
         }
         let self_type = Self::generic_self_type(name, type_params);
@@ -2262,6 +3002,10 @@ impl Sema {
             Type::Ref(inner) => inner,
             other => other,
         };
+        // A class with a constructor taking no arguments has a default without an impl
+        if trait_name == DEFAULT_TRAIT && self.default_constructor(ty).is_some() {
+            return true;
+        }
         ty.owner_name()
             .and_then(|owner| self.impls.get(&owner))
             .is_some_and(|traits| traits.iter().any(|t| t == trait_name))
@@ -2356,11 +3100,15 @@ impl Sema {
             StmtKind::Import(expr) => self.check_expr(expr),
             StmtKind::Expression(expr) => self.check_unused(expr),
             StmtKind::While { condition, body } => {
+                // Names an `is` in the condition binds exist in the body only
+                let is_mark = self.is_bindings.len();
+                self.keep_is_bindings = true;
                 self.check_condition(condition, "while condition");
                 let moved_before = self.moved.clone();
                 self.loop_depth += 1;
                 self.check_block(body);
                 self.loop_depth -= 1;
+                self.drop_is_bindings(is_mark);
                 // The body can run several times, a value moved in one round would be gone in the next
                 if let Some(var) = self.moved.iter().find(|var| !moved_before.contains(*var)) {
                     SemanticError::MoveInLoop { var: var.clone(), span: stmt_span.clone() }.throw(&self.source);
@@ -2548,6 +3296,9 @@ impl Sema {
     /// Panics if the condition isn't a `bool`, a block contains an error, or
     /// an `if` used as a value breaks the rules of [`Sema::check_value_block`].
     fn check_if(&mut self, condition: &mut Expr, then_block: &mut Block, else_block: &mut Option<Block>, result: Option<(Option<Type>, Span)>) -> Type {
+        // Names an `is` in the condition binds exist in the then branch only
+        let is_mark = self.is_bindings.len();
+        self.keep_is_bindings = true;
         self.check_condition(condition, "if condition");
         let as_value = result.is_some();
         let (expected, span) = result.unwrap_or((None, condition.span.clone()));
@@ -2558,6 +3309,7 @@ impl Sema {
         // function, like with `return`, never gets there
         let moved_before = self.moved.clone();
         self.check_branch(then_block, as_value.then_some(&mut result_ty), &span);
+        self.drop_is_bindings(is_mark);
         let mut moved_after = std::mem::replace(&mut self.moved, moved_before.clone());
         if block_returns(then_block) {
             moved_after = moved_before;
@@ -2599,7 +3351,7 @@ impl Sema {
     /// Panics if the pattern can't match a value of that type.
     fn check_pattern(&mut self, pattern: &mut Pattern, ty: &Type, span: &Span) {
         match pattern {
-            Pattern::EnumVariant { enum_name, variant, binding } => {
+            Pattern::EnumVariant { enum_name, variant, payload } => {
                 if let Some(qualified) = self.aliases.get(enum_name.as_str()) {
                     *enum_name = qualified.clone();
                 } else if enum_name == "Option" || enum_name == "Result" {
@@ -2620,7 +3372,12 @@ impl Sema {
                 let is_instance_of_pattern = self.type_instances.get(&scrut_enum)
                     .is_some_and(|(template, _)| template == enum_name
                         || ((enum_name == "Option" || enum_name == "Result") && *template == format!("{}::{}", enum_name.to_lowercase(), enum_name)));
-                if is_instance_of_pattern {
+                // `Type::Boolean` on a `type::Type` is its variant, also where `Type` alone could
+                // mean another type, like `llvm::Type`: the matched value says which one
+                let template = self.type_instances.get(&scrut_enum).map(|(template, _)| template.clone())
+                    .unwrap_or_else(|| scrut_enum.clone());
+                let written_like_matched = crate::analysis::written_name(&template) == enum_name.as_str();
+                if is_instance_of_pattern || written_like_matched {
                     *enum_name = scrut_enum.clone();
                 }
                 if enum_name != &scrut_enum {
@@ -2643,14 +3400,15 @@ impl Sema {
                         variant: variant.clone(),
                         span: span.clone(),
                     }.throw(&self.source));
-                if let Some(name) = binding {
+                // The payload matches its own pattern, like `x` or `Ok(x)` of `Some(Ok(x))`
+                if let Some(payload) = payload {
                     if payload_ty == Type::Void {
                         SemanticError::VariantWithoutPayload {
                             variant: format!("{}::{}", enum_name, variant),
                             span: span.clone(),
                         }.throw(&self.source);
                     }
-                    self.add_binding(&name.clone(), payload_ty);
+                    self.check_pattern(payload, &payload_ty, span);
                 }
             }
             // A name matches anything and gets the value
@@ -2754,11 +3512,11 @@ impl Sema {
     /// Only patterns whose items always match count. A pattern with `..`
     /// covers every length from its number of items on, the lengths below
     /// that need a pattern of exactly that length.
-    fn lists_cover_every_length(&self, element: &Type, arms: &[MatchArm]) -> bool {
+    fn lists_cover_every_length(&self, element: &Type, patterns: &[&Pattern]) -> bool {
         let mut exact = Vec::new();
         let mut from = None::<usize>;
-        for arm in arms {
-            let Pattern::List { before, rest, after } = &arm.pattern else { continue };
+        for pattern in patterns {
+            let Pattern::List { before, rest, after } = pattern else { continue };
             if !before.iter().chain(after).all(|item| self.irrefutable(item, element)) {
                 continue;
             }
@@ -2774,21 +3532,94 @@ impl Sema {
     /// Whether `arms` match every value of type `scrutinee_ty`: one of them
     /// matches anything, or they name every variant of an enum or both bools.
     fn covers_every_case(&self, scrutinee_ty: &Type, arms: &[MatchArm]) -> bool {
-        let catch_all = arms.iter().any(|arm| self.irrefutable(&arm.pattern, scrutinee_ty));
-        if catch_all {
-            return true;
-        }
-        if let Some((element, None)) = self.list_element(scrutinee_ty) {
-            return self.lists_cover_every_length(&element, arms);
-        }
-        match scrutinee_ty {
-            Type::Enum(name) => self.enums.get(name).is_some_and(|variants| variants.iter().all(|(variant, _, _)| {
-                arms.iter().any(|arm| matches!(&arm.pattern, Pattern::EnumVariant { variant: v, .. } if v == variant))
-            })),
+        let patterns: Vec<&Pattern> = arms.iter().map(|arm| &arm.pattern).collect();
+        self.patterns_cover(scrutinee_ty, &patterns)
+    }
+
+    /// Whether `patterns` together match every value of type `ty`, also
+    /// looking into payloads: `Some(Ok(x))`, `Some(Err(e))` and `None` match
+    /// every `Option<Result<T, E>>`.
+    fn patterns_cover(&self, ty: &Type, patterns: &[&Pattern]) -> bool {
+        let rows: Vec<Vec<Option<&Pattern>>> = patterns.iter().map(|pattern| vec![Some(*pattern)]).collect();
+        self.rows_cover(std::slice::from_ref(ty), &rows)
+    }
+
+    /// Whether `rows` match every combination of values of the types `types`.
+    /// Each row has a pattern per value, `None` for one matching anything.
+    ///
+    /// Looks at the first value: for each of its cases, like each variant of
+    /// an enum or `true` and `false`, the rows that can match it have to cover
+    /// the rest, with the case's payload in front. The parts of a tuple are
+    /// values of their own. Numbers and strings have too many cases, there
+    /// only the rows matching anything count.
+    fn rows_cover<'p>(&self, types: &[Type], rows: &[Vec<Option<&'p Pattern>>]) -> bool {
+        let Some((first, rest)) = types.split_first() else { return !rows.is_empty() };
+        // A pattern matching anything at the front is like none
+        let head = |row: &Vec<Option<&'p Pattern>>| -> Option<&'p Pattern> { row[0].filter(|pattern| !self.irrefutable(pattern, first)) };
+        let tail = |row: &[Option<&'p Pattern>]| -> Vec<Option<&'p Pattern>> { row[1..].to_vec() };
+
+        match first {
+            Type::Enum(name) => {
+                let Some(variants) = self.enums.get(name) else { return false };
+                variants.iter().all(|(variant, _, payload_ty)| {
+                    let has_payload = *payload_ty != Type::Void;
+                    let mut types = Vec::new();
+                    if has_payload {
+                        types.push(payload_ty.clone());
+                    }
+                    types.extend(rest.iter().cloned());
+                    let rows: Vec<Vec<Option<&Pattern>>> = rows.iter().filter_map(|row| {
+                        // `None` stands for the payload of a row matching anything, or written without one
+                        let payload = match head(row) {
+                            None => None,
+                            Some(Pattern::EnumVariant { variant: v, payload, .. }) if v == variant => payload.as_deref(),
+                            Some(_) => return None,
+                        };
+                        let mut specialized = Vec::new();
+                        if has_payload {
+                            specialized.push(payload);
+                        }
+                        specialized.extend(tail(row));
+                        Some(specialized)
+                    }).collect();
+                    self.rows_cover(&types, &rows)
+                })
+            }
             Type::Bool => [true, false].iter().all(|b| {
-                arms.iter().any(|arm| matches!(&arm.pattern, Pattern::Literal(expr) if matches!(expr.kind, ExprKind::Boolean(v) if v == *b)))
+                let rows: Vec<Vec<Option<&Pattern>>> = rows.iter().filter(|row| match head(row) {
+                    None => true,
+                    Some(Pattern::Literal(expr)) => matches!(expr.kind, ExprKind::Boolean(v) if v == *b),
+                    Some(_) => false,
+                }).map(|row| tail(row)).collect();
+                self.rows_cover(rest, &rows)
             }),
-            _ => false,
+            // The values of a tuple come in front of the rest
+            Type::Tuple(items) => {
+                let mut types = items.clone();
+                types.extend(rest.iter().cloned());
+                let rows: Vec<Vec<Option<&Pattern>>> = rows.iter().filter_map(|row| {
+                    let mut flat: Vec<Option<&Pattern>> = match head(row) {
+                        None => vec![None; items.len()],
+                        Some(Pattern::Tuple(parts)) if parts.len() == items.len() => parts.iter().map(Some).collect(),
+                        Some(_) => return None,
+                    };
+                    flat.extend(tail(row));
+                    Some(flat)
+                }).collect();
+                self.rows_cover(&types, &rows)
+            }
+            _ => {
+                let any: Vec<Vec<Option<&Pattern>>> = rows.iter().filter(|row| head(row).is_none()).map(|row| tail(row)).collect();
+                if self.rows_cover(rest, &any) {
+                    return true;
+                }
+                // List patterns of every length, like `[]` and `[first, ..rest]`, with rows matching anything after them
+                let Some((element, None)) = self.list_element(first) else { return false };
+                let tail_matches_anything = |row: &Vec<Option<&Pattern>>| row[1..].iter().zip(rest)
+                    .all(|(pattern, ty)| pattern.is_none_or(|pattern| self.irrefutable(pattern, ty)));
+                let lists: Vec<&Pattern> = rows.iter().filter(|row| tail_matches_anything(row)).filter_map(|row| row[0]).collect();
+                self.lists_cover_every_length(&element, &lists)
+            }
         }
     }
 
@@ -2800,7 +3631,20 @@ impl Sema {
         self.check_expr(expr)
     }
 
+    /// Checks `expr` and returns its type. Names bound by an `is` in it are
+    /// gone afterwards, unless it's a condition keeping them, see
+    /// [`Sema::keep_is_bindings`].
     fn check_expr(&mut self, expr: &mut Expr) -> Type {
+        let keep = std::mem::take(&mut self.keep_is_bindings);
+        let mark = self.is_bindings.len();
+        let ty = self.check_expr_inner(expr);
+        if !keep {
+            self.drop_is_bindings(mark);
+        }
+        ty
+    }
+
+    fn check_expr_inner(&mut self, expr: &mut Expr) -> Type {
         let span = expr.span.clone();
         // Only meant for this expression, not for the ones nested in it
         let expected = self.expected_type.take();
@@ -2838,10 +3682,25 @@ impl Sema {
                 }
             }
         }
-        // An imported enum like `ExitCode` of `import std::process::{ExitCode};` is `process::ExitCode`
-        if let ExprKind::EnumInit { name, .. } | ExprKind::ColonAccess { name, .. } = &mut expr.kind {
-            if let Some(qualified) = self.aliases.get(name.as_str()) {
-                *name = qualified.clone();
+        // `Shape::Rect(w, h)` gives the variant the tuple `(w, h)`, like `Shape::Rect((w, h))`.
+        // The parser sees a call with several arguments, like `fs::write(path, text)`
+        if let ExprKind::FunctionCall { name, receiver: None, params, type_args, .. } = &mut expr.kind {
+            let variant = name.rsplit_once("::").filter(|_| params.len() > 1).and_then(|(owner, tag)| {
+                let resolved = self.aliases.get(owner).cloned().unwrap_or_else(|| owner.to_string());
+                self.is_enum_name(&resolved).then(|| (owner.to_string(), tag.to_string()))
+            });
+            if let Some((owner, tag)) = variant {
+                let payload = Expr::new(ExprKind::Tuple(std::mem::take(params)), span.clone());
+                expr.kind = ExprKind::EnumInit { name: owner, type_args: std::mem::take(type_args), tag, value: Box::new(payload) };
+            }
+        }
+        // An imported enum like `ExitCode` of `import std::process::{ExitCode};` is `process::ExitCode`,
+        // an imported class like `Box` in `Box { value: 4 }` after `import util;` is `util::Box`
+        if let ExprKind::EnumInit { name, .. } | ExprKind::ColonAccess { name, .. } | ExprKind::StructInit { class: name, .. } = &mut expr.kind {
+            match self.aliases.get(name.as_str()) {
+                Some(qualified) => *name = qualified.clone(),
+                // `Type::Boolean` where two imported modules have a `Type`
+                None => self.check_unambiguous(name, &span),
             }
         }
 
@@ -2860,6 +3719,20 @@ impl Sema {
         };
         if let Some((name, type_args, params)) = module_item {
             expr.kind = ExprKind::FunctionCall { name, type_args, params, receiver: None, mangled: None };
+        }
+
+        // `T::default()` is the default value of `T`, see `std::default`: its impl's
+        // `default`, or the constructor taking no arguments
+        if let ExprKind::FunctionCall { name, receiver: None, params, type_args, mangled } = &mut expr.kind {
+            if let (Some(owner), true) = (name.strip_suffix("::default"), params.is_empty() && type_args.is_empty()) {
+                if let Some((target, ty)) = self.default_call(&owner.to_string(), &span) {
+                    *name = target.clone();
+                    *mangled = Some(target.clone());
+                    self.use_method(&target, &span);
+                    expr.ty = ty.clone();
+                    return ty;
+                }
+            }
         }
 
         // `Block::create(name)` calls the function `create` of the type `Block`
@@ -2882,10 +3755,14 @@ impl Sema {
         // `None` too, unless a function or variable has that name
         let variant = match &mut expr.kind {
             ExprKind::FunctionCall { name, receiver: None, params, type_args, .. }
-                if params.len() == 1 && !self.functions.contains_key(name.as_str()) && !self.generic_functions.contains_key(name.as_str()) =>
+                if !params.is_empty() && !self.functions.contains_key(name.as_str()) && !self.generic_functions.contains_key(name.as_str()) =>
             {
                 prelude_variant_enum(name).map(|enum_name| {
-                    let value = params.remove(0);
+                    // `Ok(a, b)` holds the tuple `(a, b)`
+                    let value = match params.len() {
+                        1 => params.remove(0),
+                        _ => Expr::new(ExprKind::Tuple(std::mem::take(params)), span.clone()),
+                    };
                     let enum_name = self.variant_enum(enum_name);
                     ExprKind::EnumInit { name: enum_name, type_args: std::mem::take(type_args), tag: name.clone(), value: Box::new(value) }
                 })
@@ -2902,7 +3779,25 @@ impl Sema {
 
         // `a ?? b` is the value in `a`, or `b` if there's none
         if matches!(&expr.kind, ExprKind::BinaryExpr { op: Token::QuestionQuestion, .. }) {
-            self.rewrite_default(expr);
+            self.rewrite_default(expr, expected.as_ref());
+        }
+
+        // A reference where one is wanted, like a `T` that's `&String` in
+        // `Option<&String>`, is copied as the reference
+        let copies_ref = match &expr.kind {
+            ExprKind::FunctionCall { name, receiver: Some(receiver), params, type_args, .. }
+                if name == "clone" && params.is_empty() && type_args.is_empty() => match self.probe_type(receiver) {
+                    ty @ Type::Ref(_) => expected.as_ref() == Some(&ty),
+                    _ => false,
+                },
+            _ => false,
+        };
+        if copies_ref {
+            let ExprKind::FunctionCall { receiver: Some(receiver), .. } = &mut expr.kind else { unreachable!() };
+            let mut receiver = std::mem::replace(receiver.as_mut(), Expr::new(ExprKind::Boolean(false), span.clone()));
+            let ty = self.check_receiver(&mut receiver);
+            *expr = receiver;
+            return ty;
         }
 
         // `x.clone()` copies any value with everything it owns, unless its type has an own `clone`
@@ -2976,6 +3871,8 @@ impl Sema {
             }
             // Made from a checked reference, see `read_through`
             ExprKind::Deref(_) => expr.ty.clone(),
+            // Made from a checked default of `??`, see `rewrite_default`
+            ExprKind::Kept(_) => expr.ty.clone(),
             ExprKind::NewBuffer(capacity) => {
                 self.check_expr(capacity);
                 expr.ty.clone()
@@ -3022,6 +3919,13 @@ impl Sema {
                     }
                 }
 
+                // Through a reference to a `Unique` or `Shared`, like `b.get(0).x`, the fields
+                // are those of the value it holds
+                let mut recv_ty = recv_ty;
+                if matches!(&recv_ty, Type::Ref(inner) if matches!(inner.as_ref(), Type::Unique(_) | Type::Shared(_))) {
+                    self.get_heap_value(object);
+                    recv_ty = object.ty.clone();
+                }
                 // Fields of a referenced value or one in a `Unique` or `Shared` are accessed directly
                 let peeled = match &recv_ty {
                     Type::Ref(inner) | Type::Unique(inner) | Type::Shared(inner) => (**inner).clone(),
@@ -3172,6 +4076,8 @@ impl Sema {
                 // Resolves type parameters, so `x as T` works in generic functions
                 *target = self.canonicalize_type(target, &span);
                 self.check_expr(value);
+                // `n as uint8` with `n: &int64` converts the number `n` refers to
+                read_through(value);
                 // A literal takes the target type directly, so `3000000000 as int64` works
                 if target.is_number() {
                     self.coerce_literal(value, target);
@@ -3213,8 +4119,13 @@ impl Sema {
                 Type::Ref(Box::new(inner_ty))
             },
             ExprKind::BinaryExpr { lhs, rhs, op } => {
-                // Operators only read their operands, `a + b` on strings makes a new one
+                // Operators only read their operands, `a + b` on strings makes a new one.
+                // The right side of `&&` only runs if the left one is true, so it has the
+                // names an `is` on the left binds. The `&&` itself keeps them if its context does
+                let and = matches!(op, Token::AndAnd);
+                self.keep_is_bindings = and;
                 self.check_borrowed(lhs, None);
+                self.keep_is_bindings = and;
                 self.check_borrowed(rhs, None);
                 // `x + 1` with `x: &int32` uses the number `x` refers to
                 read_through(lhs);
@@ -3247,6 +4158,9 @@ impl Sema {
                     let rhs = std::mem::replace(rhs.as_mut(), placeholder());
                     string_operation = Some(string_operator(lhs, op, rhs, &span));
                     if op.is_comparison() { Type::Bool } else { Type::string() }
+                } else if matches!(op, Token::EqEq | Token::NotEq) && compares_contents(&lhs.ty, &rhs.ty) {
+                    // Anything else compares what it holds, also through references
+                    Type::Bool
                 } else {
                     let (lhs_ty, rhs_ty) = (lhs.ty.clone(), rhs.ty.clone());
                     if lhs_ty != rhs_ty {
@@ -3327,6 +4241,9 @@ impl Sema {
                 self.pattern_owner = self.owner_of(scrutinee);
                 self.check_match_arms(&scrutinee_ty, arms, Some((expected.clone(), span.clone())))
             }
+            ExprKind::Is { value, pattern } => self.check_is(value, pattern, &span),
+            // The parser only makes it after `??`, which becomes a match before getting here
+            ExprKind::Leave(_) => diagnostic::throw("'return', 'break' and 'continue' only give no value after '??'", Some(span.clone()), &self.source),
             // Used as a value, both branches give one, see `check_if`
             // `if` only runs code, values are chosen with `? :`
             ExprKind::If { .. } => diagnostic::throw(
@@ -3395,16 +4312,61 @@ impl Sema {
                 // `x.f(args)` without a method `f` calls a free function `f(x, args)`,
                 // so functions like `unwrap(o: Option<T>)` can be called as `o.unwrap()`
                 if let Some(recv) = receiver.as_deref() {
-                    // Also an imported one, like `trim` of `import std::string::{trim};`
-                    let resolved = self.aliases.get(name.as_str()).cloned().unwrap_or_else(|| name.clone());
-                    let free_function = self.functions.contains_key(&resolved) || self.generic_functions.contains_key(&resolved);
+                    // The module's own one, which has the module's name like `lexer::contains_word`,
+                    // or an imported one, like `trim` of `import std::string::{trim};`
+                    let is_function = |s: &Self, name: &str| s.functions.contains_key(name) || s.generic_functions.contains_key(name);
+                    let own = format!("{}::{}", self.module.strip_prefix("std::").unwrap_or(&self.module), name);
+                    let resolved = if is_function(self, &own) {
+                        own
+                    } else {
+                        self.aliases.get(name.as_str()).cloned().unwrap_or_else(|| name.clone())
+                    };
+                    let free_function = is_function(self, &resolved);
                     if free_function && !self.has_method(recv, name, &span) {
                         let recv = receiver.take().unwrap();
                         params.insert(0, *recv);
                         *name = resolved;
                     }
                 }
+                // `text.try_as<int32>()` calls the trait function `try_as` of the impl for
+                // `int32` that takes a text, like `impl TryAs<String> for int32`
+                if let Some(recv) = receiver.as_deref() {
+                    if self.is_static_trait_function(name) && !self.has_self_method(recv, name, &span) {
+                        let target = match type_args.first() {
+                            Some(ty) => self.canonicalize_type(ty, &span),
+                            // `let n: Option<int32> = text.try_as()` wants an `int32`
+                            None => expected.as_ref().and_then(|ty| self.option_value_type(ty)).unwrap_or_else(|| diagnostic::throw(
+                                format!("can't tell which type '{}' should give, write it like `{}<int32>()`", name, name),
+                                Some(span.clone()), &self.source)),
+                        };
+                        let from = peel(self.probe_type(recv));
+                        let function = self.static_trait_impl(name, &from, &target).unwrap_or_else(|| {
+                            let (from, target) = (crate::analysis::show_type(&from), crate::analysis::show_type(&target));
+                            diagnostic::throw(
+                                format!("there's no '{}' from '{}' to '{}', it needs an impl like `impl TryAs<{}> for {}`", name, from, target, from, target),
+                                Some(span.clone()), &self.source)
+                        });
+                        let recv = receiver.take().unwrap();
+                        params.insert(0, *recv);
+                        *name = function;
+                        type_args.clear();
+                    }
+                }
+                // `text.try_as<int32>()`, or `try_as()` where an `int32` is expected, picks
+                // the impl of `TryAs<int32>` if `String` has several impls of `TryAs`
+                let target = match (receiver.is_some(), type_args.as_slice()) {
+                    (true, [ty]) => Some(self.canonicalize_type(&ty.clone(), &span)),
+                    (true, []) => expected.clone().filter(|ty| *ty != Type::Unknown),
+                    _ => None,
+                };
+                // A receiver that's a call itself is resolved in between, with its own target
+                let outer_target = std::mem::replace(&mut self.method_target, target);
+                let outer_used = self.method_target_used.replace(false);
                 let (mut m, recv_class) = self.resolve_call(name, receiver, &span);
+                self.method_target = outer_target;
+                if self.method_target_used.replace(outer_used) {
+                    type_args.clear();
+                }
                 if m.starts_with("Buffer.") {
                     let receiver = receiver.as_deref().expect("Buffer methods have a receiver");
                     let ty = self.check_buffer_method(name, receiver, params, &span);
@@ -3424,6 +4386,12 @@ impl Sema {
                         // Constructor call of a generic class, like `Box(5)`
                         m = self.instantiate_constructor(&name.clone(), type_args, params, expected.as_ref(), &span);
                         args_checked = true;
+                    }
+                }
+                // A class with several constructors: the one taking this many arguments
+                if receiver.is_none() {
+                    if let Some(constructor) = self.pick_constructor(&m, params.len(), &span) {
+                        m = constructor;
                     }
                 }
                 // Unknown names fall through to the unknown function error below
@@ -3468,7 +4436,7 @@ impl Sema {
 
                 // Free functions from other modules need to be public.
                 if recv_class.is_none() && matches!(visibility, Visibility::Private) && module != self.module {
-                    SemanticError::PrivateFunctionCall { func_name: name.clone(), parent: module, span: span.clone() }
+                    SemanticError::PrivateFunctionCall { func_name: self.written_name(name), parent: module, span: span.clone() }
                         .throw(&self.source);
                 }
 
@@ -3481,8 +4449,36 @@ impl Sema {
                 }
 
                 *mangled = Some(m.clone());
+                self.use_method(&m, &span);
 
                 let arg_defs: Vec<_> = defs.iter().filter(|d| d.name != "self").collect();
+                // C writes a handle through an out-parameter like `&target`, which needs a
+                // `mut` variable or a field of one to go into
+                if is_extern {
+                    for (def, arg) in arg_defs.iter().zip(params.iter()) {
+                        let Type::Ref(inner) = &def.ty else { continue };
+                        if !self.is_out_param(inner) {
+                            continue;
+                        }
+                        // `&target`, or a reference to one passed on, like a parameter `mut error: &Option<...>`
+                        let passes_reference = matches!(&arg.kind, ExprKind::Identifier(variable)
+                            if self.scope.get(variable).is_some_and(|(ty, _)| matches!(ty, Type::Ref(_))));
+                        let variable = match &arg.kind {
+                            ExprKind::Ref(place) => root_variable(place),
+                            _ if passes_reference => root_variable(arg),
+                            _ => None,
+                        };
+                        match variable {
+                            None => diagnostic::throw(
+                                format!("'{}' writes into this argument, pass a variable like `&target`", self.written_name(name)),
+                                Some(arg.span.clone()), &self.source),
+                            Some(variable) if self.scope.get(variable).is_some_and(|(_, mutable)| !mutable) => diagnostic::throw(
+                                format!("'{}' writes into '{}', declare it with `mut`", self.written_name(name), variable),
+                                Some(arg.span.clone()), &self.source),
+                            Some(_) => {}
+                        }
+                    }
+                }
                 for (i, def) in arg_defs.iter().enumerate() {
                     match params.get_mut(i) {
                         Some(arg) if matches!(arg.kind, ExprKind::SliceLiteral(_)) => {
@@ -3554,6 +4550,27 @@ impl Sema {
                 ret
             }
             ExprKind::Print(inner) => {
+                // A type with an `impl Print` of `std::string` prints its `to_string()`,
+                // numbers, bools, chars and strings are printed directly
+                let printed = peel(self.probe_type(inner));
+                let builtin = printed.is_number() || matches!(printed, Type::Bool | Type::Char) || printed.is_string();
+                if !builtin && self.implements(&printed, PRINT_TRAIT) {
+                    let receiver = std::mem::replace(inner.as_mut(), Expr::new(ExprKind::Boolean(false), span.clone()));
+                    **inner = Expr::new(ExprKind::FunctionCall {
+                        name: "to_string".to_string(),
+                        type_args: vec![],
+                        params: vec![],
+                        receiver: Some(Box::new(receiver)),
+                        mangled: None,
+                    }, span.clone());
+                } else if matches!(printed, Type::Class(_)) && !builtin {
+                    diagnostic::throw(
+                        format!("'{}' can't be printed, give it an `impl Print` with a `to_string` (see `std::string`)",
+                            written_type(&crate::analysis::show_type(&printed))),
+                        Some(span.clone()),
+                        &self.source,
+                    );
+                }
                 self.check_borrowed(inner, None);
                 // A reference to a number prints the number, not where it is
                 read_through(inner);
@@ -3592,11 +4609,58 @@ impl Sema {
     ///
     /// Panics if an integer literal doesn't fit into `target`.
     fn coerce(&mut self, expr: &mut Expr, target: &Type) {
+        // A `T` where a `Result<T, E>` is expected is its `Ok`, like `return 5;` in a
+        // function giving a `Result<int32, String>`, and where an `Option<T>` is
+        // expected its `Some`. An error is always written `Err(...)`
+        let wrapper = match self.result_types(target) {
+            Some((ok_ty, err_ty)) => Some(("Ok", ok_ty, Some(err_ty))),
+            None => self.option_value_type(target).map(|value_ty| ("Some", value_ty, None)),
+        };
+        if let (Some((variant, value_ty, err_ty)), Type::Enum(instance)) = (wrapper, target) {
+            if expr.ty == *target || expr.ty == Type::Unknown {
+                return;
+            }
+            self.coerce(expr, &value_ty);
+            if expr.ty == value_ty {
+                let span = expr.span.clone();
+                let value = std::mem::replace(expr, Expr::new(ExprKind::Boolean(false), span.clone()));
+                *expr = Expr {
+                    kind: ExprKind::FunctionCall {
+                        name: instance.clone(),
+                        type_args: vec![],
+                        params: vec![value],
+                        receiver: None,
+                        mangled: Some(format!("{}__{}", instance, variant)),
+                    },
+                    span,
+                    ty: target.clone(),
+                };
+            } else if err_ty.is_some_and(|err_ty| expr.ty == err_ty) {
+                diagnostic::throw(
+                    format!("an error has to be written `Err(...)`, only values of type '{}' become `Ok(...)` by themselves", value_ty),
+                    Some(expr.span.clone()), &self.source);
+            }
+            return;
+        }
         // `&T` from a `Shared<T>` or `Unique<T>`, a `T` from a reference to a number
         if let Type::Ref(wanted) = target {
-            if heap_inner(&expr.ty).is_some_and(|inner| inner == **wanted) {
+            if heap_inner(&expr.ty).is_some_and(|inner| inner == **wanted || same_bytes(&inner, wanted)) {
                 self.get_heap_value(expr);
             }
+        }
+        // A `char` is one byte: a Buffer of chars is one of bytes and the other way round
+        let byte_buffers = match (&expr.ty, target) {
+            (Type::Ref(inner), Type::Ref(wanted)) => same_bytes(inner, wanted),
+            // Lent to a `&Buffer<uint8>` parameter as it is
+            (ty, Type::Ref(wanted)) => same_bytes(ty, wanted),
+            (ty, wanted) => same_bytes(ty, wanted),
+        };
+        if byte_buffers {
+            expr.ty = match (&expr.ty, target) {
+                (Type::Ref(_), _) => target.clone(),
+                (_, Type::Ref(wanted)) => (**wanted).clone(),
+                _ => target.clone(),
+            };
         }
         if matches!(&expr.ty, Type::Ref(inner) if **inner == *target) {
             read_through(expr);
@@ -3729,9 +4793,13 @@ impl Sema {
             other => other,
         };
 
-        // `Buffer` methods are built in, marked like `Buffer.get` for `check_buffer_method`
+        // `Buffer` methods are built in, marked like `Buffer.get` for `check_buffer_method`.
+        // Others come from impls for the Buffer type
         if matches!(recv_ty, Type::Buffer(_)) {
-            return (format!("Buffer.{}", name), Some("Buffer".to_string()));
+            if is_buffer_method(name) {
+                return (format!("Buffer.{}", name), Some("Buffer".to_string()));
+            }
+            self.see_buffer(&recv_ty);
         }
 
         match recv_ty.owner_name() {
@@ -3871,6 +4939,11 @@ impl Sema {
     fn for_iterator(&mut self, values: &mut Expr) {
         let span = values.span.clone();
         if self.has_method(values, "next", &span) {
+            // `for x in self` in an iterator's method goes on with `self`, not a copy of it
+            if matches!(&values.kind, ExprKind::Identifier(name) if name == "self") {
+                let receiver = std::mem::replace(values, Expr::new(ExprKind::Boolean(false), span.clone()));
+                values.kind = ExprKind::Ref(Box::new(receiver));
+            }
             return;
         }
         if !self.has_method(values, "iter", &span) {
@@ -3896,13 +4969,16 @@ impl Sema {
     /// Whether the value of `receiver` has a method `name`.
     fn has_method(&mut self, receiver: &Expr, name: &str, span: &Span) -> bool {
         let ty = peel(self.probe_type(receiver));
-        match &ty {
-            Type::Buffer(_) => matches!(name, "get" | "take" | "set" | "capacity" | "resize"),
-            _ => ty.owner_name().is_some_and(|owner| {
-                let method = self.find_method(&owner, name, span);
-                self.functions.contains_key(&method) || self.generic_functions.contains_key(&method)
-            }),
+        if matches!(ty, Type::Buffer(_)) {
+            if is_buffer_method(name) {
+                return true;
+            }
+            self.see_buffer(&ty);
         }
+        ty.owner_name().is_some_and(|owner| {
+            let method = self.find_method(&owner, name, span);
+            self.functions.contains_key(&method) || self.generic_functions.contains_key(&method)
+        })
     }
 
     /// Mangled name of the method `name` called on a value whose type has the
@@ -3928,15 +5004,46 @@ impl Sema {
             // An extern type has the methods of the one it's a kind of
             [] => match self.inherited_method(class, name, span) {
                 Some(inherited) => inherited,
-                None => own,
+                None => {
+                    // `true.try_as<int32>()` without an `impl TryAs<int32> for bool`
+                    if let Some(target) = &self.method_target {
+                        let generic_trait = self.trait_substs.keys()
+                            .find(|tr| self.traits[tr.as_str()].iter().any(|m| function_name(m) == name))
+                            .map(|tr| tr.split('<').next().unwrap_or(tr).rsplit("::").next().unwrap_or(tr).to_string());
+                        if let Some(tr) = generic_trait {
+                            let target = crate::analysis::show_type(target);
+                            diagnostic::throw(format!("'{}' has no '{}' giving '{}', it needs an `impl {}<{}> for {}`",
+                                class, name, target, tr, target, class), Some(span.clone()), &self.source);
+                        }
+                    }
+                    own
+                }
             },
             [tr] => format!("{}_{}_{}", class, tr, name),
-            _ => SemanticError::AmbiguousMethod {
-                method: name.to_string(),
-                class: class.to_string(),
-                traits: traits.iter().map(|tr| tr.to_string()).collect(),
-                span: span.clone(),
-            }.throw(&self.source),
+            _ => {
+                // Impls of one trait for different types, like `TryAs<int32>` and
+                // `TryAs<float64>` for `String`: the one giving the wanted type
+                let gives_target = |tr: &&&String| self.method_target.as_ref().is_some_and(|target| {
+                    self.functions.get(&format!("{}_{}_{}", class, tr, name))
+                        .is_some_and(|(_, ret, ..)| ret == target || self.option_value_type(ret).as_ref() == Some(target))
+                });
+                match traits.iter().filter(gives_target).collect::<Vec<_>>().as_slice() {
+                    [tr] => {
+                        self.method_target_used.set(true);
+                        format!("{}_{}_{}", class, tr, name)
+                    }
+                    // Impls of one generic trait, the call just doesn't say which type it wants
+                    [] if self.method_target.is_none() && traits.iter().all(|tr| self.trait_substs.contains_key(tr.as_str())) =>
+                        diagnostic::throw(format!("'{}' of '{}' can give several types, write which one like `{}<int32>()`", name, class, name),
+                            Some(span.clone()), &self.source),
+                    _ => SemanticError::AmbiguousMethod {
+                        method: name.to_string(),
+                        class: class.to_string(),
+                        traits: traits.iter().map(|tr| tr.to_string()).collect(),
+                        span: span.clone(),
+                    }.throw(&self.source),
+                }
+            }
         }
     }
 
@@ -4073,7 +5180,14 @@ impl Sema {
                 (name.to_string(), vec![*value.clone()], constructor)
             }
             ExprKind::StructInit { class, fields, .. } => {
-                let (defs, _ret, _visibility, _module) = self.functions.get(class).cloned()
+                // With several constructors, the one taking exactly the fields given
+                let names: Vec<String> = fields.iter().map(|(field, _)| field.clone()).collect();
+                let constructor = self.constructors.get(class.as_str())
+                    .and_then(|constructors| constructors.iter()
+                        .find(|ctor| self.functions.get(*ctor).is_some_and(|(params, ..)| fits_names(params, &names))))
+                    .cloned()
+                    .unwrap_or_else(|| class.clone());
+                let (defs, _ret, _visibility, _module) = self.functions.get(&constructor).cloned()
                     .unwrap_or_else(|| SemanticError::UnknownFunction {
                         fn_name: class.to_string(),
                         span: span.clone(),
@@ -4123,7 +5237,7 @@ impl Sema {
                     }
                     ordered.push(arg);
                 }
-                (class.to_string(), ordered, class.to_string())
+                (class.to_string(), ordered, constructor)
             }
             _ => unreachable!(),
         };
@@ -4133,6 +5247,7 @@ impl Sema {
         } else {
             Type::Class(struct_name.clone())
         };
+        self.use_method(&constructor, &span);
         expr.kind = ExprKind::FunctionCall {
             name: struct_name.clone(),
             type_args: vec![],
@@ -4167,9 +5282,44 @@ impl Sema {
                         self.check_default(default, &field.ty);
                     }
                 }
-                self.scope = prev_scope;
-                self.moved = prev_moved;
+                self.scope = prev_scope.clone();
+                self.moved = prev_moved.clone();
 
+                // Every constructor runs the defaults, so with several each has to have the
+                // parameters they use. Copies are checked, the defaults are checked already
+                let constructors: Vec<Vec<Param>> = methods.iter().filter_map(|method| match &method.kind {
+                    DeclarationKind::Function { name: fn_name, params, .. } if fn_name == name => Some(params.clone()),
+                    _ => None,
+                }).collect();
+                if constructors.len() > 1 {
+                    for params in &constructors {
+                        for p in params {
+                            self.scope.insert(p.name.clone(), (p.ty.clone(), false));
+                        }
+                        for field in fields.iter() {
+                            let Some(default) = &field.value else { continue };
+                            let mut copy = default.clone();
+                            let ty = field.ty.clone();
+                            if let Err(error) = diagnostic::catch(|| self.check_default(&mut copy, &ty)) {
+                                let taken: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+                                diagnostic::throw(
+                                    format!("the default of field '{}' runs in every constructor, but it fails in `Constructor({})`: {}",
+                                        field.name, taken.join(", "), error.message),
+                                    Some(default.span.clone()),
+                                    &self.source,
+                                );
+                            }
+                        }
+                        self.scope = prev_scope.clone();
+                        self.moved = prev_moved.clone();
+                    }
+                }
+
+                // An instance of a generic class checks its methods once they're called
+                if let Some(lazy) = self.lazy_instance.take() {
+                    self.register_lazy_methods(methods, lazy);
+                    return Type::Class(name.clone());
+                }
                 let prev_class = self.current_class.take();
                 self.current_class = Some(name.clone());
                 for method in methods.iter_mut() {
@@ -4179,6 +5329,10 @@ impl Sema {
                 Type::Class(name.clone())
             }
             DeclarationKind::Enum { name, methods, .. } => {
+                if let Some(lazy) = self.lazy_instance.take() {
+                    self.register_lazy_methods(methods, lazy);
+                    return Type::Enum(name.clone());
+                }
                 let prev_class = self.current_class.replace(name.clone());
                 for method in methods.iter_mut() {
                     self.check_decl(method);
@@ -4232,6 +5386,25 @@ impl Sema {
                 }
                 if let Some(stmts) = body {
                     self.check_stmts(stmts);
+                }
+                // A function giving a value has to give one on every way through it. A
+                // constructor gives its object by itself
+                let is_ctor = self.current_class.as_ref() == Some(&*name);
+                if let (Some(stmts), false, false) = (body.as_ref(), ret == Type::Void, is_ctor) {
+                    if !returns_always(stmts) {
+                        self.loop_depth = prev_loops;
+                        self.scope = prev_scope;
+                        self.moved = prev_moved;
+                        self.borrowed = prev_borrowed;
+                        self.binding_roots = prev_roots;
+                        self.current_return_type = None;
+                        diagnostic::throw(
+                            format!("'{}' can reach its end without giving a '{}', it needs a `return` there",
+                                name.rsplit("::").next().unwrap_or(name), written_type(&crate::analysis::show_type(&ret))),
+                            Some(decl.span.clone()),
+                            &self.source,
+                        );
+                    }
                 }
                 self.loop_depth = prev_loops;
                 self.scope = prev_scope;
@@ -4321,6 +5494,71 @@ fn leaves(expr: &Expr) -> bool {
     }
 }
 
+/// The type `shown` like it's written in code, without the modules its names
+/// are from: `Result<Token, String>` for `result::Result<token::Token,String>`.
+fn written_type(shown: &str) -> String {
+    let mut written = String::new();
+    let mut word = String::new();
+    let mut chars = shown.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c.is_alphanumeric() || c == '_' {
+            word.push(c);
+            continue;
+        }
+        // A module's name before `::` is left out
+        if c == ':' && chars.peek() == Some(&':') {
+            chars.next();
+            word.clear();
+            continue;
+        }
+        written.push_str(&std::mem::take(&mut word));
+        written.push(c);
+        if c == ',' && chars.peek() != Some(&' ') {
+            written.push(' ');
+        }
+    }
+    written.push_str(&word);
+    written
+}
+
+/// Whether the statements of a function body always leave it with a value
+/// before their end: with `return` or a call like `panic(...)`, in every
+/// branch of an `if` or `match` at the end, or in a `while true` loop without
+/// `break` that can only be left that way.
+fn returns_always(body: &[Stmt]) -> bool {
+    // Any statement that always leaves ends it, the code after it never runs
+    body.iter().any(|stmt| match &stmt.kind {
+        StmtKind::While { condition: Expr { kind: ExprKind::Boolean(true), .. }, body } => !breaks(body),
+        _ => block_returns(&Block { stmts: vec![stmt.clone()], value: None }),
+    })
+}
+
+/// Whether `body`, a loop's body, has a `break` that leaves this loop, not
+/// one of a loop inside it.
+fn breaks(body: &[Stmt]) -> bool {
+    fn in_block(block: &Block) -> bool {
+        breaks(&block.stmts) || block.value.as_deref().is_some_and(in_expr)
+    }
+    fn in_expr(expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::If { then_block, else_block, .. } => in_block(then_block) || else_block.as_ref().is_some_and(in_block),
+            ExprKind::Match { arms, .. } => arms.iter().any(|arm| in_block(&arm.block)),
+            // `x ?? break`
+            ExprKind::Leave(stmt) => matches!(stmt.kind, StmtKind::Break),
+            ExprKind::BinaryExpr { lhs, rhs, .. } => in_expr(lhs) || in_expr(rhs),
+            _ => false,
+        }
+    }
+    body.iter().any(|stmt| match &stmt.kind {
+        StmtKind::Break => true,
+        StmtKind::Expression(expr) | StmtKind::Return(expr) => in_expr(expr),
+        StmtKind::Instantiation { value, .. } | StmtKind::Destructure { value, .. } => in_expr(value),
+        // A `break` in an inner loop leaves that one
+        StmtKind::While { .. } => false,
+        _ => false,
+    })
+}
+
 /// Whether `block` always leaves the function, with `return`, `panic(...)` or
 /// `process::exit(...)`, also in every branch of an `if` or `match` at its
 /// end. Unlike [`block_leaves`], `break` and `continue` don't count, the code
@@ -4385,6 +5623,44 @@ fn is_leaving_call(expr: &Expr) -> bool {
     matches!(&expr.kind, ExprKind::FunctionCall { name, receiver: None, .. } if name == "panic" || name == "process::exit")
 }
 
+/// Whether `ty` contains `Self`, the type implementing a trait.
+fn has_self_type(ty: &Type) -> bool {
+    match ty {
+        Type::Param(name) => name == "Self",
+        Type::Ref(inner) | Type::Unique(inner) | Type::Shared(inner) | Type::Buffer(inner)
+            | Type::Array(inner, _) | Type::Slice(inner) => has_self_type(inner),
+        Type::Generic { args, .. } | Type::Tuple(args) => args.iter().any(has_self_type),
+        _ => false,
+    }
+}
+
+/// `ty` with `Self` replaced by `target`.
+fn replace_self(ty: &Type, target: &Type) -> Type {
+    let inner = |t: &Type| Box::new(replace_self(t, target));
+    match ty {
+        Type::Param(name) if name == "Self" => target.clone(),
+        Type::Ref(t) => Type::Ref(inner(t)),
+        Type::Unique(t) => Type::Unique(inner(t)),
+        Type::Shared(t) => Type::Shared(inner(t)),
+        Type::Buffer(t) => Type::Buffer(inner(t)),
+        Type::Slice(t) => Type::Slice(inner(t)),
+        Type::Array(t, len) => Type::Array(inner(t), *len),
+        Type::Tuple(items) => Type::Tuple(items.iter().map(|t| replace_self(t, target)).collect()),
+        Type::Generic { name, args } => Type::Generic { name: name.clone(), args: args.iter().map(|t| replace_self(t, target)).collect() },
+        other => other.clone(),
+    }
+}
+
+/// Whether `a` and `b` are different Buffers or slices of one-byte values,
+/// `char` and `uint8`, which are the same memory.
+fn same_bytes(a: &Type, b: &Type) -> bool {
+    let is_byte = |ty: &Type| matches!(ty, Type::Char | Type::Int { bits: 8, signed: false });
+    match (a, b) {
+        (Type::Buffer(x), Type::Buffer(y)) | (Type::Slice(x), Type::Slice(y)) => x != y && is_byte(x) && is_byte(y),
+        _ => false,
+    }
+}
+
 /// Whether the generic class `template` is the `Vector` of `std::vector`,
 /// or a program's own `Vector`, which list patterns and slices work with.
 fn is_vector(template: &str) -> bool {
@@ -4416,6 +5692,22 @@ fn read_through(expr: &mut Expr) {
     *expr = Expr { kind: ExprKind::Deref(Box::new(reference)), span, ty: value_ty };
 }
 
+/// `ty` without the references to it, like `Point` for `&&Point`.
+pub fn without_refs(ty: &Type) -> &Type {
+    match ty {
+        Type::Ref(inner) => without_refs(inner),
+        other => other,
+    }
+}
+
+/// Whether `==` on a `lhs` and a `rhs` compares what they hold, see
+/// `CodegenContext::values_equal`: the same type, each maybe through
+/// references, other than a number, bool or char compared directly.
+pub fn compares_contents(lhs: &Type, rhs: &Type) -> bool {
+    let ty = without_refs(lhs);
+    ty == without_refs(rhs) && !(ty.is_number() || matches!(ty, Type::Bool | Type::Char | Type::Unknown | Type::Void))
+}
+
 /// The type behind a reference, `Unique` or `Shared`, whose fields and
 /// methods are used through it. Other types as they are.
 fn peel(ty: Type) -> Type {
@@ -4423,6 +5715,11 @@ fn peel(ty: Type) -> Type {
         Type::Ref(inner) | Type::Unique(inner) | Type::Shared(inner) => *inner,
         other => other,
     }
+}
+
+/// Whether `name` is a built-in method of `Buffer`, see `check_buffer_method`.
+fn is_buffer_method(name: &str) -> bool {
+    matches!(name, "get" | "take" | "set" | "capacity" | "resize")
 }
 
 /// Whether `ty` contains a type parameter like `T`, also nested like in `Box<T>`.
@@ -4449,13 +5746,56 @@ fn instance_name(name: &str, type_params: &[TypeParam], subst: &HashMap<String, 
 
 /// Parameters of the constructor of the class `class` among its `methods`,
 /// empty if it has none.
-fn constructor_params(class: &str, methods: &[Declaration]) -> Vec<Param> {
-    methods.iter()
-        .find_map(|m| match &m.kind {
+/// The name of the first variant of `decl` if it's an enum, for showing how one is made.
+fn first_variant(decl: &Declaration) -> Option<&str> {
+    match &decl.kind {
+        DeclarationKind::Enum { fields, .. } => fields.first().map(|(variant, ..)| variant.as_str()),
+        _ => None,
+    }
+}
+
+fn constructor_params(class: &str, methods: &[Declaration], count: usize) -> Vec<Param> {
+    let constructors: Vec<Vec<Param>> = methods.iter()
+        .filter_map(|m| match &m.kind {
             DeclarationKind::Function { name, params, .. } if name == class => Some(params.clone()),
             _ => None,
         })
-        .unwrap_or_default()
+        .collect();
+    // With several, the one a call with `count` arguments goes to
+    let fits = |params: &&Vec<Param>| {
+        let (min, max) = argument_range(params);
+        min <= count && count <= max
+    };
+    constructors.iter().find(fits).or(constructors.first()).cloned().unwrap_or_default()
+}
+
+/// The parameters of the constructor of `class` a brace initializer setting
+/// `names`, like `Point { x: 1, y: 2 }`, goes to: one taking each of them
+/// that needs no others. The first constructor if none does.
+fn constructor_params_named(class: &str, methods: &[Declaration], names: &[String]) -> Vec<Param> {
+    let constructors: Vec<Vec<Param>> = methods.iter()
+        .filter_map(|m| match &m.kind {
+            DeclarationKind::Function { name, params, .. } if name == class => Some(params.clone()),
+            _ => None,
+        })
+        .collect();
+    constructors.iter().find(|params| fits_names(params, names)).or(constructors.first()).cloned().unwrap_or_default()
+}
+
+/// Whether a function with `params` can be called with exactly the
+/// arguments named `names`: it takes each of them, and the ones it doesn't
+/// get have defaults.
+fn fits_names(params: &[Param], names: &[String]) -> bool {
+    let params: Vec<&Param> = params.iter().filter(|p| p.name != "self").collect();
+    names.iter().all(|name| params.iter().any(|p| p.name == *name))
+        && params.iter().all(|p| p.value.is_some() || names.contains(&p.name))
+}
+
+/// How many arguments a function with `params` takes: at least the ones
+/// without default, at most all of them. `self` doesn't count.
+fn argument_range(params: &[Param]) -> (usize, usize) {
+    let params: Vec<&Param> = params.iter().filter(|p| p.name != "self").collect();
+    (params.iter().filter(|p| p.value.is_none()).count(), params.len())
 }
 
 /// The variable a place expression like `a.b.c` starts at, `a` here. `None`
@@ -4468,6 +5808,14 @@ pub const SLICE_LEN: &str = "builtin.slice_len";
 
 /// The mangled name of the built-in `a.get()` of a `Shared` or `Unique`.
 pub const GET: &str = "builtin.get";
+
+/// The trait `Print` of `std::string`, whose `to_string` `print` uses for the
+/// types it can't print by itself, like classes.
+const PRINT_TRAIT: &str = "string::Print";
+
+/// The trait `Default` of `std::default`, which a class with a constructor
+/// taking no arguments has without an impl, see [`Sema::implements`].
+const DEFAULT_TRAIT: &str = "default::Default";
 
 /// The variable a moved path like `p.left` belongs to, `p`.
 fn path_root(path: &str) -> &str {

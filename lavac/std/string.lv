@@ -14,6 +14,21 @@ pub func is_digit(c: char) -> bool {
   return c >= '0' && c <= '9';
 }
 
+// The value of `c` as a digit, `10` for `'a'` or `'A'` up to `35` for `'z'`.
+// `255` if it's no digit.
+func digit_value(c: char) -> uint8 {
+  if is_digit(c) {
+    return c as uint8 - '0';
+  }
+  if c >= 'a' && c <= 'z' {
+    return c as uint8 - 'a' + 10;
+  }
+  if c >= 'A' && c <= 'Z' {
+    return c as uint8 - 'A' + 10;
+  }
+  return 255;
+}
+
 pub func is_alpha(c: char) -> bool {
   return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z';
 }
@@ -27,6 +42,22 @@ pub func is_whitespace(c: char) -> bool {
 }
 
 impl String {
+  // Whether the text is only digits of `base`, like `"ff"` for 16. The digits
+  // after 9 are the letters, so `base` goes up to 36. False for an empty text.
+  pub func is_digit(&self, base: uint8) -> bool {
+    if self.len() == 0 {
+      return false;
+    }
+    mut i: uint64 = 0;
+    while i < self.len() {
+      if digit_value(self.char_at(i)) >= base {
+        return false;
+      }
+      i = i + 1;
+    }
+    return true;
+  }
+
   pub func starts_with(&self, prefix: &String) -> bool {
     if prefix.len() > self.len() {
       return false;

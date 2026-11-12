@@ -1,13 +1,90 @@
-import llvm;
-import modules;
-import std::path::{Path};
 import codegen_ctx;
-pub class Program {
-  pub context: CodegenContext;
-  module_graph: &ModuleGraph;
+import std::vector::{Vector};
+import modules;
+import parser;
+import statement;
+import std::result::{Result};
+import std::process;
+import std::process::{run};
+import llvm;
+import std::option::{Option};
+import std::path::{Path};
 
-  pub func build(&self, path: &Path){
-    self.context.build_entry();
+pub enum CompileError {
+  TargetTripleInvalid => TargetTriple,
+  CompilationFailure => String,
+
+  pub func message(&self) -> String {
+    match self {
+      CompileError::TargetTripleInvalid(triple) => "Couldn't build Target from Triple " + triple.arch
+      CompileError::CompilationFailure(message) => "An error occured while compiling: " + message
+    }
 
   }
 }
+
+pub class Program {
+  pub context: CodegenContext;
+
+  pub func build(&self, graph: &ModuleGraph) -> Result<Program, Vector<CompileError>> {
+    self.context.build_entry();
+
+    mut errors = Vector<CompileError>();
+    mut asts = Vector<Vector<Statement>>();
+    for module in graph.modules { 
+       let stmts = Parser::from_source(module.source).parse();
+       asts.push(stmts);
+    }
+
+    for module in asts {
+      for stmt in module {
+        stmt.codegen(self.context);
+      }
+    }
+
+    if !self.context.builder.get_insert_block().has_terminator() {
+      let zero = self.context.context.i32_type().const_int(0, false);
+      self.context.builder.build_return(Some(zero));
+    }
+
+    mut verify_error: Option<String> = None;
+    self.context.module.verify(&verify_error);
+    if verify_error is Some(err) {
+      errors.push(CompileError::CompilationFailure(err));
+      return Err(errors);
+    }
+
+    let triple = TargetTriple();
+    let target = Target::from_triple(triple);
+    self.context.module.set_target(triple);
+
+    if target is Some(t) {
+      let machine = TargetMachine::create(t, triple);
+      let layout = machine.new_layout();
+      self.context.module.set_layout(layout);
+
+      let object = Path("build/main.o");
+      let err = machine.compile(self.context.module, object);
+      if err is Some(e) {
+        errors.push(CompileError::CompilationFailure(e));
+        return Err(errors);
+      }
+
+      self.link(object, Path("build/main"));
+      return self;
+    }
+
+    errors.push(CompileError::TargetTripleInvalid(triple));
+    return Err(errors);
+  }
+
+  // Links the object file `object` into the executable `executable`
+  func link(&self, object: &Path, executable: &Path) -> Result<Path, String> {
+    let command = "cc " + object.to_string() + " -o " + executable.to_string();
+    return match process::run(command) {
+      Ok(code) => code.is_success() ? Ok(executable.clone()) : Err("linking failed: " + command),
+      Err(error) => Err("couldn't run cc: " + error),
+    };
+  }
+}
+

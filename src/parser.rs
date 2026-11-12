@@ -68,6 +68,11 @@ pub struct Parser {
     impl_params: Option<Vec<TypeParam>>,
     /// Identifiers read as another name, see [`Parser::with_renames`].
     renames: HashMap<String, String>,
+    /// The other way round: the written name of each renamed one, see [`Parser::written`].
+    written_names: HashMap<String, String>,
+    /// Whether the last consumed token was a `.` or `::`. The name after one
+    /// is a field, method, variant or another module's item, never renamed.
+    after_member: bool,
     /// How many `for` loops were parsed, each one's hidden iterator variable gets its own name.
     for_loops: usize,
 }
@@ -76,15 +81,33 @@ impl Parser {
     /// Creates a parser for the source code in `string`. Every identifier
     /// that's a key of `renames` is read as its value, like `read` as
     /// `fs::read` in the standard library module `std::fs` (see
-    /// [`Module::renames`](crate::module::Module::renames)).
+    /// [`Module::renames`](crate::module::Module::renames)). Names after a
+    /// `.` or `::`, like `x.read` or `Kind::Name`, aren't renamed, and neither
+    /// are those of variables, parameters, fields, variants and methods, see
+    /// [`Parser::written`].
     pub fn with_renames(string: String, renames: HashMap<String, String>) -> Self {
-        Self { lexer: Lexer::new(string), allow_brace_init: true, type_params: vec![], impl_params: None, renames, for_loops: 0 }
+        let written_names = renames.iter().map(|(written, renamed)| (renamed.clone(), written.clone())).collect();
+        Self {
+            lexer: Lexer::new(string), allow_brace_init: true, type_params: vec![], impl_params: None,
+            renames, written_names, after_member: false, for_loops: 0,
+        }
+    }
+
+    /// `name` as written, without the module's name the renaming gave it.
+    ///
+    /// Only names of top-level items get the module's name: types, called
+    /// functions and paths like `Kind::Name`. A variable, parameter, field,
+    /// variant or method with the same name as one, like a field `position`
+    /// in a module with a `func position`, keeps the written name, also where
+    /// it's used.
+    fn written(&self, name: &str) -> String {
+        self.written_names.get(name).cloned().unwrap_or_else(|| name.to_string())
     }
 
     /// `token` with its identifier renamed, see [`Parser::with_renames`].
     fn renamed(&self, token: Token) -> Token {
         match token {
-            Token::Identifier(name) => match self.renames.get(&name) {
+            Token::Identifier(name) if !self.after_member => match self.renames.get(&name) {
                 Some(renamed) => Token::Identifier(renamed.clone()),
                 None => Token::Identifier(name),
             },
@@ -139,7 +162,11 @@ impl Parser {
     /// Panics if lexing fails.
     fn next_token(&mut self) -> (Token, Span) {
         match self.lexer.get_next_token() {
-            Ok((token, span)) => (self.renamed(token), span),
+            Ok((token, span)) => {
+                let token = self.renamed(token);
+                self.after_member = matches!(token, Token::Dot | Token::ColonColon);
+                (token, span)
+            }
             Err(e) => ParseError::Lex(e).throw(&self.lexer.source),
         }
     }
@@ -392,7 +419,7 @@ impl Parser {
     /// Panics if the loop contains a syntax error.
     fn parse_for(&mut self, span: Span) -> StmtKind {
         let (binding, _) = self.expect(Token::Identifier(String::new()), "as variable of for loop");
-        let binding = binding.to_string();
+        let binding = self.written(&binding.to_string());
         match self.next_token() {
             (Token::Identifier(word), _) if word == "in" => {}
             (got, span) => diagnostic::throw(format!("expected 'in' after the variable of a for loop, got '{}'", got), Some(span), &self.lexer.source),
@@ -410,8 +437,23 @@ impl Parser {
             receiver: Some(Box::new(expr(ExprKind::Identifier(iterator.clone()), &iterable.span))),
             mangled: None,
         }, &iterable.span);
+        // The value is bound to a hidden name first, then by a `let` written at the
+        // `for`, which gives the variable its type in the editor
+        let hidden = format!("{}$value", iterator);
+        let mut body = body;
+        body.insert(0, Stmt::new(StmtKind::Instantiation {
+            name: binding,
+            typedef: None,
+            value: expr(ExprKind::Identifier(hidden.clone()), &span),
+            mutable: false,
+        }, span.clone(), Type::Unknown));
+        let binding = hidden;
         let arm = |variant: &str, binding: Option<String>, stmts: Vec<Stmt>| MatchArm {
-            pattern: Pattern::EnumVariant { enum_name: "Option".to_string(), variant: variant.to_string(), binding },
+            pattern: Pattern::EnumVariant {
+                enum_name: "Option".to_string(),
+                variant: variant.to_string(),
+                payload: binding.map(|name| Box::new(Pattern::name(&name, span.clone()))),
+            },
             block: Block { stmts, value: None },
             span: span.clone(),
         };
@@ -577,30 +619,43 @@ impl Parser {
         }
     }
 
-    /// Parses the pattern of a match arm.
-    ///
-    /// Supported patterns are the wildcard `_`, enum variants like `Color::Red`
-    /// or `Shape::Circle(c)` with an optional binding, identifiers and
-    /// bool, int and string literals.
+    /// Parses the payload `(pattern)` of an enum variant pattern, if there's
+    /// one. Several patterns like `(w, h)` match a tuple payload.
     ///
     /// # Panics
     ///
-    /// Panics if the next token can't start a pattern.
-    /// Parses the binding `(name)` of an enum variant pattern, if there's one.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the parentheses don't hold a name.
-    fn parse_pattern_binding(&mut self) -> Option<String> {
+    /// Panics if the parentheses don't hold patterns separated by commas.
+    fn parse_variant_payload(&mut self) -> Option<Box<Pattern>> {
         if !matches!(self.peek().0, Token::LParen) {
             return None;
         }
         self.consume();
-        let (bind_tok, _) = self.expect(Token::Identifier("binding".to_string()), "in pattern binding");
-        self.expect(Token::RParen, "after pattern binding");
-        Some(bind_tok.to_string())
+        let mut items = Vec::new();
+        while !matches!(self.peek_or_eof("in variant pattern").0, Token::RParen) {
+            items.push(self.parse_pattern().0);
+            if !matches!(self.peek_or_eof("in variant pattern").0, Token::RParen) {
+                self.expect(Token::Comma, "between the patterns of a variant");
+            }
+        }
+        let (_, close) = self.expect(Token::RParen, "after variant pattern");
+        let payload = match items.len() {
+            0 => diagnostic::throw("a variant pattern needs a pattern in its parentheses, like `Some(x)`", Some(close), &self.lexer.source),
+            1 => items.remove(0),
+            _ => Pattern::Tuple(items),
+        };
+        Some(Box::new(payload))
     }
 
+    /// Parses the pattern of a match arm or an `is`.
+    ///
+    /// Supported patterns are the wildcard `_`, names, bool, int, char and
+    /// string literals, enum variants like `Color::Red`, `Shape::Circle(c)`
+    /// or `Some(Ok(x))` with a pattern for their payload, and list and tuple
+    /// patterns.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the next token can't start a pattern.
     fn parse_pattern(&mut self) -> (Pattern, Span) {
         let (tok, span) = self.next_token();
 
@@ -608,20 +663,27 @@ impl Parser {
             Token::Identifier(name) if name == "_" => (Pattern::Wildcard, span),
             Token::Identifier(name) => {
                 if matches!(self.peek().0, Token::ColonColon) {
-                    self.consume();
-                    let (variant_tok, _) = self.expect(
-                        Token::Identifier("variant".to_string()),
-                        "after '::' in pattern",
-                    );
-                    let variant = variant_tok.to_string();
-                    let binding = self.parse_pattern_binding();
-                    (Pattern::EnumVariant { enum_name: name, variant, binding }, span)
+                    // `Kind::Round`, or with the enum's module `shapes::Kind::Round`:
+                    // the last name is the variant, the ones before it the enum
+                    let mut path = vec![name];
+                    while matches!(self.peek().0, Token::ColonColon) {
+                        self.consume();
+                        let (segment, _) = self.expect(
+                            Token::Identifier("variant".to_string()),
+                            "after '::' in pattern",
+                        );
+                        path.push(segment.to_string());
+                    }
+                    let variant = path.pop().expect("a path has a name after its `::`");
+                    let payload = self.parse_variant_payload();
+                    (Pattern::EnumVariant { enum_name: path.join("::"), variant, payload }, span)
                 } else if let Some(enum_name) = prelude_variant_enum(&name) {
                     // `Ok(x)`, `Err(e)`, `Some(x)` and `None` need no `Result::` or `Option::`
-                    let binding = self.parse_pattern_binding();
-                    (Pattern::EnumVariant { enum_name: enum_name.to_string(), variant: name, binding }, span)
+                    let payload = self.parse_variant_payload();
+                    (Pattern::EnumVariant { enum_name: enum_name.to_string(), variant: name, payload }, span)
                 } else {
-                    (Pattern::Literal(Expr::new(ExprKind::Identifier(name), span.clone())), span)
+                    // A name the pattern binds, a variable
+                    (Pattern::Literal(Expr::new(ExprKind::Identifier(self.written(&name)), span.clone())), span)
                 }
             }
             Token::True  => (Pattern::Literal(Expr::new(ExprKind::Boolean(true),  span.clone())), span),
@@ -674,7 +736,7 @@ impl Parser {
                 let binding = match self.peek().0 {
                     Token::Identifier(name) => {
                         self.consume();
-                        Some(name)
+                        Some(self.written(&name))
                     }
                     _ => None,
                 };
@@ -706,6 +768,11 @@ impl Parser {
     /// Panics if the declaration contains a syntax error.
     fn parse_function_declaration(&mut self, parent: Option<String>, visibility: Visibility) -> DeclarationKind {
         let (name, _) = self.expect(Token::Identifier(String::new()), "in function declaration");
+        // A method keeps its name, only top-level functions get the module's name
+        let name = match parent {
+            Some(_) => Token::Identifier(self.written(&name.to_string())),
+            None => name,
+        };
         let mut type_params = self.parse_optional_type_params();
 
         // The type parameters are only known inside this function, together
@@ -828,7 +895,11 @@ impl Parser {
             parent: None,
             mangled: None,
             visibility,
-            external: Some(Extern { symbol: symbol.unwrap_or(name), variadic }),
+            // The C function's name is the one written, without the module's name
+            external: Some(Extern {
+                symbol: symbol.unwrap_or_else(|| name.rsplit_once("::").map_or(name.clone(), |(_, written)| written.to_string())),
+                variadic,
+            }),
         }
     }
 
@@ -987,6 +1058,7 @@ impl Parser {
     /// Panics if the method contains a syntax error.
     fn parse_trait_method(&mut self, trait_name: &str, visibility: Visibility) -> DeclarationKind {
         let (name, _) = self.expect(Token::Identifier(String::new()), "in trait method");
+        let name = Token::Identifier(self.written(&name.to_string()));
         let params = self.parse_params(Some(trait_name));
         let return_type = if matches!(self.peek().0, Token::Arrow) {
             self.consume(); // '->'
@@ -1791,6 +1863,8 @@ impl Parser {
             }
 
             let (name, name_span) = self.expect(Token::Identifier("enum name".to_string()), "in enum body");
+            // A variant keeps its name, like `Name` in an enum of a module with a class `Name`
+            let name = Token::Identifier(self.written(&name.to_string()));
             let (ty, ty_span) = match self.peek_or_eof("in enum body") {
                 (Token::ThickArrow, _) => {
                     self.consume();
@@ -1837,7 +1911,7 @@ impl Parser {
             let mut names = Vec::new();
             while !matches!(self.peek_or_eof("in tuple of variables").0, Token::RParen) {
                 let (name, _) = self.expect(Token::Identifier(String::new()), "in tuple of variables");
-                names.push(name.to_string());
+                names.push(self.written(&name.to_string()));
                 if !matches!(self.peek_or_eof("in tuple of variables").0, Token::RParen) {
                     self.expect(Token::Comma, "between variables");
                 }
@@ -1883,7 +1957,7 @@ impl Parser {
         self.expect(Token::Semicolon, "after variable declaration");
 
         StmtKind::Instantiation {
-            name: name.to_string(),
+            name: self.written(&name.to_string()),
             typedef,
             value,
             mutable
@@ -1941,7 +2015,7 @@ impl Parser {
             );
             self.expect(Token::Colon, "after field name in struct initializer");
             let value = self.next_expression();
-            fields.push((name_tok.to_string(), value));
+            fields.push((self.written(&name_tok.to_string()), value));
 
             if !matches!(self.peek_or_eof("after struct field"), (Token::RBrace, _)) {
                 self.expect(Token::Comma, "between struct fields");
@@ -2026,8 +2100,29 @@ impl Parser {
             if precedence < min_precedence {
                 break;
             }
+            // `value is pattern` has a pattern on its right, no expression
+            if matches!(self.peek().0, Token::Is) {
+                self.consume();
+                let (pattern, _) = self.parse_pattern();
+                let span = lhs.span.clone();
+                lhs = Expr::new(ExprKind::Is { value: Box::new(lhs), pattern: Box::new(pattern) }, span);
+                continue;
+            }
             let (op, _) = self.next_token();
             let (cur, rhs_span) = self.next_token();
+            // `value ?? return x`, `?? break` or `?? continue` leave instead of giving a default
+            if op == Token::QuestionQuestion && matches!(cur, Token::Return | Token::Break | Token::Continue) {
+                let kind = match cur {
+                    Token::Return => StmtKind::Return(self.next_expression()),
+                    Token::Break => StmtKind::Break,
+                    _ => StmtKind::Continue,
+                };
+                let leave = Stmt::new(kind, rhs_span.clone(), Type::Unknown);
+                let rhs = Expr::new(ExprKind::Leave(Box::new(leave)), rhs_span);
+                let span = lhs.span.clone();
+                lhs = Expr::new(ExprKind::BinaryExpr { lhs: Box::new(lhs), op, rhs: Box::new(rhs) }, span);
+                continue;
+            }
             let mut rhs = self.parse_operand(cur, rhs_span);
 
             // Operators that bind tighter than `op` belong to its right side, and
@@ -2173,9 +2268,10 @@ impl Parser {
                 return self.parse_brace_inst(identifier, vec![]);
             }
             Token::LParen => self.parse_function_call(identifier, None, vec![]),
-            Token::Assign => self.parse_assignment(Expr::new(ExprKind::Identifier(identifier), span)),
-            token if token.compound_operator().is_some() => self.parse_assignment(Expr::new(ExprKind::Identifier(identifier), span)),
-            _             => ExprKind::Identifier(identifier),
+            // A plain name is a variable, parameter or field, which keeps its written name
+            Token::Assign => self.parse_assignment(Expr::new(ExprKind::Identifier(self.written(&identifier)), span)),
+            token if token.compound_operator().is_some() => self.parse_assignment(Expr::new(ExprKind::Identifier(self.written(&identifier)), span)),
+            _             => ExprKind::Identifier(self.written(&identifier)),
         }
     }
 
@@ -2198,7 +2294,15 @@ impl Parser {
     /// Panics if `::` isn't followed by an identifier or the payload is invalid.
     fn parse_colon_access(&mut self, name: String, type_args: Vec<Type>) -> ExprKind {
         self.expect(Token::ColonColon, "in colon access");
-        let (tag, _span) = self.expect(Token::Identifier("tag".to_string()), "at tag");
+        let (mut tag, _span) = self.expect(Token::Identifier("tag".to_string()), "at tag");
+        // With the module in front, like `shapes::Kind::Round` or `shapes::Point::origin()`:
+        // the last name is the variant or function, the ones before it the type
+        let mut name = name;
+        while matches!(self.peek().0, Token::ColonColon) {
+            self.consume();
+            name = format!("{}::{}", name, tag);
+            tag = self.expect(Token::Identifier("tag".to_string()), "at tag").0;
+        }
 
         if matches!(self.peek_or_eof("enum tag construction"), (Token::LParen, _)){
             let qualified = format!("{}::{}", name, tag);
@@ -2398,7 +2502,7 @@ fn binary_precedence(token: &Token) -> Option<u8> {
     match token {
         Token::OrOr => Some(1),
         Token::AndAnd => Some(2),
-        Token::EqEq | Token::NotEq | Token::Lt | Token::LtEq | Token::Gt | Token::GtEq => Some(3),
+        Token::EqEq | Token::NotEq | Token::Lt | Token::LtEq | Token::Gt | Token::GtEq | Token::Is => Some(3),
         // `count ?? 0 == 5` compares the value, `x ?? y + 1` adds to the default
         Token::QuestionQuestion => Some(4),
         // Like in Rust: `a == b ^ c` compares with `b ^ c`, `a ^ b + 1` adds first

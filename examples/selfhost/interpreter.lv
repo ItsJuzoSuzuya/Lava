@@ -22,7 +22,7 @@ pub class Interpreter {
     return Result::Ok(true);
   }
 
-  func exec(mut &self, stmt: Stmt) -> Result<bool, String> {
+  func exec(mut &self, stmt: &Stmt) -> Result<bool, String> {
     match stmt {
       Stmt::Let(assign) => {
         match self.eval(assign.value) {

@@ -7,30 +7,37 @@ import std::vector::{Vector};
 // yet, so it's commented out until it's finished:
 
 pub trait Hash {
-  pub func hash(&self) -> int32;
+  pub func hash(&self) -> uint64;
 }
 
-pub class Bucket<T> {
-  pairs: Vector<(int32, T)>;
+pub class Bucket<K, V> {
+  pub entries: Vector<(K, V)> = Vector();
 }
 
 pub class HashMap<Key: Hash, Value> {
-  buckets: Bucket<Value>[16] = Bucket[16];
+  buckets: Vector<Bucket<Key, Value>> = Vector(16);
 
   pub func set(key: Key, value: Value) {
     let hash: int32 = key.hash();
-
   }
 }
 
 impl Hash for String {
-  pub func hash(&self) -> int32 {
-    return 20;
+  pub func hash(&self) -> uint64 {
+    let p: uint64 = 53;
+    let m: uint64 = 1e9 + 9;
+    mut hash_value: uint64 = 0;
+    mut p_pow: uint64 = 1;
+    for c in self.bytes {
+      hash_value = (hash_value + (c as uint32 + 1) * p_pow) % m;
+      p_pow = (p_pow * p) % m;
+    }
+    return hash_value;
   }
 }
 
 impl Hash for Path {
-  pub func hash(&self) -> int32 {
-    return 10;
+  pub func hash(&self) -> uint64 {
+    return self.to_string().hash();
   }
 }

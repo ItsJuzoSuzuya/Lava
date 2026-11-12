@@ -186,11 +186,114 @@ pub func int_to_string(value: int64) -> String {
   return String(digits, length as uint64);
 }
 
+// `value` in decimal, like `"18446744073709551615"`, for unsigned numbers too
+// big for `int_to_string`.
+pub func uint_to_string(value: uint64) -> String {
+  mut digits = Buffer<char>(24);
+  let length = c_snprintf(digits, digits.capacity(), "%llu", value);
+  return String(digits, length as uint64);
+}
+
 // `value` in decimal, like `"2.5"`.
 pub func float_to_string(value: float64) -> String {
   mut digits = Buffer<char>(32);
   let length = c_snprintf(digits, digits.capacity(), "%g", value);
   return String(digits, length as uint64);
+}
+
+// --- Print ---
+
+// A type `print` can show: `print(value)` prints `value.to_string()`, which can
+// also be called directly for the text. Numbers, `bool`, `char` and `String`
+// have it, a class or enum gets it with an impl:
+//
+//   impl Print for Point {
+//     func to_string(&self) -> String {
+//       return "(" + self.x.to_string() + ", " + self.y.to_string() + ")";
+//     }
+//   }
+//
+// An enum without one prints the name of its variant.
+pub trait Print {
+  func to_string(&self) -> String;
+}
+
+impl Print for int8 {
+  func to_string(&self) -> String {
+    return int_to_string(self as int64);
+  }
+}
+
+impl Print for int16 {
+  func to_string(&self) -> String {
+    return int_to_string(self as int64);
+  }
+}
+
+impl Print for int32 {
+  func to_string(&self) -> String {
+    return int_to_string(self as int64);
+  }
+}
+
+impl Print for int64 {
+  func to_string(&self) -> String {
+    return int_to_string(self);
+  }
+}
+
+impl Print for uint8 {
+  func to_string(&self) -> String {
+    return uint_to_string(self as uint64);
+  }
+}
+
+impl Print for uint16 {
+  func to_string(&self) -> String {
+    return uint_to_string(self as uint64);
+  }
+}
+
+impl Print for uint32 {
+  func to_string(&self) -> String {
+    return uint_to_string(self as uint64);
+  }
+}
+
+impl Print for uint64 {
+  func to_string(&self) -> String {
+    return uint_to_string(self);
+  }
+}
+
+impl Print for float32 {
+  func to_string(&self) -> String {
+    return float_to_string(self as float64);
+  }
+}
+
+impl Print for float64 {
+  func to_string(&self) -> String {
+    return float_to_string(self);
+  }
+}
+
+impl Print for bool {
+  func to_string(&self) -> String {
+    return self ? "true" : "false";
+  }
+}
+
+impl Print for char {
+  func to_string(&self) -> String {
+    return char_to_string(self);
+  }
+}
+
+impl Print for String {
+  func to_string(&self) -> String {
+    return self;
+  }
 }
 
 extern "snprintf" func c_snprintf(into: &Buffer<char>, size: uint64, format: String, ..) -> int32;

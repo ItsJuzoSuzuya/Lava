@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::Path};
 
 use inkwell::{AddressSpace, IntPredicate, basic_block::BasicBlock, builder::Builder, context::Context, module::{Linkage, Module}, targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine}, types::{BasicType, BasicTypeEnum, FunctionType, StructType}, values::{BasicValueEnum, FunctionValue, IntValue, PointerValue, StructValue}};
 
-use crate::{field::Field, param::Param, runtime, span::Span, sym::{OwnedSlot, Symbol}, r#type::Type};
+use crate::{expression::Pattern, field::Field, param::Param, runtime, span::Span, sym::{OwnedSlot, Symbol}, r#type::Type};
 
 pub enum CodegenError {
     UndefinedClass(String),
@@ -67,6 +67,12 @@ pub struct CodegenContext<'ctx> {
     /// Owning values an expression created but didn't keep, like the result of
     /// `make().x`, with their stack slots. They're freed when the expression ends.
     pub temporaries: Vec<(PointerValue<'ctx>, Type)>,
+    /// The `value is pattern` expressions of the condition being generated,
+    /// whose names get bound where it's known to be true, see `bind_is_patterns`.
+    pub pending_is: Vec<PendingIs<'ctx>>,
+    /// Whether the expression generated next is a condition whose `is`
+    /// expressions stay in [`CodegenContext::pending_is`], like the left side of `&&`.
+    pub keep_is_bindings: bool,
     /// The loops around the code being generated, the innermost last.
     pub loops: Vec<LoopTarget<'ctx>>,
     /// The C function of every `extern func` by mangled name, with the type
@@ -83,6 +89,16 @@ pub fn function_symbol(mangled: &str) -> String {
 
 /// The C functions the generated code uses itself, see [`CodegenContext::libc_function`].
 const LIBC: &[&str] = &["calloc", "malloc", "memset", "realloc", "memcpy", "memmove", "memcmp", "free", "exit", "printf", "strlen"];
+
+/// A `value is pattern` whose names aren't bound yet.
+#[derive(Clone)]
+pub struct PendingIs<'ctx> {
+    pub pattern: Pattern,
+    /// A stack slot holding the address of the matched value.
+    pub place: PointerValue<'ctx>,
+    /// Type of the matched value.
+    pub ty: Type,
+}
 
 /// Where `break` and `continue` jump to in a loop.
 #[derive(Clone, Copy)]
@@ -127,6 +143,8 @@ impl<'ctx> CodegenContext<'ctx> {
             // The top level of the program, freed at the end of `main`
             drop_scopes: vec![Vec::new()],
             temporaries: Vec::new(),
+            pending_is: Vec::new(),
+            keep_is_bindings: false,
             loops: Vec::new(),
             externs: HashMap::new(),
         };
@@ -308,6 +326,99 @@ impl<'ctx> CodegenContext<'ctx> {
         self.scope.insert(name, symbol);
     }
 
+    /// The instance name and the index of `Some` if `ty` is an `Option` of an
+    /// extern type, like `Option<LLVMValueRef>`, which C passes as a pointer
+    /// that's null for `None`.
+    fn nullable_handle_variant(&self, ty: &Type) -> Option<(String, u64)> {
+        let Type::Enum(name) = ty else { return None };
+        if !name.split('<').next().is_some_and(|template| template.ends_with("Option")) {
+            return None;
+        }
+        let index = self.enums.get(name)?.iter().position(|(variant, _)| variant == "Some")?;
+        let payload = self.enum_variant_types.get(name)?.get(index)?;
+        matches!(payload, Type::Handle(_)).then(|| (name.clone(), index as u64))
+    }
+
+    /// Whether `ty` is an `Option` of an extern type, see [`CodegenContext::option_of_pointer`].
+    pub fn nullable_handle(&self, ty: &Type) -> bool {
+        self.nullable_handle_variant(ty).is_some()
+    }
+
+    /// The instance name if `ty` is an `Option<String>`, which an out-parameter
+    /// `&Option<String>` of a C function gets a `char *` written into.
+    fn nullable_string_variant(&self, ty: &Type) -> Option<String> {
+        let Type::Enum(name) = ty else { return None };
+        if !name.split('<').next().is_some_and(|template| template.ends_with("Option")) {
+            return None;
+        }
+        let index = self.enums.get(name)?.iter().position(|(variant, _)| variant == "Some")?;
+        let payload = self.enum_variant_types.get(name)?.get(index)?;
+        payload.is_string().then(|| name.clone())
+    }
+
+    /// Whether `ty` is an `Option<String>`, see [`CodegenContext::store_c_string_option`].
+    pub fn nullable_string(&self, ty: &Type) -> bool {
+        self.nullable_string_variant(ty).is_some()
+    }
+
+    /// Stores what a C function wrote into the `char *` out-parameter slot
+    /// `slot` into the `Option<String>` of type `ty` at `place`: `Some` with a
+    /// copy of the text, replacing the old value. Nothing changes if C wrote
+    /// nothing, the slot is still null.
+    pub fn store_c_string_option(&mut self, slot: PointerValue<'ctx>, place: PointerValue<'ctx>, ty: &Type) {
+        let name = self.nullable_string_variant(ty).expect("an Option<String>");
+        let function = self.current_function();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let written = self.builder.build_load(ptr_ty, slot, "written").unwrap().into_pointer_value();
+        let is_null = self.builder.build_is_null(written, "nothing_written").unwrap();
+        let store_bb = self.context.append_basic_block(function, "store_text");
+        let done_bb = self.context.append_basic_block(function, "text_stored");
+        self.builder.build_conditional_branch(is_null, done_bb, store_bb).unwrap();
+
+        self.builder.position_at_end(store_bb);
+        // The old value is replaced, what it owns is released
+        self.drop_in_place(place, ty);
+        let text = self.from_c_string(written);
+        let some = self.module.get_function(&function_symbol(&format!("{}__Some", name)))
+            .expect("the Option's variants are declared");
+        let option = self.builder.build_call(some, &[text.into()], "some_text").unwrap()
+            .try_as_basic_value().basic().expect("a variant gives a value");
+        self.builder.build_store(place, option).unwrap();
+        self.builder.build_unconditional_branch(done_bb).unwrap();
+
+        self.builder.position_at_end(done_bb);
+    }
+
+    /// The `Option` of type `ty` a C function gave as `pointer`: `None` for null,
+    /// else `Some(pointer)`.
+    pub fn option_of_pointer(&self, pointer: PointerValue<'ctx>, ty: &Type) -> BasicValueEnum<'ctx> {
+        let (name, _) = self.nullable_handle_variant(ty).expect("an Option of an extern type");
+        let constructor = |variant: &str| self.module.get_function(&function_symbol(&format!("{}__{}", name, variant)))
+            .expect("the Option's variants are declared");
+        let some = self.builder.build_call(constructor("Some"), &[pointer.into()], "some").unwrap()
+            .try_as_basic_value().basic().expect("a variant gives a value");
+        let none = self.builder.build_call(constructor("None"), &[], "none").unwrap()
+            .try_as_basic_value().basic().expect("a variant gives a value");
+        let is_null = self.builder.build_is_null(pointer, "is_null").unwrap();
+        self.builder.build_select(is_null, none, some, "option").unwrap()
+    }
+
+    /// The pointer C gets for `option`, an `Option` of type `ty` of an extern
+    /// type: the one in `Some`, null for `None`.
+    pub fn pointer_of_option(&self, option: BasicValueEnum<'ctx>, ty: &Type) -> PointerValue<'ctx> {
+        let (name, some_index) = self.nullable_handle_variant(ty).expect("an Option of an extern type");
+        let struct_ty = self.module.get_struct_type(&name).expect("the Option's struct is declared");
+        let slot = self.build_entry_alloca(struct_ty, "option");
+        self.builder.build_store(slot, option).unwrap();
+        let tag_ptr = self.builder.build_struct_gep(struct_ty, slot, 0, "tag_ptr").unwrap();
+        let tag = self.builder.build_load(self.context.i32_type(), tag_ptr, "tag").unwrap().into_int_value();
+        let is_some = self.builder.build_int_compare(IntPredicate::EQ, tag, self.context.i32_type().const_int(some_index, false), "is_some").unwrap();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let payload_ptr = self.builder.build_struct_gep(struct_ty, slot, 1, "payload_ptr").unwrap();
+        let pointer = self.builder.build_load(ptr_ty, payload_ptr, "pointer").unwrap();
+        self.builder.build_select(is_some, pointer, ptr_ty.const_null().into(), "pointer_or_null").unwrap().into_pointer_value()
+    }
+
     /// Whether values of `ty` own heap memory that has to be freed: a `Unique`,
     /// a `Buffer`, or a class or enum with a field or payload that does.
     pub fn owns_memory(&self, ty: &Type) -> bool {
@@ -407,6 +518,9 @@ impl<'ctx> CodegenContext<'ctx> {
 
         self.builder.position_at_end(free_bb);
         self.drop_in_place(owned.slot, &owned.ty);
+        // Freed once, also if a later path, like the end of a loop round after a
+        // `continue` dropped it already, drops it again
+        self.builder.build_store(owned.alive, self.context.bool_type().const_zero()).unwrap();
         self.builder.build_unconditional_branch(done_bb).unwrap();
 
         self.builder.position_at_end(done_bb);
@@ -689,6 +803,188 @@ impl<'ctx> CodegenContext<'ctx> {
             None => builder.position_at_end(entry),
         }
         builder.build_alloca(ty, name).unwrap()
+    }
+
+    /// Whether the values of type `ty` at `a` and `b` are the same, for `==`:
+    /// numbers, bools and chars by value, strings by their text and anything
+    /// else by what it holds, like the fields of a class, the value of a
+    /// `Unique` or the one a reference points to. A class with an own
+    /// `equals(&self, other: &Self) -> bool` method decides itself.
+    pub fn values_equal(&self, a: PointerValue<'ctx>, b: PointerValue<'ctx>, ty: &Type) -> IntValue<'ctx> {
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let fn_type = self.context.bool_type().fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let function = self.type_function("equals", ty, fn_type, |function| {
+            let a = function.get_nth_param(0).unwrap().into_pointer_value();
+            let b = function.get_nth_param(1).unwrap().into_pointer_value();
+            let equal = self.build_equal(a, b, ty);
+            self.builder.build_return(Some(&equal)).unwrap();
+        });
+        self.builder.build_call(function, &[a.into(), b.into()], "equal").unwrap()
+            .try_as_basic_value().basic().unwrap().into_int_value()
+    }
+
+    /// See [`CodegenContext::values_equal`], emitted where the builder is.
+    fn build_equal(&self, a: PointerValue<'ctx>, b: PointerValue<'ctx>, ty: &Type) -> IntValue<'ctx> {
+        use inkwell::{FloatPredicate, IntPredicate};
+        let bool_ty = self.context.bool_type();
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let load = |place: PointerValue<'ctx>, llvm_ty: BasicTypeEnum<'ctx>| self.builder.build_load(llvm_ty, place, "value").unwrap();
+        let load_ptr = |place: PointerValue<'ctx>| load(place, ptr_ty.into()).into_pointer_value();
+        let and = |x: IntValue<'ctx>, y: IntValue<'ctx>| self.builder.build_and(x, y, "both_equal").unwrap();
+        match ty {
+            Type::Float { .. } => {
+                let llvm_ty = ty.to_llvm(self);
+                self.builder.build_float_compare(FloatPredicate::OEQ, load(a, llvm_ty).into_float_value(),
+                    load(b, llvm_ty).into_float_value(), "equal").unwrap()
+            }
+            Type::Int { .. } | Type::Bool | Type::Char => {
+                let llvm_ty = ty.to_llvm(self);
+                self.builder.build_int_compare(IntPredicate::EQ, load(a, llvm_ty).into_int_value(),
+                    load(b, llvm_ty).into_int_value(), "equal").unwrap()
+            }
+            // An extern type is the same thing only at the same address
+            Type::Handle(_) => self.builder.build_int_compare(IntPredicate::EQ, load_ptr(a), load_ptr(b), "equal").unwrap(),
+            ty if ty.is_string() => crate::expression::strings_equal(self, a, b),
+            Type::Ref(inner) => self.values_equal(load_ptr(a), load_ptr(b), inner),
+            Type::Unique(inner) | Type::Shared(inner) => {
+                let (a, b) = (load_ptr(a), load_ptr(b));
+                // The same value or both empty, one empty, else the values are compared
+                let same = self.builder.build_int_compare(IntPredicate::EQ, a, b, "same").unwrap();
+                let empty = self.builder.build_or(self.builder.build_is_null(a, "a_empty").unwrap(),
+                    self.builder.build_is_null(b, "b_empty").unwrap(), "empty").unwrap();
+                let decided = self.builder.build_or(same, empty, "decided").unwrap();
+                self.equal_unless(decided, same, || self.values_equal(a, b, inner))
+            }
+            Type::Class(name) => {
+                if let Some(own) = self.module.get_function(&function_symbol(&format!("{}_equals", name)))
+                    .filter(|f| f.count_params() == 2 && f.get_type().get_return_type() == Some(bool_ty.into()))
+                {
+                    return self.builder.build_call(own, &[a.into(), b.into()], "equal").unwrap()
+                        .try_as_basic_value().basic().unwrap().into_int_value();
+                }
+                let struct_ty = self.module.get_struct_type(name).expect("class struct not defined");
+                let fields = self.class_field_types.get(name).cloned().unwrap_or_default();
+                fields.iter().enumerate().fold(bool_ty.const_int(1, false), |equal, (i, field)| {
+                    let field_a = self.builder.build_struct_gep(struct_ty, a, i as u32, "field_a").unwrap();
+                    let field_b = self.builder.build_struct_gep(struct_ty, b, i as u32, "field_b").unwrap();
+                    and(equal, self.values_equal(field_a, field_b, field))
+                })
+            }
+            Type::Tuple(items) => {
+                let struct_ty = ty.to_llvm(self).into_struct_type();
+                items.iter().enumerate().fold(bool_ty.const_int(1, false), |equal, (i, item)| {
+                    let item_a = self.builder.build_struct_gep(struct_ty, a, i as u32, "item_a").unwrap();
+                    let item_b = self.builder.build_struct_gep(struct_ty, b, i as u32, "item_b").unwrap();
+                    and(equal, self.values_equal(item_a, item_b, item))
+                })
+            }
+            Type::Array(element, len) => {
+                let array_ty = ty.to_llvm(self);
+                let equal = self.build_entry_alloca(bool_ty, "equal");
+                self.builder.build_store(equal, bool_ty.const_int(1, false)).unwrap();
+                self.build_index_loop(i64_ty.const_zero(), i64_ty.const_int(*len, false), |i| {
+                    let element_a = unsafe { self.builder.build_in_bounds_gep(array_ty, a, &[i64_ty.const_zero(), i], "element_a").unwrap() };
+                    let element_b = unsafe { self.builder.build_in_bounds_gep(array_ty, b, &[i64_ty.const_zero(), i], "element_b").unwrap() };
+                    let so_far = load(equal, bool_ty.into()).into_int_value();
+                    self.builder.build_store(equal, and(so_far, self.values_equal(element_a, element_b, element))).unwrap();
+                });
+                load(equal, bool_ty.into()).into_int_value()
+            }
+            Type::Buffer(element) => {
+                let (a, b) = (load_ptr(a), load_ptr(b));
+                let same = self.builder.build_int_compare(IntPredicate::EQ, a, b, "same").unwrap();
+                let empty = self.builder.build_or(self.builder.build_is_null(a, "a_empty").unwrap(),
+                    self.builder.build_is_null(b, "b_empty").unwrap(), "empty").unwrap();
+                let decided = self.builder.build_or(same, empty, "decided").unwrap();
+                self.equal_unless(decided, same, || {
+                    // As many elements, and each the same
+                    let capacity_a = load(self.buffer_capacity_ptr(a), i64_ty.into()).into_int_value();
+                    let capacity_b = load(self.buffer_capacity_ptr(b), i64_ty.into()).into_int_value();
+                    let same_capacity = self.builder.build_int_compare(IntPredicate::EQ, capacity_a, capacity_b, "same_capacity").unwrap();
+                    let equal = self.build_entry_alloca(bool_ty, "equal");
+                    self.builder.build_store(equal, same_capacity).unwrap();
+                    let end = self.builder.build_select(same_capacity, capacity_a, i64_ty.const_zero(), "end").unwrap().into_int_value();
+                    self.build_index_loop(i64_ty.const_zero(), end, |i| {
+                        let element_a = self.buffer_slot(a, element, i);
+                        let element_b = self.buffer_slot(b, element, i);
+                        let so_far = load(equal, bool_ty.into()).into_int_value();
+                        self.builder.build_store(equal, and(so_far, self.values_equal(element_a, element_b, element))).unwrap();
+                    });
+                    load(equal, bool_ty.into()).into_int_value()
+                })
+            }
+            Type::Enum(name) => {
+                let struct_ty = self.module.get_struct_type(name).expect("enum struct not defined");
+                let i32_ty = self.context.i32_type();
+                let tag_a = load(self.builder.build_struct_gep(struct_ty, a, 0, "tag_a").unwrap(), i32_ty.into()).into_int_value();
+                let tag_b = load(self.builder.build_struct_gep(struct_ty, b, 0, "tag_b").unwrap(), i32_ty.into()).into_int_value();
+                let same_tag = self.builder.build_int_compare(IntPredicate::EQ, tag_a, tag_b, "same_tag").unwrap();
+                let different = self.builder.build_not(same_tag, "different").unwrap();
+                // Another variant isn't equal, the same one is if its payload is
+                self.equal_unless(different, bool_ty.const_zero(), || {
+                    let function = self.current_function();
+                    let payloads = self.enum_variant_types.get(name).cloned().unwrap_or_default();
+                    let done_bb = self.context.append_basic_block(function, "payload_compared");
+                    let mut incoming = Vec::new();
+                    let mut cases = Vec::new();
+                    let switch_bb = self.builder.get_insert_block().unwrap();
+                    for (i, payload) in payloads.iter().enumerate().filter(|(_, p)| **p != Type::Void) {
+                        let bb = self.context.append_basic_block(function, "compare_payload");
+                        cases.push((i32_ty.const_int(i as u64, false), bb));
+                        self.builder.position_at_end(bb);
+                        let payload_a = self.builder.build_struct_gep(struct_ty, a, 1, "payload_a").unwrap();
+                        let payload_b = self.builder.build_struct_gep(struct_ty, b, 1, "payload_b").unwrap();
+                        let equal = self.values_equal(payload_a, payload_b, payload);
+                        incoming.push((equal, self.builder.get_insert_block().unwrap()));
+                        self.builder.build_unconditional_branch(done_bb).unwrap();
+                    }
+                    // A variant without payload is equal by its tag
+                    self.builder.position_at_end(switch_bb);
+                    self.builder.build_switch(tag_a, done_bb, &cases).unwrap();
+                    incoming.push((bool_ty.const_int(1, false), switch_bb));
+                    self.builder.position_at_end(done_bb);
+                    let phi = self.builder.build_phi(bool_ty, "payload_equal").unwrap();
+                    for (value, bb) in &incoming {
+                        phi.add_incoming(&[(value, *bb)]);
+                    }
+                    phi.as_basic_value().into_int_value()
+                })
+            }
+            _ => bool_ty.const_zero(),
+        }
+    }
+
+    /// `decided_value` if `decided`, else the result of `compare`, which only
+    /// runs then.
+    fn equal_unless(&self, decided: IntValue<'ctx>, decided_value: IntValue<'ctx>, compare: impl FnOnce() -> IntValue<'ctx>) -> IntValue<'ctx> {
+        let function = self.current_function();
+        let before_bb = self.builder.get_insert_block().unwrap();
+        let compare_bb = self.context.append_basic_block(function, "compare");
+        let done_bb = self.context.append_basic_block(function, "compared");
+        self.builder.build_conditional_branch(decided, done_bb, compare_bb).unwrap();
+
+        self.builder.position_at_end(compare_bb);
+        let compared = compare();
+        let compare_end_bb = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(done_bb).unwrap();
+
+        self.builder.position_at_end(done_bb);
+        let result = self.builder.build_phi(self.context.bool_type(), "equal").unwrap();
+        result.add_incoming(&[(&decided_value, before_bb), (&compared, compare_end_bb)]);
+        result.as_basic_value().into_int_value()
+    }
+
+    /// A bool in the entry block of the current function, false until set.
+    pub fn build_entry_flag(&self, name: &str) -> PointerValue<'ctx> {
+        let flag = self.build_entry_alloca(self.context.bool_type(), name);
+        let builder = self.context.create_builder();
+        match flag.as_instruction().and_then(|alloca| alloca.get_next_instruction()) {
+            Some(next) => builder.position_before(&next),
+            None => builder.position_at_end(flag.as_instruction().unwrap().get_parent().unwrap()),
+        }
+        builder.build_store(flag, self.context.bool_type().const_int(0, false)).unwrap();
+        flag
     }
 
     /// Keeps the owning `value` of type `ty` until the current expression ends.

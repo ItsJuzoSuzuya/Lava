@@ -1,13 +1,3 @@
-import vector;
-
-mut vec = Vector<int32>();
-print(vec.is_empty());
-vec.push(1);
-vec.push(2);
-vec.push(4);
-
-mut i: uint64 = 0;
-while i < vec.len() {
-  print(vec.get(i));
-  i = i + 1;
+if true {
+  print(true);
 }
