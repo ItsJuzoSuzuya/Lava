@@ -286,3 +286,26 @@ func g(n: int32) -> int32 {
 print(g(1));
 --- error
 'g' can reach its end without giving a 'int32'
+
+=== a match without every case doesn't count as returning
+func f(x: int32) -> int32 {
+  match x {
+    1 => return 10,
+    2 => return 20,
+  }
+}
+print(f(1));
+--- error
+can reach its end without giving a 'int32'
+
+=== a match with every case returns
+enum Light { Red, Green; }
+func f(l: Light) -> int32 {
+  match l {
+    Light::Red => return 1,
+    Light::Green => return 2,
+  }
+}
+print(f(Light::Green));
+--- output
+2

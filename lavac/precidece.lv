@@ -1,0 +1,37 @@
+import std::vector::{Vector};
+import token;
+import std::option::{Option};
+pub enum Precidence {
+  Equality,
+  Comparision,
+  Sum,
+  Product,
+  Unary,
+  Primary
+
+  pub func next(&self) -> Precidence {
+    match self {
+      Precidence::Equality => Precidence::Comparision,
+      Precidence::Comparision => Precidence::Sum,
+      Precidence::Sum => Precidence::Product,
+      Precidence::Product => Precidence::Unary,
+      Precidence::Unary => Precidence::Primary
+      Precidence::Primary => panic("There is no lower precidence than 'Primary'")
+    }
+  }
+
+  pub func has(&self, op: TokenKind) -> bool {
+    return self.operations() is Some(ops) && ops.contains(op);
+  }
+
+  func operations(&self) -> Option<Vector<TokenKind>> {
+    match self {
+      Precidence::Equality => [TokenKind::EqEq, TokenKind::NotEq],
+      Precidence::Comparision => [TokenKind::Gt, TokenKind::GtEq, TokenKind::Lt, TokenKind::LtEq],
+      Precidence::Sum => [TokenKind::Plus, TokenKind::Minus],
+      Precidence::Product => [TokenKind::Multiply, TokenKind::Divide, TokenKind::Percent],
+      Precidence::Unary => [TokenKind::Minus, TokenKind::Bang],
+      _ => None
+    };
+  }
+}

@@ -22,6 +22,10 @@ pub class Context {
   }
 
   // types
+  pub func void_type(&self) -> IntType {
+    return IntType::new(self.ref, 0);
+  }
+
   pub func i32_type(&self) -> IntType {
     return IntType::new(self.ref, 32);
   }
@@ -115,6 +119,34 @@ pub extern type Builder: LLVMBuilderRef {
   pub func build_const_str_ptr(&self, string: String, name: String) -> LLVMValueRef {
     return LLVMBuildGlobalStringPtr(self, string, name);
   }
+
+  pub func build_add(&self, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef {
+    return LLVMBuildAdd(self, lhs, rhs, name);
+  }
+
+  pub func build_sub(&self, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef {
+    return LLVMBuildSub(self, lhs, rhs, name);
+  }
+
+  pub func build_mul(&self, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef {
+    return LLVMBuildMul(self, lhs, rhs, name);
+  }
+
+  pub func build_div(&self, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef {
+    return LLVMBuildSDiv(self, lhs, rhs, name);
+  }
+
+  pub func build_icmp(&self, predicate: int32, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef {
+    return LLVMBuildICmp(self, predicate, lhs, rhs, name);
+  }
+
+  pub func build_mod(&self, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef {
+    return LLVMBuildSRem(self, lhs, rhs, name);
+  }
+
+  pub func build_eq(&self, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef {
+    return LLVMBuildSRem(self, lhs, rhs, name);
+  }
 }
 
 pub extern type LLVMTypeRef;
@@ -137,7 +169,11 @@ pub extern type IntType: Type {
 }
 
 pub extern type LLVMValueRef;
-pub extern type Function: LLVMValueRef;
+pub extern type Function: LLVMValueRef {
+  pub func get_type(&self) -> FunctionType {
+    return LLVMGlobalGetValueType(self);
+  }
+}
 
 pub extern type LLVMBasicBlockRef;
 pub extern func LLVMAppendBasicBlockInContext(context: LLVMContextRef, function: LLVMValueRef, name: String) -> BasicBlock;
@@ -435,31 +471,31 @@ pub extern func LLVMBuildFPToSI(builder: LLVMBuilderRef, value: LLVMValueRef, ty
 pub extern func LLVMBuildFPToUI(builder: LLVMBuilderRef, value: LLVMValueRef, ty: LLVMTypeRef, name: String) -> LLVMValueRef;
 
 // LLVMIntPredicate, how `LLVMBuildICmp` compares.
-pub enum LLVMIntPredicate {
-  LLVMIntEQ,
-  LLVMIntNE,
-  LLVMIntUGT,
-  LLVMIntUGE,
-  LLVMIntULT,
-  LLVMIntULE,
-  LLVMIntSGT,
-  LLVMIntSGE,
-  LLVMIntSLT,
-  LLVMIntSLE;
+pub enum CompareOp {
+  EQ,
+  NEQ,
+  UGT,
+  UGE,
+  ULT,
+  ULE,
+  SGT,
+  SGE,
+  SLT,
+  SLE;
 
   // Its value in C.
   pub func to_int(&self) -> int32 {
     match self {
-      LLVMIntPredicate::LLVMIntEQ => 32,
-      LLVMIntPredicate::LLVMIntNE => 33,
-      LLVMIntPredicate::LLVMIntUGT => 34,
-      LLVMIntPredicate::LLVMIntUGE => 35,
-      LLVMIntPredicate::LLVMIntULT => 36,
-      LLVMIntPredicate::LLVMIntULE => 37,
-      LLVMIntPredicate::LLVMIntSGT => 38,
-      LLVMIntPredicate::LLVMIntSGE => 39,
-      LLVMIntPredicate::LLVMIntSLT => 40,
-      LLVMIntPredicate::LLVMIntSLE => 41,
+      CompareOp::EQ => 32,
+      CompareOp::NEQ => 33,
+      CompareOp::UGT => 34,
+      CompareOp::UGE => 35,
+      CompareOp::ULT => 36,
+      CompareOp::ULE => 37,
+      CompareOp::SGT => 38,
+      CompareOp::SGE => 39,
+      CompareOp::SLT => 40,
+      CompareOp::SLE => 41,
     }
   }
 }

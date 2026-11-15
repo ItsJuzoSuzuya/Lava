@@ -55,6 +55,16 @@ pub enum Pattern {
     },
     /// `(a, b)`: the values of a tuple, each matched by its own pattern.
     Tuple(Vec<Pattern>),
+    /// `{ lhs, op: o, .. }`, the payload of a variant with named fields, like
+    /// `ExprKind::Binary { lhs, .. }`. Sema turns it into the tuple pattern of
+    /// the payload, in the order the fields are declared.
+    Fields {
+        /// Each named field and the pattern its value has to match. `lhs`
+        /// alone binds the field to a variable of the same name.
+        fields: Vec<(String, Pattern, Span)>,
+        /// Whether `..` stands for the fields not named.
+        rest: bool,
+    },
 }
 
 /// The `..` or `..name` in a list pattern.
@@ -82,6 +92,7 @@ impl Pattern {
             Pattern::Wildcard => true,
             Pattern::Literal(expr) => matches!(expr.kind, ExprKind::Identifier(_)),
             Pattern::Tuple(items) => items.iter().all(Pattern::always_matches),
+            Pattern::Fields { fields, .. } => fields.iter().all(|(_, p, _)| p.always_matches()),
             Pattern::EnumVariant { .. } | Pattern::List { .. } => false,
         }
     }
@@ -100,6 +111,7 @@ impl Pattern {
                 names
             }
             Pattern::Tuple(items) => items.iter().flat_map(Pattern::names).collect(),
+            Pattern::Fields { fields, .. } => fields.iter().flat_map(|(_, p, _)| p.names()).collect(),
         }
     }
 }
@@ -115,6 +127,7 @@ impl Display for Pattern {
                     let items: Vec<String> = items.iter().map(|p| p.to_string()).collect();
                     write!(f, "{}::{}({})", enum_name, variant, items.join(", "))
                 }
+                Some(fields @ Pattern::Fields { .. }) => write!(f, "{}::{} {}", enum_name, variant, fields),
                 Some(payload) => write!(f, "{}::{}({})", enum_name, variant, payload),
                 None => write!(f, "{}::{}", enum_name, variant),
             },
@@ -129,6 +142,16 @@ impl Display for Pattern {
             Pattern::Tuple(items) => {
                 let items: Vec<String> = items.iter().map(|p| p.to_string()).collect();
                 write!(f, "({})", items.join(", "))
+            }
+            Pattern::Fields { fields, rest } => {
+                let mut items: Vec<String> = fields.iter().map(|(name, pattern, _)| match pattern {
+                    Pattern::Literal(Expr { kind: ExprKind::Identifier(bound), .. }) if bound == name => name.clone(),
+                    _ => format!("{}: {}", name, pattern),
+                }).collect();
+                if *rest {
+                    items.push("..".to_string());
+                }
+                write!(f, "{{ {} }}", items.join(", "))
             }
         }
     }
@@ -445,7 +468,9 @@ impl Expr {
                 Some(Box::new(ctx.new_shared(value, &inner.ty).into()))
             }
             ExprKind::Deref(inner) => {
-                let address = inner.codegen(ctx).unwrap().into_pointer_value();
+                // The address may point into a temporary, like the Vector of `make()[0]`, which
+                // has to live until the value is loaded. `codegen` of the deref frees it after
+                let address = inner.codegen_value(ctx).unwrap().into_pointer_value();
                 let value_ty = self.ty.to_llvm(ctx);
                 Some(Box::new(ctx.builder.build_load(value_ty, address, "deref").unwrap()))
             }

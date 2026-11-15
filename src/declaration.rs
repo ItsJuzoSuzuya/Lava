@@ -74,6 +74,10 @@ pub enum DeclarationKind {
         /// Empty for non-generic enums, see [`DeclarationKind::Class`].
         type_params: Vec<TypeParam>,
         fields: Vec<(String, u32, Type, Span)>,
+        /// The variants with named fields, like `Binary => { lhs: Expr, rhs: Expr }`,
+        /// and their names in order. Their payload is the tuple of the fields'
+        /// types, or the one field's type.
+        field_names: Vec<(String, Vec<String>)>,
         /// Methods declared after the variants. Their `self` is the enum value.
         methods: Vec<Declaration>,
     },

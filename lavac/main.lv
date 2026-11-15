@@ -1,6 +1,7 @@
 import std::env::{args};
 import std::fs::{read, write, create_dir_all};
 import std::path::{Path};
+import std::process;
 import std::process::{ExitCode};
 import std::option::{Option};
 import std::result::{Result};
@@ -17,7 +18,7 @@ func main() -> int32 {
   match args[1] {
     "run" => {
       let main = main_file(args.at(2) ?? "main.lv");
-      run(main);
+      run_file(main);
     },
     "build" => build_command(&args)
   }
@@ -48,19 +49,19 @@ func build_command(args: &Vector<String>) -> Result<ExitCode, String> {
     let file = files.len() > 2 ? files[2].clone() : "main.lv";
     let main = main_file(file);
 
-    let executable = build(&main, output);
+    let executable = build(main, output);
     Ok(ExitCode::Success)
 }
 
-func build(main: &Path, output: Option<Path>) -> Result<Path,Vector<CompileError>> {
+func build(main: Path, output: Option<Path>) -> Result<Path,Vector<CompileError>> {
   let dir = main.parent();
-  let name = main.file_name();
+  let name = main.file_stem();
   let build_dir = dir.join("build");
 
   if create_dir_all(&build_dir) is Err(err) 
     panic("filesystem error: couldnt create build directory as " + build_dir.to_string() + " \n" + err);
 
-  let object = build_dir.join(name + ".0");
+  let object = build_dir.join(name + ".o");
   let executable = output ?? build_dir.join(name);
   let context = Context();
 
@@ -72,10 +73,10 @@ func build(main: &Path, output: Option<Path>) -> Result<Path,Vector<CompileError
   return executable;
 }
 
-func run(file: Path) {
+func run_file(file: Path) {
   let build = build(file, None);
   match build {
-    Ok(executable) => run(executable)
+    Ok(executable) => process::run(executable.to_string())
     Err(errors) => print_errors(errors)
   };
 }

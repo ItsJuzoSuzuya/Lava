@@ -1,0 +1,23 @@
+import token;
+pub enum BinaryOp {
+  Add, Sub, Mul, Div, Rem,
+  Eq, NotEq, Lt, LtEq, Gt, GtEq;
+
+  pub func from_token(kind: TokenKind) -> BinaryOp {
+    match kind {
+      TokenKind::Plus => BinaryOp::Add,
+      TokenKind::Minus => BinaryOp::Sub,
+      TokenKind::Multiply => BinaryOp::Mul,
+      TokenKind::Divide => BinaryOp::Div,
+      TokenKind::Percent => BinaryOp::Rem,
+      TokenKind::EqEq => BinaryOp::Eq,
+      TokenKind::NotEq => BinaryOp::NotEq,
+      TokenKind::Lt => BinaryOp::Lt,
+      TokenKind::LtEq => BinaryOp::LtEq,
+      TokenKind::Gt => BinaryOp::Gt,
+      TokenKind::GtEq => BinaryOp::GtEq,
+
+      kind => panic("Provided token cant be used as an binary operator: " + kind.to_string())
+    }
+  }
+}

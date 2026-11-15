@@ -8,6 +8,8 @@ import llvm;
 import type;
 import std::math::{min};
 import std::result::{Result};
+import token;
+import operators;
 
 pub class Expression {
   pub kind: ExprKind;
@@ -20,6 +22,28 @@ pub class Expression {
         let int = val ? 1 : 0;
         return ctx.context.bool_type().const_int(int as uint64, false);
       },
+      ExprKind::IntLiteral(val) => {
+        return ctx.context.i32_type().const_int(val as uint64, false);
+      }
+
+      ExprKind::BinaryExpr(lhs, op, rhs) => {
+        let l = lhs.codegen(ctx) ?? return None;
+        let r = rhs.codegen(ctx) ?? return None;
+        return match op {
+          BinaryOp::Add   => ctx.builder.build_add(l, r, "add"),
+          BinaryOp::Sub   => ctx.builder.build_sub(l, r, "sub"),
+          BinaryOp::Mul   => ctx.builder.build_mul(l, r, "mul"),
+          BinaryOp::Div   => ctx.builder.build_div(l, r, "div"),
+          BinaryOp::Rem   => ctx.builder.build_mod(l, r, "mod"),
+          BinaryOp::Lt    => ctx.builder.build_icmp(CompareOp::SLT.to_int(), l, r, "lt"),
+          BinaryOp::LtEq  => ctx.builder.build_icmp(CompareOp::SLE.to_int(), l, r, "lt"),
+          BinaryOp::Gt    => ctx.builder.build_icmp(CompareOp::SGT.to_int(), l, r, "gt"),
+          BinaryOp::GtEq  => ctx.builder.build_icmp(CompareOp::SGE.to_int(), l, r, "lt"),
+          BinaryOp::Eq    => ctx.builder.build_icmp(CompareOp::EQ.to_int(), l, r, "eq"),
+          BinaryOp::NotEq => ctx.builder.build_icmp(CompareOp::NEQ.to_int(), l, r, "eq"),
+        };
+      }
+
       ExprKind::If(condition, if_case, else_case) => {
         let current_func = ctx.builder.get_insert_block().get_parent();
         let then_bb = ctx.context.append_basic_block(current_func, "then");
@@ -41,8 +65,10 @@ pub class Expression {
         ctx.builder.position_at_end(merge_bb);
         return None;
       },
+
       ExprKind::Error => return None,
     }
+    return None;
   }
 
   pub func llvm_string(&self, ctx: &CodegenContext) -> Result<LLVMValueRef, CodegenError> {
@@ -52,7 +78,9 @@ pub class Expression {
         let yes = ctx.builder.build_const_str_ptr("true", "true");
         let no = ctx.builder.build_const_str_ptr("false", "false");
         return LLVMBuildSelect(ctx.builder, v, yes, no, "bool_text");
-      }
+      },
+      Type::Int32 => self.codegen(ctx) ?? return Err(CodegenError::MissingValue(self.ty, self.span))
+      _ => return Err(CodegenError::MissingValue(self.ty, self.span))
     }
   }
 }
@@ -65,7 +93,23 @@ impl Codegen for Expression {
 
 pub enum ExprKind {
   Boolean => bool,
-  If => (Expression, Block, Option<Block>)
+  IntLiteral => int64,
+
+  BinaryExpr => {
+      lhs: Unique<Expression>,
+      op: BinaryOp,
+      rhs: Unique<Expression>,
+  },
+  UnaryExpr => {
+    op: Token,
+    expr: Unique<Expression>
+  }
+
+  If => {
+    condition: Unique<Expression>, 
+    if_then: Unique<Block>, 
+    if_else: Option<Unique<Block>>
+  }
   Error => String, 
 }
 

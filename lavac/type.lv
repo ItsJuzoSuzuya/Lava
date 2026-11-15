@@ -4,11 +4,13 @@ import codegen_ctx;
 import std::string::{Print};
 pub enum Type {
   Void,
-  Boolean
+  Boolean,
+  Int32
 
   pub func formatter(&self) -> Option<String> {
     match self {
-      Type::Boolean => "%s"
+      Type::Boolean => "%s\n"
+      Type::Int32 => "%d\n"
       _ => return None
     }
   }
@@ -19,6 +21,7 @@ impl Print for Type {
     match self {
       Type::Void => "void"
       Type::Boolean => "bool"
+      Type::Int32 => "int32"
     }
   }
 }

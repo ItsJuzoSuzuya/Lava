@@ -19,7 +19,6 @@ pub enum CompileError {
       CompileError::TargetTripleInvalid(triple) => "Couldn't build Target from Triple " + triple.arch
       CompileError::CompilationFailure(message) => "An error occured while compiling: " + message
     }
-
   }
 }
 
@@ -48,8 +47,7 @@ pub class Program {
     }
 
     mut verify_error: Option<String> = None;
-    self.context.module.verify(&verify_error);
-    if verify_error is Some(err) {
+    if self.context.module.verify(&verify_error) != 0 && verify_error is Some(err) {
       errors.push(CompileError::CompilationFailure(err));
       return Err(errors);
     }

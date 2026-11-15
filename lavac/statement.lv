@@ -22,7 +22,7 @@ impl Codegen for Statement {
         let called = ctx.call_fn("printf", &[format, f]);
         return ctx.builder.build_return(called);
       }
-      StmtKind::Return(expr) => ctx.builder.build_return(expr.codegen(ctx)),
+      StmtKind::Return(expr) => return ctx.builder.build_return(expr.codegen(ctx)),
       StmtKind::Value(expr) => return expr.codegen(ctx),
       StmtKind::Expression(expr) => return expr.codegen(ctx)
     }

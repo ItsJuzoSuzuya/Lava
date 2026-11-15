@@ -552,11 +552,22 @@ impl Index {
                     self.declare(file, method, Some((class, name.clone(), None)));
                 }
             }
-            DeclarationKind::Enum { name, type_params, fields, methods } => {
+            DeclarationKind::Enum { name, type_params, fields, field_names, methods } => {
                 let span = self.name_after(file, &decl.span, name);
                 let mut def = Def::new(name, DefKind::Enum, Some(file), span);
                 let variants: Vec<String> = fields.iter()
-                    .map(|(v, _, ty, _)| if *ty == Type::Void { format!("    {}", v) } else { format!("    {} => {}", v, show_type(ty)) })
+                    .map(|(v, _, ty, _)| {
+                        // `Binary => { lhs: Expr, rhs: Expr }` shows its fields by name
+                        if let Some((_, names)) = field_names.iter().find(|(variant, _)| variant == v) {
+                            let types: Vec<Type> = match ty {
+                                Type::Tuple(types) if names.len() > 1 => types.clone(),
+                                other => vec![other.clone()],
+                            };
+                            let shown: Vec<String> = names.iter().zip(&types).map(|(n, t)| format!("{}: {}", n, show_type(t))).collect();
+                            return format!("    {} => {{ {} }}", v, shown.join(", "));
+                        }
+                        if *ty == Type::Void { format!("    {}", v) } else { format!("    {} => {}", v, show_type(ty)) }
+                    })
                     .collect();
                 def.signature = format!("{}enum {}{} {{\n{}\n}}", if public { "pub " } else { "" }, name, show_type_params(type_params), variants.join(",\n"));
                 def.ty = Type::Enum(name.clone());
@@ -1331,6 +1342,12 @@ impl<'a> Walker<'a> {
             }
             Pattern::Tuple(items) => {
                 for item in items {
+                    self.pattern(item, from, scope_end);
+                }
+            }
+            // Only left in templates, sema turns it into a tuple pattern
+            Pattern::Fields { fields, .. } => {
+                for (_, item, _) in fields {
                     self.pattern(item, from, scope_end);
                 }
             }

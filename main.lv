@@ -1,3 +1,1 @@
-if true {
-  print(true);
-}
+print(128 + 20 * 2);

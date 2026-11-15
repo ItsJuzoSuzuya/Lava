@@ -626,6 +626,9 @@ impl Parser {
     ///
     /// Panics if the parentheses don't hold patterns separated by commas.
     fn parse_variant_payload(&mut self) -> Option<Box<Pattern>> {
+        if matches!(self.peek().0, Token::LBrace) && self.field_pattern_ahead() {
+            return Some(Box::new(self.parse_field_pattern()));
+        }
         if !matches!(self.peek().0, Token::LParen) {
             return None;
         }
@@ -644,6 +647,63 @@ impl Parser {
             _ => Pattern::Tuple(items),
         };
         Some(Box::new(payload))
+    }
+
+    /// Whether the `{` coming next after a variant in a pattern holds its named
+    /// fields, like `Binary { lhs, .. }`, rather than opening the body after an
+    /// `is`, like `if e is Light::Red { ... }`.
+    fn field_pattern_ahead(&mut self) -> bool {
+        let checkpoint = self.lexer.checkpoint();
+        self.consume(); // '{'
+        let first = self.lexer.get_next_token().map(|(t, _)| t);
+        let second = self.lexer.get_next_token().map(|(t, _)| t);
+        let third = self.lexer.get_next_token().map(|(t, _)| t);
+        self.lexer.rewind(checkpoint);
+        match (first, second, third) {
+            (Ok(Token::DotDot), _, _) => true,
+            (Ok(Token::Identifier(_)), Ok(Token::Comma | Token::Colon), _) => true,
+            // `{ x }` alone could be a body giving `x`, it's a pattern if a body or `=>` follows
+            (Ok(Token::Identifier(_)), Ok(Token::RBrace), Ok(next)) =>
+                matches!(next, Token::ThickArrow | Token::LBrace | Token::AndAnd | Token::OrOr | Token::RParen | Token::Question),
+            _ => false,
+        }
+    }
+
+    /// Parses the named fields of a variant pattern, `{ lhs, op: o, .. }`. The
+    /// `{` is next.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a field isn't a name, optionally with `: pattern`, or `..`
+    /// isn't last.
+    fn parse_field_pattern(&mut self) -> Pattern {
+        self.consume(); // '{'
+        let mut fields = Vec::new();
+        let mut rest = false;
+        while !matches!(self.peek_or_eof("in field pattern").0, Token::RBrace) {
+            if matches!(self.peek().0, Token::DotDot) {
+                let (_, span) = self.next_token();
+                rest = true;
+                if !matches!(self.peek_or_eof("in field pattern").0, Token::RBrace) {
+                    diagnostic::throw("`..` stands for the other fields, it comes last", Some(span), &self.lexer.source);
+                }
+                break;
+            }
+            let (name, span) = self.expect(Token::Identifier("field".to_string()), "in field pattern");
+            let name = self.written(&name.to_string());
+            let pattern = if matches!(self.peek().0, Token::Colon) {
+                self.consume();
+                self.parse_pattern().0
+            } else {
+                Pattern::name(&name, span.clone())
+            };
+            fields.push((name, pattern, span));
+            if !matches!(self.peek_or_eof("in field pattern").0, Token::RBrace) {
+                self.expect(Token::Comma, "between the fields of a pattern");
+            }
+        }
+        self.expect(Token::RBrace, "after field pattern");
+        Pattern::Fields { fields, rest }
     }
 
     /// Parses the pattern of a match arm or an `is`.
@@ -1812,10 +1872,10 @@ impl Parser {
         let type_params = self.parse_optional_type_params();
 
         let outer_type_params = self.enter_type_params(&type_params);
-        let (fields, methods) = self.parse_enum_body(&name);
+        let (fields, field_names, methods) = self.parse_enum_body(&name);
         self.type_params = outer_type_params;
 
-        DeclarationKind::Enum { name, type_params, fields, methods }
+        DeclarationKind::Enum { name, type_params, fields, field_names, methods }
     }
 
     /// Parses an enum body: `Variant => Type` or plain `Variant` entries
@@ -1831,17 +1891,21 @@ impl Parser {
     /// ```
     ///
     /// Returns each variant's name, index, payload type and the type's span,
-    /// and the methods. A variant without payload has the payload type
-    /// [`Type::Void`] and the span of its name. Indices are assigned in
-    /// declaration order, starting at 0.
+    /// the names of the variants with named fields, and the methods. A variant
+    /// without payload has the payload type [`Type::Void`] and the span of its
+    /// name. One with named fields, `Binary => { lhs: Expr, rhs: Expr }`, has
+    /// the tuple of their types, or the one field's type. Indices are assigned
+    /// in declaration order, starting at 0.
     ///
     /// # Panics
     ///
     /// Panics if a variant or method contains a syntax error or the body isn't closed.
-    fn parse_enum_body(&mut self, enum_name: &str) -> (Vec<(String, u32, Type, Span)>, Vec<Declaration>) {
+    #[allow(clippy::type_complexity)]
+    fn parse_enum_body(&mut self, enum_name: &str) -> (Vec<(String, u32, Type, Span)>, Vec<(String, Vec<String>)>, Vec<Declaration>) {
         self.expect(Token::LBrace, "enum body");
         let mut index: u32 = 0;
         let mut fields: Vec<(String, u32, Type, Span)> = Vec::new();
+        let mut field_names: Vec<(String, Vec<String>)> = Vec::new();
         let mut methods: Vec<Declaration> = Vec::new();
         while !matches!(self.peek_or_eof("enum body"), (Token::RBrace, _)) {
             // Methods come after the variants
@@ -1868,7 +1932,34 @@ impl Parser {
             let (ty, ty_span) = match self.peek_or_eof("in enum body") {
                 (Token::ThickArrow, _) => {
                     self.consume();
-                    self.parse_type()
+                    if matches!(self.peek().0, Token::LBrace) {
+                        // `Binary => { lhs: Expr, op: Token, rhs: Expr }`
+                        let (_, brace_span) = self.next_token();
+                        let mut names: Vec<String> = Vec::new();
+                        let mut types = Vec::new();
+                        while !matches!(self.peek_or_eof("in variant fields").0, Token::RBrace) {
+                            let (field, field_span) = self.expect(Token::Identifier("field".to_string()), "in variant fields");
+                            let field = self.written(&field.to_string());
+                            if names.contains(&field) {
+                                diagnostic::throw(format!("the field '{}' is declared twice", field), Some(field_span), &self.lexer.source);
+                            }
+                            self.expect(Token::Colon, "after the field's name");
+                            types.push(self.parse_type().0);
+                            names.push(field);
+                            if !matches!(self.peek_or_eof("in variant fields").0, Token::RBrace) {
+                                self.expect(Token::Comma, "between variant fields");
+                            }
+                        }
+                        let (_, close) = self.expect(Token::RBrace, "after variant fields");
+                        if names.is_empty() {
+                            diagnostic::throw("a variant with `{ }` needs at least one field, leave the `=> { }` out for none", Some(close), &self.lexer.source);
+                        }
+                        field_names.push((name.to_string(), names));
+                        let ty = if types.len() == 1 { types.remove(0) } else { Type::Tuple(types) };
+                        (ty, brace_span)
+                    } else {
+                        self.parse_type()
+                    }
                 }
                 (Token::Comma | Token::Semicolon | Token::RBrace | Token::Pub | Token::Func, _) => (Type::Void, name_span),
                 (got, span) => ParseError::UnexpectedToken {
@@ -1887,7 +1978,7 @@ impl Parser {
         }
         self.expect(Token::RBrace, "enum body");
 
-        (fields, methods)
+        (fields, field_names, methods)
     }
 
     // --- Variable Parsing ---
@@ -2159,6 +2250,21 @@ impl Parser {
             Token::CharLiteral(value) => ExprKind::CharLiteral(value),
             // A `{` after `if`, `while` or `match` opens the body instead
             Token::LBrace if self.allow_brace_init => self.parse_array_literal(),
+            // `[a, b]`, an array or a `Vector`, whichever is expected
+            Token::LBracket => {
+                let prev_brace = self.allow_brace_init;
+                self.allow_brace_init = true;
+                let mut values = Vec::new();
+                while !matches!(self.peek_or_eof("in list").0, Token::RBracket) {
+                    values.push(self.next_expression());
+                    if !matches!(self.peek_or_eof("in list").0, Token::RBracket) {
+                        self.expect(Token::Comma, "between list values");
+                    }
+                }
+                self.consume(); // ']'
+                self.allow_brace_init = prev_brace;
+                ExprKind::ArrayLiteral(values)
+            }
             // Parentheses group, like `(a + b) * c`, with commas they make a tuple like `(a, b)`
             Token::LParen => {
                 let prev_brace = self.allow_brace_init;

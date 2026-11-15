@@ -6,8 +6,8 @@
 //!
 //! A name starting with `_` is never reported as unused.
 
-use crate::{analysis::{DefKind, Index}, expression::{Block, Expr, ExprKind}, module, program::CheckedModule, span::Span,
-    statement::{Stmt, StmtKind}, declaration::DeclarationKind, token::Token};
+use crate::{analysis::{show_type, DefKind, Index}, expression::{Block, Expr, ExprKind}, module, program::CheckedModule, span::Span,
+    statement::{Stmt, StmtKind}, declaration::DeclarationKind, token::Token, r#type::Type, sema::written_type};
 
 /// A lint warning.
 #[derive(Debug, Clone)]
@@ -45,7 +45,7 @@ pub fn lint(index: &Index, modules: &[CheckedModule]) -> Vec<Warning> {
     lint_imports(index, &checked, &mut warnings);
     for module in user_modules() {
         let Some(file) = index.file_index(&module.path) else { continue };
-        let mut walker = CodeLints { file, warnings: &mut warnings };
+        let mut walker = CodeLints { file, warnings: &mut warnings, return_type: None };
         walker.block(&module.stmts[..module.own_stmts]);
     }
 
@@ -192,6 +192,9 @@ fn to_pascal_case(name: &str) -> String {
 struct CodeLints<'a> {
     file: usize,
     warnings: &'a mut Vec<Warning>,
+    /// The return type of the function being walked, as written, like
+    /// `Option<LLVMValueRef>`. `None` outside functions and for ones giving nothing.
+    return_type: Option<String>,
 }
 
 impl CodeLints<'_> {
@@ -216,6 +219,65 @@ impl CodeLints<'_> {
         }
     }
 
+    /// The body of a function giving `return_type`.
+    fn function(&mut self, body: &[Stmt], return_type: Option<&Type>) {
+        let outer = self.return_type.take();
+        self.return_type = return_type.filter(|ty| **ty != Type::Void).map(|ty| written_type(&show_type(ty)));
+        self.block(body);
+        self.return_type = outer;
+    }
+
+    /// Warns about the values of the arms of `expr`, a match or if whose value
+    /// isn't used, that the function could have returned: like `build_add(..)`
+    /// in a function giving an `Option<LLVMValueRef>`, where a `return` is missing.
+    fn dropped_values(&mut self, expr: &Expr) {
+        let blocks: Vec<&Block> = match &expr.kind {
+            ExprKind::Match { arms, .. } => arms.iter().map(|arm| &arm.block).collect(),
+            ExprKind::If { then_block, else_block, .. } => std::iter::once(then_block).chain(else_block).collect(),
+            _ => return,
+        };
+        for block in blocks {
+            let Some(value) = &block.value else { continue };
+            // A match giving such values as the value of an arm is reported once, as a whole
+            if matches!(value.kind, ExprKind::Match { .. } | ExprKind::If { .. }) {
+                if let Some(ty) = self.returnable_value(value) {
+                    let what = if matches!(value.kind, ExprKind::Match { .. }) { "match" } else { "if" };
+                    self.warn(&value.span, "dropped_value",
+                        format!("this {} gives a '{}' that's thrown away. Did you mean `return {} ...`?", what, ty, what));
+                }
+                continue;
+            }
+            if let Some(ty) = self.returnable_value(value) {
+                self.warn(&value.span, "dropped_value",
+                    format!("this '{}' is thrown away, the match or if around it isn't returned. Did you mean `return`?", ty));
+            }
+        }
+    }
+
+    /// The type of `value`, or of the values of its arms if it's a match or if,
+    /// when the function could return it. `None` otherwise.
+    fn returnable_value(&self, value: &Expr) -> Option<String> {
+        match &value.kind {
+            ExprKind::Match { arms, .. } => arms.iter()
+                .filter_map(|arm| arm.block.value.as_deref())
+                .find_map(|value| self.returnable_value(value)),
+            ExprKind::If { then_block, else_block, .. } => std::iter::once(then_block).chain(else_block)
+                .filter_map(|block| block.value.as_deref())
+                .find_map(|value| self.returnable_value(value)),
+            // `lhs = expr` as an arm only stores its value
+            ExprKind::Assignment { .. } => None,
+            _ if matches!(value.ty, Type::Void | Type::Unknown) => None,
+            _ => {
+                let returned = self.return_type.as_ref()?;
+                let value_ty = written_type(&show_type(&value.ty));
+                let fits = *returned == value_ty
+                    || *returned == format!("Option<{}>", value_ty)
+                    || returned.starts_with(&format!("Result<{}, ", value_ty));
+                fits.then_some(value_ty)
+            }
+        }
+    }
+
     /// A match arm or branch of an `if`: its statements, then its value.
     fn value_block(&mut self, block: &Block) {
         self.block(&block.stmts);
@@ -227,12 +289,12 @@ impl CodeLints<'_> {
     fn stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
             StmtKind::Declaration(decl) => match &decl.kind {
-                DeclarationKind::Function { body: Some(body), .. } => self.block(body),
+                DeclarationKind::Function { body: Some(body), return_type, .. } => self.function(body, return_type.as_ref()),
                 DeclarationKind::Class { methods, .. } | DeclarationKind::Enum { methods, .. }
                 | DeclarationKind::Trait { methods, .. } | DeclarationKind::Impl { methods, .. } => {
                     for method in methods {
-                        if let DeclarationKind::Function { body: Some(body), .. } = &method.kind {
-                            self.block(body);
+                        if let DeclarationKind::Function { body: Some(body), return_type, .. } = &method.kind {
+                            self.function(body, return_type.as_ref());
                         }
                     }
                 }
@@ -241,6 +303,9 @@ impl CodeLints<'_> {
             StmtKind::Expression(expr) => {
                 if has_no_effect(expr) {
                     self.warn(&expr.span, "no_effect", "this expression does nothing, its value isn't used");
+                }
+                if matches!(expr.kind, ExprKind::Match { .. } | ExprKind::If { .. }) {
+                    self.dropped_values(expr);
                 }
                 self.expr(expr);
             }

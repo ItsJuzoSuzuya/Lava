@@ -124,6 +124,14 @@ pub class Vector<T> {
   }
 }
 
+// `list` with `item` added at the end. A list literal `[a, b]` where a Vector is
+// expected becomes `with_item(with_item(Vector(), a), b)`.
+pub func with_item<T>(list: Vector<T>, item: T) -> Vector<T> {
+  mut items = list;
+  items.push(item);
+  return items;
+}
+
 // `value` in decimal, for the messages above.
 func int_to_string(value: int64) -> String {
   mut digits = Buffer<char>(24);

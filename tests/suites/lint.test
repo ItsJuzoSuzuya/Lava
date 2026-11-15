@@ -270,3 +270,51 @@ for x in v {
   print(x);
 }
 --- lint
+
+=== a value the function could return is thrown away
+import std::option::{Option};
+enum Op { Add, Sub; }
+func apply(op: Op, a: int32, b: int32) -> Option<int32> {
+  match op {
+    Op::Add => a + b,
+    Op::Sub => a - b,
+  }
+  return None;
+}
+print(apply(Op::Add, 1, 2) ?? 0);
+--- lint
+main.lv:5:16 dropped_value: this 'int32' is thrown away, the match or if around it isn't returned. Did you mean `return`?
+main.lv:6:16 dropped_value: this 'int32' is thrown away, the match or if around it isn't returned. Did you mean `return`?
+
+=== a match nested in an arm is reported once
+import std::option::{Option};
+enum Op { Add, Sub; }
+enum Kind { Binary => Op, Other; }
+func eval(kind: Kind) -> Option<int32> {
+  match kind {
+    Kind::Binary(op) => {
+      match op {
+        Op::Add => 1,
+        Op::Sub => 2,
+      }
+    },
+    Kind::Other => return None,
+  }
+  return None;
+}
+print(eval(Kind::Other) ?? 0);
+--- lint
+main.lv:7:7 dropped_value: this match gives a 'int32' that's thrown away. Did you mean `return match ...`?
+
+=== an assignment in an arm isn't a dropped value
+import std::option::{Option};
+func pick(o: Option<int32>) -> int32 {
+  mut x = 0;
+  match o {
+    Some(v) => x = v,
+    None => x = 1,
+  }
+  return x;
+}
+print(pick(Some(3)));
+--- lint

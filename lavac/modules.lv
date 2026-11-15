@@ -7,27 +7,26 @@ import std::hashmap;
 import std::hashmap::{HashMap};
 import lexer;
 import program;
+import parser;
+import std::fs;
 
 /// A module imported by another one, like `import math;` or
 /// `import std::fs::{read};` at `span`.
 pub class Import {
   /// Name of the imported module, `math` or `std::fs`.
   pub name: String;
-  /// Items of a standard library module usable without its name, `read`
-  /// in `import std::fs::{read};` or `import std::fs::read;`.
-  pub items: Vector<(String, Span)>;
-  pub span: Span;
 }
 
 /// A source file of the program.
 pub class Module {
   pub imports: Vector<Import>;
-  /// Module name, the file name without `.lv` (`math` for `math.lv`), or
-  /// like `std::fs` for a module of the standard library.
-  pub full_name: String;
   /// Canonical path of the file.
   pub path: Path;
   pub source: String;
+
+  /// Module name, the file name without `.lv` (`math` for `math.lv`), or
+  /// like `std::fs` for a module of the standard library.
+  pub full_name: String = path.file_stem();
 
   /// The name of the standard library module this is, `fs` for `std::fs`.
   pub func strip_std(&self) -> Option<String> {
@@ -46,12 +45,21 @@ pub class Module {
 /// the modules importing them.
 pub class ModuleGraph {
   pub modules: Vector<Module> = Vector();
-  pub module_errors: Vector<CompileError> = Vector();
+  pub module_errors: Vector<Vector<ParseError>> = Vector();
 
   overlay: HashMap<Path,String> = HashMap();
 
-  
-  Constructor(root_path: &Path) {
-    
+  Constructor(root_path: Path) {
+    mut modules = Vector<Module>();
+    mut module_errors = Vector<Vector<ParseError>>();
+    let source = match fs::read(root_path) {
+      Ok(txt) => txt
+      Err(err) => panic("couldnt read root path: " + err)
+    };
+    let imports = Parser::from_source(source).parse_imports();
+    match imports {
+      Ok(imps) => self.modules.push(Module(imps, root_path, source))
+      Err(err) => self.module_errors.push(err)
+    }
   }
 }

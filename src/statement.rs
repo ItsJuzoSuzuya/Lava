@@ -406,7 +406,7 @@ pub fn codegen_match<'ctx>(
                 Pattern::Literal(expr) if matches!(expr.kind, ExprKind::Identifier(_)) => {
                     wildcard_bb = Some(bb);
                 }
-                Pattern::Literal(_) | Pattern::List { .. } | Pattern::Tuple(_) => {
+                Pattern::Literal(_) | Pattern::List { .. } | Pattern::Tuple(_) | Pattern::Fields { .. } => {
                     panic!("this pattern can't match an enum, sema rejects it");
                 }
             }
@@ -485,7 +485,7 @@ pub fn codegen_match<'ctx>(
                 Pattern::Wildcard => {
                     wildcard_bb = Some(bb);
                 }
-                Pattern::EnumVariant { .. } | Pattern::List { .. } | Pattern::Tuple(_) => {
+                Pattern::EnumVariant { .. } | Pattern::List { .. } | Pattern::Tuple(_) | Pattern::Fields { .. } => {
                     panic!("this pattern can't match a number or bool, sema rejects it");
                 }
             }
@@ -724,6 +724,7 @@ fn pattern_test<'ctx>(ctx: &mut CodegenContext<'ctx>, pattern: &Pattern, place: 
             }
             all
         }
+        Pattern::Fields { .. } => unreachable!("sema turns field patterns into tuple patterns"),
     }
 }
 

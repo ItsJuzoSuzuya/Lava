@@ -128,7 +128,7 @@ impl SemanticError {
             SemanticError::NotIndexable { ty, span } =>
                 (span.line, span.col, format!("'{}' can't be indexed, it's no array, String or type with a 'get' method", ty)),
             SemanticError::ArrayLength { expected, got, span } =>
-                (span.line, span.col, format!("the array needs {} values, got {}", expected, got)),
+                (span.line, span.col, format!("the array needs {} values, got {}. For a list of any length use a Vector, like `let items: Vector<T> = ...`", expected, got)),
             SemanticError::ArrayIndexOutOfRange { index, len, span } =>
                 (span.line, span.col, format!("index {} is out of bounds for an array of length {}", index, len)),
             SemanticError::EmptyArrayType { span } =>
@@ -310,6 +310,9 @@ pub struct Sema {
     functions: HashMap<String, (Vec<Param>, Type, Visibility, String)>,
     classes: HashMap<String, Vec<Field>>,
     enums: HashMap<String, Vec<(String, u32, Type)>>,
+    /// The field names of the variants with named fields, by enum (or generic
+    /// enum template) and variant, like `Binary` of `ExprKind`.
+    variant_fields: HashMap<String, HashMap<String, Vec<String>>>,
     /// Methods of every trait, by trait name. An instance of a generic trait is
     /// named like `Iterator<int32>`.
     traits: HashMap<String, Vec<Declaration>>,
@@ -485,7 +488,7 @@ impl Sema {
     /// Codegen defines the same functions in `CodegenContext::define_builtins`.
     pub fn new() -> Self {
         let mut sema = Self {
-            scope: HashMap::new(), functions: HashMap::new(), classes: HashMap::new(), enums: HashMap::new(),
+            scope: HashMap::new(), functions: HashMap::new(), classes: HashMap::new(), enums: HashMap::new(), variant_fields: HashMap::new(),
             traits: HashMap::new(), impls: HashMap::new(), current_class: None, current_trait: None,
             generic_traits: HashMap::new(), trait_substs: HashMap::new(), generic_impls: Vec::new(), applied_impls: HashSet::new(), buffer_types: Vec::new(), constructors: HashMap::new(),
             type_instance_decls: Vec::new(), lazy_methods: HashMap::new(), used_functions: HashMap::new(), used_methods: Vec::new(), lazy_instance: None,
@@ -902,6 +905,28 @@ impl Sema {
 
     /// Whether a value of type `ty` can be passed as a `&[element]`: an array
     /// of `element`s or a `Vector<element>`, also through a reference.
+    /// The `Vector<T>` type a list literal builds where `ty` is expected: `ty`
+    /// itself, or the one in an `Option<Vector<T>>` or `Result<Vector<T>, E>`.
+    fn expected_vector(&self, ty: &Type) -> Option<Type> {
+        if self.std_vector_element(ty).is_some() {
+            return Some(ty.clone());
+        }
+        let inner = match self.result_types(ty) {
+            Some((ok_ty, _)) => ok_ty,
+            None => self.option_value_type(ty)?,
+        };
+        self.std_vector_element(&inner).map(|_| inner)
+    }
+
+    /// The element type `T` if `ty` is a `Vector<T>` of std::vector.
+    fn std_vector_element(&self, ty: &Type) -> Option<Type> {
+        let Type::Class(name) = ty else { return None };
+        match self.type_instances.get(name) {
+            Some((template, args)) if template == "vector::Vector" && args.len() == 1 => Some(args[0].clone()),
+            _ => None,
+        }
+    }
+
     fn slices_into(&self, ty: &Type, element: &Type) -> bool {
         match ty {
             Type::Ref(inner) => self.slices_into(inner, element),
@@ -1457,6 +1482,11 @@ impl Sema {
     fn declare_type_names(&mut self, ast: &[Stmt]) {
         for stmt in ast {
             if let StmtKind::Declaration(decl) = &stmt.kind {
+                if let DeclarationKind::Enum { name, field_names, .. } = &decl.kind {
+                    if !field_names.is_empty() {
+                        self.variant_fields.insert(name.clone(), field_names.iter().cloned().collect());
+                    }
+                }
                 match &decl.kind {
                     DeclarationKind::Class { name, type_params, .. } | DeclarationKind::Enum { name, type_params, .. }
                         if !type_params.is_empty() =>
@@ -2109,22 +2139,66 @@ impl Sema {
         }
     }
 
+    /// Whether a value of type `ty` contains a value of the class or enum
+    /// `target` itself, not behind a `Unique`, `Shared`, `Buffer` or reference.
+    fn holds_by_value(&self, ty: &Type, target: &str, seen: &mut HashSet<String>) -> bool {
+        match ty {
+            Type::Class(name) | Type::Enum(name) => {
+                if name == target {
+                    return true;
+                }
+                if !seen.insert(name.clone()) {
+                    return false;
+                }
+                let in_fields = self.classes.get(name)
+                    .is_some_and(|fields| fields.iter().any(|f| self.holds_by_value(&f.ty, target, seen)));
+                let in_variants = self.enums.get(name)
+                    .is_some_and(|variants| variants.iter().any(|(_, _, payload)| self.holds_by_value(payload, target, seen)));
+                in_fields || in_variants
+            }
+            Type::Tuple(items) => items.iter().any(|item| self.holds_by_value(item, target, seen)),
+            Type::Array(item, _) => self.holds_by_value(item, target, seen),
+            _ => false,
+        }
+    }
+
     fn validate_decl_types(&self, decl: &Declaration, span: &Span) {
         match &decl.kind {
             DeclarationKind::Class { type_params, .. } | DeclarationKind::Enum { type_params, .. }
                 if !type_params.is_empty() => {}
-            DeclarationKind::Class { fields, methods, .. } => {
+            DeclarationKind::Class { name, fields, methods, .. } => {
                 for f in fields {
                     self.check_type(&f.ty, &f.ty_span);
+                }
+                let declared = self.classes.get(name).cloned().unwrap_or_default();
+                for (field, written) in declared.iter().zip(fields) {
+                    if self.holds_by_value(&field.ty, name, &mut HashSet::new()) {
+                        let shown = crate::analysis::written_name(name);
+                        diagnostic::throw(
+                            format!("the field '{}' holds a '{}' directly, so a '{}' would be endlessly big. Put it on the heap with `Unique<{}>`",
+                                field.name, shown, shown, shown),
+                            Some(written.ty_span.clone()), &self.source);
+                    }
                 }
                 for m in methods {
                     self.validate_decl_types(m, span);
                 }
             }
-            DeclarationKind::Enum { fields, methods, .. } => {
+            DeclarationKind::Enum { name, fields, methods, .. } => {
                 for (_, _, ty, ty_span) in fields {
                     if *ty != Type::Void {
                         self.check_type(ty, ty_span);
+                    }
+                }
+                // A value can't hold another one of its own type directly, it would be endless
+                let variants = self.enums.get(name).cloned().unwrap_or_default();
+                for ((variant, _, payload), (_, _, _, ty_span)) in variants.iter().zip(fields) {
+                    if self.holds_by_value(payload, name, &mut HashSet::new()) {
+                        let shown = crate::analysis::written_name(name);
+                        diagnostic::throw(
+                            format!("'{}::{}' holds a '{}' directly, so it would be endlessly big. Put it on the heap with `Unique<{}>`",
+                                shown, variant, shown, shown),
+                            Some(ty_span.clone()), &self.source);
                     }
                 }
                 for m in methods {
@@ -2454,7 +2528,31 @@ impl Sema {
         };
 
         let declared: Vec<Type> = params.iter().filter(|p| p.name != "self").map(|p| p.ty.clone()).collect();
-        self.check_generic_args(args, &declared);
+        // With explicit type arguments, like `f<Vector<int32>>(x)`, an argument for a
+        // parameter `T` is checked as one, so `[1, 2]` there is a Vector
+        let named: Vec<&TypeParam> = type_params.iter().filter(|p| !p.is_hidden()).collect();
+        if !type_args.is_empty() && named.len() == type_args.len() {
+            for (i, arg) in args.iter_mut().enumerate() {
+                let explicit = match declared.get(i) {
+                    Some(Type::Param(param)) => named.iter().position(|p| p.name == *param).map(|at| type_args[at].clone()),
+                    _ => None,
+                };
+                match explicit {
+                    Some(ty) => {
+                        let ty = self.canonicalize_type(&ty, span);
+                        self.check_expr_expecting(arg, &ty);
+                    }
+                    None if matches!(declared.get(i), Some(Type::Ref(_) | Type::Slice(_))) => {
+                        self.check_borrowed(arg, None);
+                    }
+                    None => {
+                        self.check_expr(arg);
+                    }
+                }
+            }
+        } else {
+            self.check_generic_args(args, &declared);
+        }
         let bindings: Vec<(Type, &Expr)> = params.iter()
             .filter(|p| p.name != "self")
             .map(|p| p.ty.clone())
@@ -2607,6 +2705,12 @@ impl Sema {
                             self.bind_type_params(pattern, actual, subst);
                         }
                     }
+                }
+            }
+            // Like the payload `(T, T)` of `Both => { first: T, second: T }`
+            (Type::Tuple(patterns), Type::Tuple(actuals)) if patterns.len() == actuals.len() => {
+                for (pattern, actual) in patterns.iter().zip(actuals) {
+                    self.bind_type_params(pattern, actual, subst);
                 }
             }
             _ => {}
@@ -3074,6 +3178,11 @@ impl Sema {
                         }
                         ty
                     }
+                    // A number in a temporary, like `make()[0]`, is copied, the temporary is gone afterwards
+                    None if borrows_temporary(value) => {
+                        read_through(value);
+                        value.ty.clone()
+                    }
                     None => value_ty,
                 };
                 self.check_type(&ty, &stmt_span);
@@ -3259,6 +3368,12 @@ impl Sema {
                 };
                 self.pattern_owner = self.owner_of(scrutinee);
                 self.check_match_arms(&scrutinee_ty, arms, None);
+                // The cases without an arm do nothing. Written out, so a function whose
+                // arms all return still needs a `return` after the match for those
+                if !self.covers_every_case(&scrutinee_ty, arms) {
+                    let span = arms.last().map(|arm| arm.span.clone()).unwrap_or_else(|| expr.span.clone());
+                    arms.push(MatchArm { pattern: Pattern::Wildcard, block: Block { stmts: Vec::new(), value: None }, span });
+                }
             }
             ExprKind::If { condition, then_block, else_block } => {
                 self.check_if(condition, then_block, else_block, None);
@@ -3360,6 +3475,15 @@ impl Sema {
                 }
                 let scrut_enum = match ty {
                     Type::Enum(n) => n.clone(),
+                    // `Unique<Option<Block>>` is a pointer, the `Option` is on the heap
+                    Type::Unique(inner) | Type::Shared(inner) if matches!(**inner, Type::Enum(_)) => {
+                        let shown = crate::analysis::show_type(inner);
+                        diagnostic::throw(
+                            format!("a pattern can't look inside a '{}', it only points to the '{}'. \
+                                Keep the enum itself and put its payload on the heap instead, like `Option<Unique<Block>>`",
+                                written_type(&crate::analysis::show_type(ty)), written_type(&shown)),
+                            Some(span.clone()), &self.source)
+                    }
                     other => SemanticError::InvalidReceiver {
                         recv_ty: other.clone(),
                         span: span.clone(),
@@ -3400,6 +3524,15 @@ impl Sema {
                         variant: variant.clone(),
                         span: span.clone(),
                     }.throw(&self.source));
+                // `Binary { lhs, .. }` is the tuple pattern of the payload, in the fields' order
+                if let Some(payload) = payload.as_deref_mut() {
+                    if let Pattern::Fields { fields, rest } = payload {
+                        let fields = std::mem::take(fields);
+                        let rest = *rest;
+                        let given: Vec<(String, Pattern, Span)> = fields;
+                        *payload = self.lower_field_pattern(&scrut_enum, variant, given, rest, span);
+                    }
+                }
                 // The payload matches its own pattern, like `x` or `Ok(x)` of `Some(Ok(x))`
                 if let Some(payload) = payload {
                     if payload_ty == Type::Void {
@@ -3470,7 +3603,65 @@ impl Sema {
                     self.check_pattern(item, ty, span);
                 }
             }
+            Pattern::Fields { .. } => diagnostic::throw(
+                "named fields like `{ lhs, .. }` only follow a variant, like `ExprKind::Binary { lhs, .. }`",
+                Some(span.clone()), &self.source),
         }
+    }
+
+    /// The names of the fields of the variant `variant` of the enum `enum_name`,
+    /// or an instance of it. `None` if it has no named fields.
+    fn variant_field_names(&self, enum_name: &str, variant: &str) -> Option<Vec<String>> {
+        let template = self.type_instances.get(enum_name).map(|(template, _)| template.as_str()).unwrap_or(enum_name);
+        self.variant_fields.get(template).and_then(|variants| variants.get(variant)).cloned()
+    }
+
+    /// The fields `given` of a variant, by name, in the order the variant
+    /// declares them. A field not given is `missing(name)`, or an error if that
+    /// gives `None`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the variant has no named fields, or a field is unknown, given
+    /// twice or missing.
+    fn order_fields<T>(&self, enum_name: &str, variant: &str, given: Vec<(String, T, Span)>, missing: impl Fn(&str) -> Option<T>, what: &str, span: &Span) -> Vec<T> {
+        let shown = crate::analysis::written_name(enum_name);
+        let Some(names) = self.variant_field_names(enum_name, variant) else {
+            diagnostic::throw(
+                format!("'{}::{}' has no named fields, write its payload like `{}::{}(value)`", shown, variant, shown, variant),
+                Some(span.clone()), &self.source)
+        };
+        let mut given: Vec<Option<(String, T, Span)>> = given.into_iter().map(Some).collect();
+        for (i, field) in given.iter().enumerate() {
+            let (name, _, field_span) = field.as_ref().unwrap();
+            if !names.contains(name) {
+                diagnostic::throw(
+                    format!("'{}::{}' has no field '{}', its fields are {}", shown, variant, name,
+                        names.iter().map(|n| format!("'{}'", n)).collect::<Vec<_>>().join(", ")),
+                    Some(field_span.clone()), &self.source);
+            }
+            if given[..i].iter().any(|other| other.as_ref().is_some_and(|(other, _, _)| other == name)) {
+                diagnostic::throw(format!("the field '{}' is given twice", name), Some(field_span.clone()), &self.source);
+            }
+        }
+        names.iter().map(|name| {
+            let found = given.iter_mut().find(|field| field.as_ref().is_some_and(|(n, _, _)| n == name));
+            match found {
+                Some(field) => field.take().unwrap().1,
+                None => missing(name).unwrap_or_else(|| diagnostic::throw(
+                    format!("'{}::{}' also needs the field '{}'{}", shown, variant, name, what),
+                    Some(span.clone()), &self.source)),
+            }
+        }).collect()
+    }
+
+    /// The pattern of the payload of a variant with named fields, matched by
+    /// `{ lhs, op: o, .. }`: a tuple pattern in the order of the fields, or
+    /// the one field's pattern. Fields left out with `..` match anything.
+    fn lower_field_pattern(&self, enum_name: &str, variant: &str, given: Vec<(String, Pattern, Span)>, rest: bool, span: &Span) -> Pattern {
+        let mut items = self.order_fields(enum_name, variant, given, |_| rest.then_some(Pattern::Wildcard),
+            ", name it or end the pattern with `..`", span);
+        if items.len() == 1 { items.remove(0) } else { Pattern::Tuple(items) }
     }
 
     /// The item type of a value of type `ty` a list pattern can match, and its
@@ -3503,6 +3694,7 @@ impl Sema {
                 Type::Tuple(types) => items.iter().zip(types).all(|(item, ty)| self.irrefutable(item, ty)),
                 _ => false,
             },
+            Pattern::Fields { .. } => false,
         }
     }
 
@@ -4190,6 +4382,32 @@ impl Sema {
                 }
             }
             ExprKind::CharLiteral(_) => Type::Char,
+            ExprKind::ArrayLiteral(values) if expected.as_ref().is_some_and(|ty| self.expected_vector(ty).is_some()) => {
+                // `[a, b]` where a `Vector` is expected: one built from the values, as
+                // `with_item(with_item(Vector<T>(), a), b)` of std::vector. Where an
+                // `Option` or `Result` of one is expected it becomes its `Some` or `Ok`
+                let vector_ty = self.expected_vector(expected.as_ref().unwrap()).unwrap();
+                let element = self.std_vector_element(&vector_ty).unwrap();
+                let values = std::mem::take(values);
+                let call = |name: &str, type_args: Vec<Type>, params: Vec<Expr>| Expr::new(ExprKind::FunctionCall {
+                    name: name.to_string(), type_args, params, receiver: None, mangled: None,
+                }, span.clone());
+                let mut built = call("vector::Vector", vec![element.clone()], vec![]);
+                for value in values {
+                    built = call("vector::with_item", vec![element.clone()], vec![built, value]);
+                }
+                *expr = built;
+                // The helpers are std::vector's, also where it isn't imported by name
+                let imported = self.imported_modules.iter().any(|m| m == "vector");
+                if !imported {
+                    self.imported_modules.push("vector".to_string());
+                }
+                let ty = self.check_expr_expecting(expr, &vector_ty);
+                if !imported {
+                    self.imported_modules.retain(|m| m != "vector");
+                }
+                ty
+            }
             ExprKind::ArrayLiteral(values) => {
                 // The element type comes from the expected array type, else from the first value
                 let declared = match &expected {
@@ -5110,6 +5328,25 @@ impl Sema {
         let span = expr.span.clone();
         let is_enum = matches!(expr.kind, ExprKind::EnumInit { .. });
 
+        // `Binary { lhs: a, op: o, rhs: b }` of a variant with named fields: its payload is
+        // the tuple `(a, o, b)` in the order the fields are declared
+        if let ExprKind::EnumInit { name, tag, value, .. } = &mut expr.kind {
+            if let ExprKind::StructInit { fields, .. } = &mut value.kind {
+                if self.variant_field_names(name, tag).is_some() {
+                    let given: Vec<(String, Expr, Span)> = std::mem::take(fields).into_iter()
+                        .map(|(field, value)| { let span = value.span.clone(); (field, value, span) })
+                        .collect();
+                    let mut values = self.order_fields(name, tag, given, |_| None, "", &span);
+                    let payload_span = value.span.clone();
+                    **value = if values.len() == 1 {
+                        values.remove(0)
+                    } else {
+                        Expr::new(ExprKind::Tuple(values), payload_span)
+                    };
+                }
+            }
+        }
+
         // Generic classes and enums are first replaced by their instance, like `Box<int32>`.
         // Inferring the type arguments checks the values, they mustn't be checked again.
         let mut values_checked = false;
@@ -5351,6 +5588,10 @@ impl Sema {
 
                 let ret = return_type.clone().unwrap_or(Type::Void);
                 self.current_return_type = Some(ret.clone());
+                // A constructor of the class, `Class`, or `Class#2` if it has several
+                let is_ctor = self.current_class.as_ref().is_some_and(|cls| {
+                    name == cls || name.strip_prefix(cls.as_str()).is_some_and(|rest| rest.starts_with('#'))
+                });
 
                 let prev_scope = self.scope.clone();
                 // The function's parameters start out owning their values, `self` only borrows its
@@ -5361,7 +5602,6 @@ impl Sema {
                     // A constructor builds its object, so it may change it. Methods
                     // declare `self` as a parameter, which replaces this one. Static
                     // functions have no `self`
-                    let is_ctor = *name == cls;
                     if is_ctor || params.first().is_some_and(|p| p.name == "self") {
                         self.scope.insert("self".to_string(), (Type::Class(cls), is_ctor));
                     }
@@ -5371,8 +5611,9 @@ impl Sema {
                 }
                 // Loops around the declaration don't continue into the function
                 let prev_loops = std::mem::take(&mut self.loop_depth);
-                // An `if` or `match` at the end gives the value to return, unless its arms return themselves
-                if let (Some(stmts), false) = (body.as_mut(), ret == Type::Void) {
+                // An `if` or `match` at the end gives the value to return, unless its arms return
+                // themselves. A constructor gives its object by itself, there it's only run
+                if let (Some(stmts), false, false) = (body.as_mut(), ret == Type::Void, is_ctor) {
                     if let Some(last) = stmts.last_mut() {
                         let gives_value = match &last.kind {
                             StmtKind::Expression(expr @ Expr { kind: ExprKind::If { else_block: Some(_), .. } | ExprKind::Match { .. }, .. }) => !leaves(expr),
@@ -5389,7 +5630,6 @@ impl Sema {
                 }
                 // A function giving a value has to give one on every way through it. A
                 // constructor gives its object by itself
-                let is_ctor = self.current_class.as_ref() == Some(&*name);
                 if let (Some(stmts), false, false) = (body.as_ref(), ret == Type::Void, is_ctor) {
                     if !returns_always(stmts) {
                         self.loop_depth = prev_loops;
@@ -5496,7 +5736,7 @@ fn leaves(expr: &Expr) -> bool {
 
 /// The type `shown` like it's written in code, without the modules its names
 /// are from: `Result<Token, String>` for `result::Result<token::Token,String>`.
-fn written_type(shown: &str) -> String {
+pub fn written_type(shown: &str) -> String {
     let mut written = String::new();
     let mut word = String::new();
     let mut chars = shown.chars().peekable();
@@ -5829,6 +6069,20 @@ fn place_name(expr: &Expr) -> String {
         ExprKind::FieldAccess { object, field } => format!("{}.{}", place_name(object), field),
         ExprKind::Index { object, .. } => format!("{}[..]", place_name(object)),
         _ => "value".to_string(),
+    }
+}
+
+/// Whether the reference `expr` points into a value that's freed when its
+/// expression ends, like the Vector of `make()[0]` or `Point(1, 2).x`. A
+/// method returning a reference lends it from its receiver.
+fn borrows_temporary(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Identifier(_) => false,
+        ExprKind::FieldAccess { object, .. } | ExprKind::Index { object, .. } => borrows_temporary(object),
+        ExprKind::FunctionCall { receiver: Some(receiver), .. } if matches!(expr.ty, Type::Ref(_)) => borrows_temporary(receiver),
+        ExprKind::Deref(inner) | ExprKind::Ref(inner) => borrows_temporary(inner),
+        ExprKind::Kept(_) => false,
+        _ => !matches!(expr.ty, Type::Ref(_)),
     }
 }
 

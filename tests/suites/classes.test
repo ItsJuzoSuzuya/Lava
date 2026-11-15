@@ -888,3 +888,31 @@ print(q.again() is Ok(v) ? v.x : 0);
 --- output
 3
 3
+
+=== a constructor ending in a match or if only runs it
+import std::vector::{Vector};
+import std::result::{Result};
+class G {
+  pub items: Vector<int32> = Vector();
+
+  Constructor(x: int32) {
+    let r: Result<int32, String> = Ok(x);
+    match r {
+      Ok(v) => self.items.push(v)
+      Err(e) => print(e)
+    }
+  }
+
+  Constructor(x: int32, y: int32) {
+    if x > y {
+      self.items.push(x)
+    } else {
+      self.items.push(y)
+    }
+  }
+}
+print(G(4).items.len());
+print(G(1, 2).items[0]);
+--- output
+1
+2

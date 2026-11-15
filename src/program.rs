@@ -174,8 +174,10 @@ fn layout_order<'a>(types: &[&'a Declaration]) -> Vec<&'a Declaration> {
     fn direct_types(ty: &Type, into: &mut Vec<String>) {
         match ty {
             Type::Class(name) | Type::Enum(name) => into.push(name.clone()),
-            // An array holds its elements directly
+            // An array holds its elements directly, a tuple its values, like the
+            // payload of a variant with named fields
             Type::Array(element, _) => direct_types(element, into),
+            Type::Tuple(items) => items.iter().for_each(|item| direct_types(item, into)),
             _ => {}
         }
     }

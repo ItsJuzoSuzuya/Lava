@@ -2,11 +2,20 @@ import token;
 import std::string::{is_whitespace, is_alpha, is_alphanumeric, is_digit};
 import span;
 import std::result::{Result};
+import std::option::{Option};
 
 pub enum LexError {
   TokenNotImplemented => String,
-  FloatLiteralToBig,
-  IntLiteralToBig
+  FloatLiteralToBig => String,
+  IntLiteralToBig => String
+
+  pub func message(&self) -> String {
+    match self {
+      LexError::TokenNotImplemented(token) => "Token is not implemented in the Lexer: " + token
+      LexError::FloatLiteralToBig(f) => "Float literal was to big: " + f
+      LexError::IntLiteralToBig(f) => "Int literal was to big: " + f
+    }
+  }
 } 
 
 /// Turns source code into [`Token`]s, one at a time.
@@ -20,7 +29,6 @@ pub class Lexer {
   line: uint32 = 1;
   col: uint32 = 1;
 
-
   pub func next_token(mut &self) -> Result<Token, LexError> {
     self.skip_blank();
     let line = self.line;
@@ -33,6 +41,12 @@ pub class Lexer {
 
     let current = self.current();
     let start_point = self.position;
+
+    if self.symbol() is Some(sym, len) {
+      self.advance(len);
+      let span = Span(line, col, len);
+      return Token(sym, span);
+    }
 
     if is_alpha(current) || current == '_' {
       while !self.at_end() && (is_alphanumeric(self.current()) || self.current() == '_') {
@@ -60,7 +74,7 @@ pub class Lexer {
         let span = Span(line, col, number.len() as uint32);
         match number.try_as<float64>() {
           Some(f64) => return Ok(Token(TokenKind::FloatLiteral(f64), span))
-          None => return Err(LexError::FloatLiteralToBig)
+          None => return Err(LexError::FloatLiteralToBig(number))
         }
       }
       
@@ -69,14 +83,11 @@ pub class Lexer {
       let span = Span(line, col, number.len() as uint32);
       match number.try_as<int64>() {
         Some(i64) => return Token(TokenKind::IntLiteral(i64), span)
-        None => return Err(LexError::IntLiteralToBig)
+        None => return Err(LexError::IntLiteralToBig(number))
       }
     }
     
-    while !self.at_end() && is_digit(self.current()) {
-      self.advance();
-    } 
-
+    self.advance();
     let token = self.source.slice(start_point, self.position);
     return Err(LexError::TokenNotImplemented(token));
   }
@@ -93,6 +104,15 @@ pub class Lexer {
     let col = self.col;
     let current = self.current();
     let start_point = self.position;
+
+    if self.symbol() is Some(sym, len) {
+      let span = Span(line, col, len);
+
+      self.position = start_point;
+      self.line = line;
+      self.col = col;
+      return Token(sym, span);
+    }
 
     if is_alpha(current) || current == '_' {
       while !self.at_end() && (is_alphanumeric(self.current()) || self.current() == '_') {
@@ -120,34 +140,30 @@ pub class Lexer {
           self.advance();
         } 
         
-        let word = self.source.slice(start_point, self.position);
-        let span = Span(line, col, word.len() as uint32);
+        let number = self.source.slice(start_point, self.position);
+        let span = Span(line, col, number.len() as uint32);
 
         self.position = start_point;
         self.line = line;
         self.col = col;
-        match word.try_as<float64>() {
+        match number.try_as<float64>() {
           Some(f64) => return Ok(Token(TokenKind::FloatLiteral(f64), span))
-          None => return Err(LexError::FloatLiteralToBig)
+          None => return Err(LexError::FloatLiteralToBig(number))
         }
       }
       
       // If not float then int
-      let word = self.source.slice(start_point, self.position);
-      let span = Span(line, col, word.len() as uint32);
+      let number = self.source.slice(start_point, self.position);
+      let span = Span(line, col, number.len() as uint32);
 
       self.position = start_point;
       self.line = line;
       self.col = col;
-      match word.try_as<int64>() {
+      match number.try_as<int64>() {
         Some(i64) => return Ok(Token(TokenKind::IntLiteral(i64), span))
-        None => return Err(LexError::IntLiteralToBig)
+        None => return Err(LexError::IntLiteralToBig(number))
       }
     }
-
-    while !self.at_end() && is_digit(self.current()) {
-      self.advance();
-    } 
 
     let token = self.source.slice(start_point, self.position);
     self.position = start_point;
@@ -160,9 +176,9 @@ pub class Lexer {
   /// Skip whitespaces and comments
   func skip_blank(mut &self) {
     while !self.at_end() {
-      if is_whitespace(self.current()) {
+      if is_whitespace(self.current()) 
         self.advance();
-      } 
+        
       else if self.current() == '/' && self.following() == '/' {
         while !self.at_end() && self.current() != '\n' {
           self.advance();
@@ -172,14 +188,55 @@ pub class Lexer {
     }
   }
 
-  func advance(mut &self) {
-    if self.current() == '\n' {
-      self.position += 1;
-      self.line += 1;
-      self.col = 0;
-    } else {
-      self.position += 1;
-      self.col += 1;
+  func symbol(&self) -> Option<(TokenKind, uint32)> {
+    let next = self.position + 1 < self.source.len() ? self.following() : ' ';
+    let double = match (self.current(), next) {
+      ('&', '&') => Some(TokenKind::AndAnd),
+      ('-', '>') => Some(TokenKind::Arrow),
+      (':', ':') => Some(TokenKind::ColonColon),
+      ('=', '=') => Some(TokenKind::EqEq),
+      ('!', '=') => Some(TokenKind::NotEq),
+      ('=', '>') => Some(TokenKind::ThickArrow),
+      // ... the rest of your two-char symbols
+      _ => None,
+    };
+    if double is Some(kind) return Some(kind, 2 as uint32);
+
+    let single = match self.current() {
+      '{' => TokenKind::LBrace,
+      '}' => TokenKind::RBrace,
+      '(' => TokenKind::LParen,
+      ')' => TokenKind::RParen,
+      ';' => TokenKind::Semicolon,
+      '=' => TokenKind::Assign,
+      '+' => TokenKind::Plus,
+      '-' => TokenKind::Minus,
+      '*' => TokenKind::Multiply,
+      '/' => TokenKind::Divide,
+      '%' => TokenKind::Percent,
+      '<' => TokenKind::Lt,
+      '>' => TokenKind::Gt,
+      '!' => TokenKind::Bang,
+      ',' => TokenKind::Comma,
+      '.' => TokenKind::Dot,
+      ':' => TokenKind::Colon,
+      _ => return None,
+    };
+    return Some(single, 1 as uint32);
+  }
+
+  func advance(mut &self, len: uint32 = 1) {
+    mut i: uint32 = 0;
+    while i < len {
+      if self.current() == '\n' {
+        self.position += 1;
+        self.line += 1;
+        self.col = 0;
+      } else {
+        self.position += 1;
+        self.col += 1;
+      }
+      i +=1 ;
     }
   }
 
@@ -192,6 +249,6 @@ pub class Lexer {
   }
 
   func at_end(&self) -> bool {
-    self.position > self.source.len()
+    self.position >= self.source.len()
   }
 }

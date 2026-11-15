@@ -390,3 +390,87 @@ import std::option::{Option};
 mut x = Option<int32>();
 --- error
 'Option' is an enum, it has no constructor: make one with a variant, like `Option::Some`
+
+=== variants with named fields are built and matched by name
+enum Op { Add, Mul; }
+enum Expr {
+  Num => int64,
+  Binary => { lhs: Unique<Expr>, op: Op, rhs: Unique<Expr> },
+  Neg => { value: Unique<Expr> },
+}
+func eval(e: &Expr) -> int64 {
+  match e {
+    Expr::Num(n) => n,
+    Expr::Binary { lhs, op: Op::Add, rhs } => eval(lhs) + eval(rhs),
+    Expr::Binary { lhs, rhs, .. } => eval(lhs) * eval(rhs),
+    Expr::Neg { value } => -eval(value),
+  }
+}
+let product = Expr::Binary { rhs: unique(Expr::Num(4)), op: Op::Mul, lhs: unique(Expr::Num(3)) };
+let sum = Expr::Binary { lhs: unique(Expr::Num(2)), op: Op::Add, rhs: unique(product) };
+print(eval(sum));
+print(eval(Expr::Neg { value: unique(Expr::Num(7)) }));
+if sum is Expr::Binary { op: Op::Add, .. } {
+  print("a sum");
+}
+--- output
+14
+-7
+a sum
+
+=== a generic variant with named fields infers its type
+enum Pair<T> {
+  Both => { first: T, second: T },
+  Neither;
+}
+let p = Pair::Both { first: "a", second: "b" };
+match p {
+  Pair::Both { second, first } => print(first + second),
+  Pair::Neither => print("none"),
+}
+--- output
+ab
+
+=== a variant built without one of its fields is an error
+enum E { B => { a: int32, b: int32 }; }
+let e = E::B { a: 1 };
+--- error
+also needs the field 'b'
+
+=== a field pattern names every field or ends with ..
+enum E { B => { a: int32, b: int32 }; }
+let e = E::B { a: 1, b: 2 };
+match e { E::B { a } => print(a) }
+--- error
+name it or end the pattern with `..`
+
+=== an unknown field of a variant is an error
+enum E { B => { a: int32, b: int32 }; }
+let e = E::B { a: 1, c: 2 };
+--- error
+has no field 'c'
+
+=== an enum holding itself directly is an error
+enum E { Leaf => int32, Node => { left: E, right: E }; }
+print(1);
+--- error
+would be endlessly big
+
+=== a variant whose payload holds an instance of a generic enum
+import std::option::{Option};
+class Block {
+  pub n: int32;
+}
+enum K {
+  If => { then_b: Unique<Block>, else_b: Option<Unique<Block>> },
+}
+let k = K::If { then_b: unique(Block(1)), else_b: Some(unique(Block(2))) };
+match k {
+  K::If { then_b, else_b } => {
+    print(then_b.n);
+    if else_b is Some(b) { print(b.n); }
+  }
+}
+--- output
+1
+2

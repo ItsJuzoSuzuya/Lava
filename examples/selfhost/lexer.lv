@@ -197,6 +197,33 @@ pub class Lexer {
     return Result::Err(position(line, col) + "unexpected character '" + char_to_string(byte) + "'");
   }
 
+  func symbol(&self) -> Option<(TokenKind, uint32)> {
+    let next = self.pos + 1 < self.source.len() ? self.following() : ' ';
+    let double = match (self.current(), next) {
+      ('&', '&') => Some(TokenKind::AndAnd),
+      ('-', '>') => Some(TokenKind::Arrow),
+      (':', ':') => Some(TokenKind::ColonColon),
+      ('=', '=') => Some(TokenKind::EqEq),
+      ('!', '=') => Some(TokenKind::NotEq),
+      ('=', '>') => Some(TokenKind::ThickArrow),
+      // ... the rest of your two-char symbols
+      _ => None,
+    };
+    if double is Some(kind) return Some((kind, 2));
+
+    let single = match self.current() {
+      '{' => TokenKind::LBrace,
+      '}' => TokenKind::RBrace,
+      '(' => TokenKind::LParen,
+      ')' => TokenKind::RParen,
+      ';' => TokenKind::Semicolon,
+      '=' => TokenKind::Assign,
+      // ... the rest
+      _ => return None,
+    };
+    return Some((single, 1));
+  }
+
   func at_end(&self) -> bool {
     return self.pos >= self.source.len();
   }

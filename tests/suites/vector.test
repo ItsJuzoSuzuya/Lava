@@ -482,3 +482,81 @@ class Statement {
 let stmts: Vector<Statement> = Vector(3);
 --- error
 'Statement' has no default value, give it a constructor taking no arguments or an `impl Default`
+
+=== an element of a temporary Vector is read before it's freed
+import std::vector::{Vector};
+class G {
+  pub items: Vector<int32> = Vector();
+  Constructor(x: int32) { self.items.push(x); }
+}
+func make() -> Vector<int32> {
+  mut v = Vector<int32>();
+  v.push(9);
+  return v;
+}
+print(make()[0]);
+print(make()[0] + 1);
+let a = make()[0];
+print(a);
+print(G(7).items[0]);
+let b = G(7).items[0];
+print(b);
+--- output
+9
+10
+9
+7
+7
+
+=== a list literal is a Vector where one is expected
+import std::vector::{Vector};
+enum Kind { Plus, Minus, Star; }
+enum Level { Sum, Product; }
+func ops(level: Level) -> Vector<Kind> {
+  match level {
+    Level::Sum => [Kind::Plus, Kind::Minus],
+    Level::Product => [Kind::Star],
+  }
+}
+let words: Vector<String> = ["a", "bb", "ccc"];
+print(words.len());
+print(words[2]);
+let none: Vector<int32> = [];
+print(none.len());
+print(ops(Level::Sum).len());
+let nested: Vector<Vector<int32>> = [[1, 2], [3]];
+print(nested[0][1]);
+let arr: int32[3] = [4, 5, 6];
+print(arr[2]);
+--- output
+3
+ccc
+0
+2
+2
+6
+
+=== a value put into a list literal is moved
+import std::vector::{Vector};
+let v = Vector<int32>();
+let list: Vector<Vector<int32>> = [v];
+print(v.len());
+--- error
+use of moved value 'v'
+
+=== a list literal where an Option of a Vector is expected is its Some
+import std::vector::{Vector};
+import std::option::{Option};
+enum L { One, Two, Three; }
+func sizes(l: L) -> Option<Vector<int32>> {
+  match l {
+    L::One => [1],
+    L::Two => [1, 2],
+    _ => return None
+  }
+}
+print(sizes(L::Two) is Some(v) ? v.len() : 0 as uint64);
+print(sizes(L::Three) is Some(v) ? v.len() : 0 as uint64);
+--- output
+2
+0
