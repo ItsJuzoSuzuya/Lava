@@ -309,3 +309,23 @@ func f(l: Light) -> int32 {
 print(f(Light::Green));
 --- output
 2
+
+=== a function taking one tuple gets its values as separate arguments
+import std::vector::{Vector};
+func show(pair: (int32, String)) {
+  print(pair.1);
+}
+show(1, "one");
+mut v = Vector<(String, int32)>();
+v.push("a", 1);
+v.push(("b", 2));
+print(v[1].1);
+--- output
+one
+2
+
+=== a variable can't get the result of a function giving nothing
+func f() { print(1); }
+let y = f();
+--- error
+would get no value

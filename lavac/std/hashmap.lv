@@ -1,5 +1,6 @@
 import std::path::{Path};
 import std::vector::{Vector};
+import std::option::{Option};
 
 // --- HashMaps ---
 //
@@ -7,24 +8,54 @@ import std::vector::{Vector};
 // yet, so it's commented out until it's finished:
 
 pub trait Hash {
-  pub func hash(&self) -> int32;
+  pub func hash(&self) -> uint64;
 }
 
-pub class Bucket<Key, Value> {
-  pairs: Vector<(Key, Value)>;
+pub class Bucket<K, V> {
+  pub entries: Vector<(K, V)> = Vector();
+
+  Constructor();
+
+  /// Replaces the value of 'key', or adds the pair if the key doesnt exist yet
+  pub func put(mut &self, key: K, value: V) {
+    mut i: uint64 = 0;
+    while i < self.entries.len() {
+      if self.entries[i].0 == key 
+        break;
+      i += 1;
+    }
+    if i < self.entries.len()
+      self.entries.set(i, (key, value));
+    else
+      self.entries.push(key, value);
+  }
+
+  pub func get(&self, key: K) -> Option<V> {
+    for entry in self.entries {
+      if entry.0 == key 
+        return entry.1;
+    }
+
+    return None;
+  }
 }
 
 pub class HashMap<Key: Hash, Value> {
   buckets: Vector<Bucket<Key, Value>> = Vector(16);
 
-  pub func set(key: Key, value: Value) {
-    let hash: int32 = key.hash();
+  pub func set(mut &self, key: Key, value: Value) {
+    let index = key.hash() % self.buckets.len();
+    self.buckets[index].put(key, value);
+  }
 
+  pub func get(&self, key: Key) -> Option<Value> {
+    let index = key.hash() % self.buckets.len();
+    return self.buckets[index].get(key);
   }
 }
 
 impl Hash for String {
-  pub func hash(&self) -> int32 {
+  pub func hash(&self) -> uint64 {
     let p: uint64 = 53;
     let m: uint64 = 1e9 + 9;
     mut hash_value: uint64 = 0;
@@ -33,11 +64,12 @@ impl Hash for String {
       hash_value = (hash_value + (c as uint32 + 1) * p_pow) % m;
       p_pow = (p_pow * p) % m;
     }
+    return hash_value;
   }
 }
 
 impl Hash for Path {
-  pub func hash(&self) -> int32 {
+  pub func hash(&self) -> uint64 {
     return self.to_string().hash();
   }
 }

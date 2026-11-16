@@ -355,8 +355,12 @@ pub fn codegen_match<'ctx>(
     // Ints, bools and enums switch on their value or tag, anything else like
     // arrays, vectors and strings tests one arm after the other. So does an enum
     // with an arm whose payload pattern can fail, like `Some(1)` or `Some(Ok(x))`
-    let payloads_always_match = arms.iter().all(|arm| !matches!(&arm.pattern,
-        Pattern::EnumVariant { payload: Some(payload), .. } if !payload.always_matches()));
+    let refutable_payload = |pattern: &Pattern| matches!(pattern,
+        Pattern::EnumVariant { payload: Some(payload), .. } if !payload.always_matches());
+    let payloads_always_match = arms.iter().all(|arm| match &arm.pattern {
+        Pattern::Or(alternatives) => !alternatives.iter().any(refutable_payload),
+        pattern => !refutable_payload(pattern),
+    });
     if !payloads_always_match || (!is_enum && !matches!(scrutinee_ty, Type::Int { .. } | Type::Bool | Type::Char)) {
         codegen_chain_match(ctx, scrutinee, arms, result);
         return;
@@ -391,23 +395,30 @@ pub fn codegen_match<'ctx>(
         for arm in arms {
             let bb = ctx.context.append_basic_block(function, "arm");
             arm_blocks.push(bb);
-            match &arm.pattern {
-                Pattern::EnumVariant { variant, .. } => {
-                    let idx = variants.iter().position(|(n, _)| n == variant)
-                        .unwrap_or_else(|| CodegenError::UndefinedField {
-                            class: enum_name.clone(),
-                            field: variant.clone(),
-                        }.throw(&ctx.source, &arm.span));
-                    cases.push((i32_ty.const_int(idx as u64, false), bb));
-                }
-                Pattern::Wildcard => {
-                    wildcard_bb = Some(bb);
-                }
-                Pattern::Literal(expr) if matches!(expr.kind, ExprKind::Identifier(_)) => {
-                    wildcard_bb = Some(bb);
-                }
-                Pattern::Literal(_) | Pattern::List { .. } | Pattern::Tuple(_) | Pattern::Fields { .. } => {
-                    panic!("this pattern can't match an enum, sema rejects it");
+            // `A | B` is a case for each of them, going to the same arm
+            let alternatives: Vec<&Pattern> = match &arm.pattern {
+                Pattern::Or(alternatives) => alternatives.iter().collect(),
+                pattern => vec![pattern],
+            };
+            for pattern in alternatives {
+                match pattern {
+                    Pattern::EnumVariant { variant, .. } => {
+                        let idx = variants.iter().position(|(n, _)| n == variant)
+                            .unwrap_or_else(|| CodegenError::UndefinedField {
+                                class: enum_name.clone(),
+                                field: variant.clone(),
+                            }.throw(&ctx.source, &arm.span));
+                        push_case(&mut cases, i32_ty.const_int(idx as u64, false), bb);
+                    }
+                    Pattern::Wildcard => {
+                        wildcard_bb.get_or_insert(bb);
+                    }
+                    Pattern::Literal(expr) if matches!(expr.kind, ExprKind::Identifier(_)) => {
+                        wildcard_bb.get_or_insert(bb);
+                    }
+                    Pattern::Literal(_) | Pattern::List { .. } | Pattern::Tuple(_) | Pattern::Fields { .. } | Pattern::Or(_) => {
+                        panic!("this pattern can't match an enum, sema rejects it");
+                    }
                 }
             }
         }
@@ -470,23 +481,30 @@ pub fn codegen_match<'ctx>(
         for arm in arms {
             let bb = ctx.context.append_basic_block(function, "arm");
             arm_blocks.push(bb);
-            match &arm.pattern {
-                // A name matches any value and gets bound to it
-                Pattern::Literal(expr) if matches!(expr.kind, ExprKind::Identifier(_)) => {
-                    wildcard_bb = Some(bb);
-                }
-                Pattern::Literal(expr) => {
-                    let val = *expr.codegen(ctx).unwrap();
-                    if !val.is_int_value() {
-                        panic!("literal pattern must be an integer or boolean for now");
+            // `1 | 2` is a case for each of them, going to the same arm
+            let alternatives: Vec<&Pattern> = match &arm.pattern {
+                Pattern::Or(alternatives) => alternatives.iter().collect(),
+                pattern => vec![pattern],
+            };
+            for pattern in alternatives {
+                match pattern {
+                    // A name matches any value and gets bound to it
+                    Pattern::Literal(expr) if matches!(expr.kind, ExprKind::Identifier(_)) => {
+                        wildcard_bb.get_or_insert(bb);
                     }
-                    cases.push((val.into_int_value(), bb));
-                }
-                Pattern::Wildcard => {
-                    wildcard_bb = Some(bb);
-                }
-                Pattern::EnumVariant { .. } | Pattern::List { .. } | Pattern::Tuple(_) | Pattern::Fields { .. } => {
-                    panic!("this pattern can't match a number or bool, sema rejects it");
+                    Pattern::Literal(expr) => {
+                        let val = *expr.codegen(ctx).unwrap();
+                        if !val.is_int_value() {
+                            panic!("literal pattern must be an integer or boolean for now");
+                        }
+                        push_case(&mut cases, val.into_int_value(), bb);
+                    }
+                    Pattern::Wildcard => {
+                        wildcard_bb.get_or_insert(bb);
+                    }
+                    Pattern::EnumVariant { .. } | Pattern::List { .. } | Pattern::Tuple(_) | Pattern::Fields { .. } | Pattern::Or(_) => {
+                        panic!("this pattern can't match a number or bool, sema rejects it");
+                    }
                 }
             }
         }
@@ -515,6 +533,16 @@ pub fn codegen_match<'ctx>(
         ctx.builder.build_unconditional_branch(merge_bb).unwrap();
     }
     ctx.builder.position_at_end(merge_bb);
+}
+
+/// Adds the switch case `value` going to `bb`, unless an earlier arm already
+/// has it, like the `Op::Add` of `Op::Add | Op::Sub` after an `Op::Add` arm.
+/// That one runs first, and a switch can't have a value twice.
+fn push_case<'ctx>(cases: &mut Vec<(IntValue<'ctx>, BasicBlock<'ctx>)>, value: IntValue<'ctx>, bb: BasicBlock<'ctx>) {
+    let known = value.get_zero_extended_constant();
+    if !cases.iter().any(|(other, _)| other.get_zero_extended_constant() == known) {
+        cases.push((value, bb));
+    }
 }
 
 /// Generates a match that tests one arm after the other, for scrutinees that
@@ -725,6 +753,15 @@ fn pattern_test<'ctx>(ctx: &mut CodegenContext<'ctx>, pattern: &Pattern, place: 
             all
         }
         Pattern::Fields { .. } => unreachable!("sema turns field patterns into tuple patterns"),
+        // Any of them
+        Pattern::Or(alternatives) => {
+            let mut any = ctx.context.bool_type().const_zero();
+            for alternative in alternatives {
+                let matches = pattern_test(ctx, alternative, place, ty);
+                any = ctx.builder.build_or(any, matches, "any_matches").unwrap();
+            }
+            any
+        }
     }
 }
 

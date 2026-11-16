@@ -1,5 +1,6 @@
 import span;
 import expression;
+import type;
 import codegen;
 import codegen_ctx;
 import llvm;
@@ -12,15 +13,20 @@ pub class Statement {
 }
 
 impl Codegen for Statement {
-  pub func codegen(&self, ctx: &CodegenContext) -> Option<LLVMValueRef> {
+  pub func codegen(self, mut ctx: &CodegenContext) -> Option<LLVMValueRef> {
     match self.kind {
+      StmtKind::Let(name, _, expr) => {
+        let value = expr.codegen(ctx) ?? return None;
+        ctx.declare_variable(name, value, expr.ty.to_llvm(ctx));
+        return None;
+      }
+
       StmtKind::Print(expr) => {
-        let print_fn = ctx.print_fn();
+        ctx.load_print_fn();
         let f = expr.llvm_string(ctx) ?? return None;
         let format = ctx.builder.build_const_str_ptr(expr.ty.formatter() ?? return None, "format");
 
-        let called = ctx.call_fn("printf", &[format, f]);
-        return ctx.builder.build_return(called);
+        return ctx.call_fn("printf", &[format, f]);
       }
       StmtKind::Return(expr) => return ctx.builder.build_return(expr.codegen(ctx)),
       StmtKind::Value(expr) => return expr.codegen(ctx),
@@ -32,6 +38,12 @@ impl Codegen for Statement {
 }
 
 pub enum StmtKind {
+  Let => { 
+    name: String,
+    ty: Option<type::Type>,
+    value: Expression
+  }
+
   Print => Expression,
   Return => Expression,
   Expression => Expression,

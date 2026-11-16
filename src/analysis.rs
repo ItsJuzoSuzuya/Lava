@@ -1351,6 +1351,11 @@ impl<'a> Walker<'a> {
                     self.pattern(item, from, scope_end);
                 }
             }
+            Pattern::Or(alternatives) => {
+                for alternative in alternatives {
+                    self.pattern(alternative, from, scope_end);
+                }
+            }
         }
     }
 

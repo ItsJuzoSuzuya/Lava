@@ -1,13 +1,92 @@
 import modules;
 import std::result::{Result};
 import std::vector::{Vector};
-pub class Sema {
-  Constructor();
+import std::hashmap::{HashMap};
+import statement;
+import type;
+import codegen_ctx;
+import expression;
+import std::math::{exp};
+import operators;
+import span;
 
-  pub func check(&self, source: &String) -> Result<Module, Vector<SemanticError>> {
-    return Err(Vector<SemanticError>());
+pub enum SemanticError {
+  TypeValueMissmatch => {
+    var: String,
+    type: Type,
+    val_type: Type,
+  }
+
+  InvalidOperands => {
+    op: BinaryOp,
+    lhs: Type,
+    rhs: Type,
+    span: Span
+  }
+
+  UnknownVariable => {
+    name: String,
+    span: Span
   }
 }
 
-pub enum SemanticError {
+pub class Sema {
+  variables: HashMap<String, Type> = HashMap();
+  pub errors: Vector<SemanticError> = Vector();
+
+  Constructor();
+
+  pub func check(mut &self, mut ast: &Vector<Statement>) {
+    for stmt in ast {
+      self.check_stmt(stmt);
+    }
+  }
+
+  func check_stmt(mut &self, mut stmt: &Statement) {
+    match stmt.kind {
+      StmtKind::Let(name, ty, value) => {
+        let value_ty = self.check_expr(value);
+        if ty is Some(t) && t != value_ty {
+          self.errors.push(SemanticError::TypeValueMissmatch(name, t, value_ty));
+        }
+        self.variables.set(name, ty ?? value_ty);
+      } 
+
+      StmtKind::Print(value) => {
+        self.check_expr(value);
+      } 
+    }
+  }
+
+  func check_expr(mut &self, mut expr: &Expression) -> Type {
+    let ty = match expr.kind {
+      ExprKind::Boolean => Type::Boolean,
+      ExprKind::IntLiteral => Type::Int32,
+      ExprKind::Identifier(name) => match self.variables.get(name) {
+        Some(ty) => ty,
+        None => {
+          self.errors.push(SemanticError::UnknownVariable(name, expr.span));
+          Type::Error
+        }
+      },
+      ExprKind::BinaryExpr(lhs, op, rhs) => {
+        let l = self.check_expr(lhs);
+        let r = self.check_expr(rhs);
+        l == Type::Error || r == Type::Error 
+          ? Type::Error
+          : match op.result_type(l,r) {
+            Some(ty) => ty,
+            None => {
+              self.errors.push(SemanticError::InvalidOperands(op, l, r, expr.span));
+              Type::Error
+            }
+          }
+      }
+      _ => Type::Error
+    };
+
+    expr.ty = ty;
+    return ty;
+  }
 }
+

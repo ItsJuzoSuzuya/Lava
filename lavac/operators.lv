@@ -1,4 +1,7 @@
 import token;
+import type;
+import std::option::{Option};
+
 pub enum BinaryOp {
   Add, Sub, Mul, Div, Rem,
   Eq, NotEq, Lt, LtEq, Gt, GtEq;
@@ -17,7 +20,37 @@ pub enum BinaryOp {
       TokenKind::Gt => BinaryOp::Gt,
       TokenKind::GtEq => BinaryOp::GtEq,
 
-      kind => panic("Provided token cant be used as an binary operator: " + kind.to_string())
+      kind => panic("Provided token cant be used as an unary operator: " + kind.to_string())
+    }
+  }
+
+  // The type `lhs op rhs` gives, `None` if the operator doesn't work on these types
+  pub func result_type(&self, lhs: Type, rhs: Type) -> Option<Type> {
+    match self {
+      // arithmetic: two numbers give a number
+      BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem =>
+        lhs == Type::Int32 && rhs == Type::Int32 ? Some(Type::Int32) : None,
+
+      // ordering: two numbers give a bool
+      BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq =>
+        lhs == Type::Int32 && rhs == Type::Int32 ? Some(Type::Boolean) : None,
+
+      // equality: any two values of the same type give a bool
+      BinaryOp::Eq | BinaryOp::NotEq =>
+        lhs == rhs ? Some(Type::Boolean) : None,
+    }
+  }
+}
+
+pub enum UnaryOp {
+  Negation, Bang
+
+  pub func from_token(kind: TokenKind) -> UnaryOp {
+    match kind {
+      TokenKind::Minus => UnaryOp::Negation,
+      TokenKind::Bang => UnaryOp::Bang,
+
+      kind => panic("Provided token cant be used as an unary operator: " + kind.to_string())
     }
   }
 }

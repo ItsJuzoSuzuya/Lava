@@ -626,7 +626,7 @@ mod tests {
 
     #[test]
     fn unexpected_chars() {
-        for c in ['$', '#', '|', '~', '@'] {
+        for c in ['$', '#', '~', '@'] {
             let error = lex_error(&format!("a {} b", c));
             assert!(matches!(error.kind, LexErrorKind::UnexpectedChar(got) if got == c), "for {:?}", c);
         }

@@ -3185,6 +3185,12 @@ impl Sema {
                     }
                     None => value_ty,
                 };
+                // Like `let y = (x = 5);` or the result of a function returning nothing
+                if ty == Type::Void {
+                    diagnostic::throw(
+                        format!("'{}' would get no value, its value gives nothing", name),
+                        Some(value.span.clone()), &self.source);
+                }
                 self.check_type(&ty, &stmt_span);
                 self.scope.insert(name.clone(), (ty.clone(), *mutable));
                 // A new variable, even if an old one with the same name got moved
@@ -3338,6 +3344,13 @@ impl Sema {
             // back, there's no value to give
             (Some(value), Some(_)) if leaves(value) => {
                 self.check_unused(value);
+            }
+            // `Some(ty) => expr.ty = ty` where the arm has to give a value
+            (Some(value), Some(_)) if matches!(value.kind, ExprKind::Assignment { .. }) => {
+                diagnostic::throw(
+                    "an assignment gives no value, so it can't be the value of this branch. \
+                     Write the value alone, like `Some(ty) => ty`, or assign after the match",
+                    Some(value.span.clone()), &self.source);
             }
             (Some(value), Some(result_ty)) => match result_ty {
                 Some(ty) => {
@@ -3606,6 +3619,17 @@ impl Sema {
             Pattern::Fields { .. } => diagnostic::throw(
                 "named fields like `{ lhs, .. }` only follow a variant, like `ExprKind::Binary { lhs, .. }`",
                 Some(span.clone()), &self.source),
+            Pattern::Or(alternatives) => {
+                // Which alternative matched isn't known, so a name couldn't say what it holds
+                if let Some(name) = alternatives.iter().flat_map(Pattern::names).next() {
+                    diagnostic::throw(
+                        format!("a `|` pattern can't bind names like '{}', write an arm for each alternative instead", name),
+                        Some(span.clone()), &self.source);
+                }
+                for alternative in alternatives.iter_mut() {
+                    self.check_pattern(alternative, ty, span);
+                }
+            }
         }
     }
 
@@ -3695,6 +3719,8 @@ impl Sema {
                 _ => false,
             },
             Pattern::Fields { .. } => false,
+            // `true | false` together match every bool
+            Pattern::Or(alternatives) => self.patterns_cover(ty, &alternatives.iter().collect::<Vec<_>>()),
         }
     }
 
@@ -3746,6 +3772,18 @@ impl Sema {
     /// only the rows matching anything count.
     fn rows_cover<'p>(&self, types: &[Type], rows: &[Vec<Option<&'p Pattern>>]) -> bool {
         let Some((first, rest)) = types.split_first() else { return !rows.is_empty() };
+        // `A | B` at the front is a row for each alternative
+        if rows.iter().any(|row| matches!(row.first(), Some(Some(Pattern::Or(_))))) {
+            let expanded: Vec<Vec<Option<&'p Pattern>>> = rows.iter().flat_map(|row| match row.first() {
+                Some(Some(Pattern::Or(alternatives))) => alternatives.iter().map(|alternative| {
+                    let mut expanded = vec![Some(alternative)];
+                    expanded.extend(row[1..].iter().cloned());
+                    expanded
+                }).collect::<Vec<_>>(),
+                _ => vec![row.clone()],
+            }).collect();
+            return self.rows_cover(types, &expanded);
+        }
         // A pattern matching anything at the front is like none
         let head = |row: &Vec<Option<&'p Pattern>>| -> Option<&'p Pattern> { row[0].filter(|pattern| !self.irrefutable(pattern, first)) };
         let tail = |row: &[Option<&'p Pattern>]| -> Vec<Option<&'p Pattern>> { row[1..].to_vec() };
@@ -4256,7 +4294,8 @@ impl Sema {
                     self.moved.remove(name);
                 }
 
-                rhs_ty
+                // Only a statement, `x = 5` gives nothing that could be used
+                Type::Void
             },
             // Made from a checked argument, see `slices_into`
             ExprKind::SliceOf(_) => expr.ty.clone(),
@@ -4632,6 +4671,20 @@ impl Sema {
                 // A C function like `printf` can take more arguments than it declares
                 let is_extern = self.externs.contains_key(&m);
                 let variadic = self.externs.get(&m).is_some_and(|e| e.variadic);
+                // `entries.push(key, value)` for a `push(item: (K, V))`: a function taking one
+                // tuple gets its values as separate arguments, they become the tuple
+                if !args_checked && !is_extern {
+                    let own: Vec<&Param> = defs.iter().filter(|d| d.name != "self").collect();
+                    if let [only] = own.as_slice() {
+                        if let Type::Tuple(items) = &only.ty {
+                            if items.len() > 1 && params.len() == items.len() {
+                                let values = std::mem::take(params);
+                                let tuple_span = values[0].span.clone();
+                                params.push(Expr::new(ExprKind::Tuple(values), tuple_span));
+                            }
+                        }
+                    }
+                }
                 if params.len() > defs.len() && !variadic {
                     SemanticError::TooManyArguments{ func_name: name.clone(), parent: module, span: span.clone() }
                         .throw(&self.source);

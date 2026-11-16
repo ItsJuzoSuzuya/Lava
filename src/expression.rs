@@ -55,6 +55,9 @@ pub enum Pattern {
     },
     /// `(a, b)`: the values of a tuple, each matched by its own pattern.
     Tuple(Vec<Pattern>),
+    /// `Op::Add | Op::Sub`: matches if any of the alternatives does. The
+    /// alternatives can't bind names.
+    Or(Vec<Pattern>),
     /// `{ lhs, op: o, .. }`, the payload of a variant with named fields, like
     /// `ExprKind::Binary { lhs, .. }`. Sema turns it into the tuple pattern of
     /// the payload, in the order the fields are declared.
@@ -93,6 +96,7 @@ impl Pattern {
             Pattern::Literal(expr) => matches!(expr.kind, ExprKind::Identifier(_)),
             Pattern::Tuple(items) => items.iter().all(Pattern::always_matches),
             Pattern::Fields { fields, .. } => fields.iter().all(|(_, p, _)| p.always_matches()),
+            Pattern::Or(alternatives) => alternatives.iter().any(Pattern::always_matches),
             Pattern::EnumVariant { .. } | Pattern::List { .. } => false,
         }
     }
@@ -112,6 +116,7 @@ impl Pattern {
             }
             Pattern::Tuple(items) => items.iter().flat_map(Pattern::names).collect(),
             Pattern::Fields { fields, .. } => fields.iter().flat_map(|(_, p, _)| p.names()).collect(),
+            Pattern::Or(alternatives) => alternatives.iter().flat_map(Pattern::names).collect(),
         }
     }
 }
@@ -142,6 +147,10 @@ impl Display for Pattern {
             Pattern::Tuple(items) => {
                 let items: Vec<String> = items.iter().map(|p| p.to_string()).collect();
                 write!(f, "({})", items.join(", "))
+            }
+            Pattern::Or(alternatives) => {
+                let items: Vec<String> = alternatives.iter().map(|p| p.to_string()).collect();
+                write!(f, "{}", items.join(" | "))
             }
             Pattern::Fields { fields, rest } => {
                 let mut items: Vec<String> = fields.iter().map(|(name, pattern, _)| match pattern {

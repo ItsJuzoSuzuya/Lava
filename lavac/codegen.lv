@@ -5,15 +5,20 @@ import std::option::{Option};
 import span;
 
 pub trait Codegen {
-  pub func codegen(&self, ctx: &CodegenContext) -> Option<LLVMValueRef>;
+  pub func codegen(&self, mut ctx: &CodegenContext) -> Option<LLVMValueRef>;
 }
 
 pub enum CodegenError {
-  MissingValue => (type::Type, Span),
+  MissingValue => {
+    ty: type::Type, 
+    span: Span
+  },
+  UndefinedVariable => String 
 
   pub func message(&self) -> String {
     match self {
       CodegenError::MissingValue(ty, _) => "internal error: an expression of type " + ty.to_string() + " gave no value",
+      CodegenError::UndefinedVariable(name) => "Use of undefined variable: " + name,
     }
   }
 }

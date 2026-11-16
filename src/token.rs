@@ -74,6 +74,8 @@ pub enum Token {
 
   Assign,
   BAnd,
+  /// `|` between the alternatives of a pattern, like `Op::Add | Op::Sub`.
+  BOr,
   Bang,
   Caret,
   Colon,
@@ -182,6 +184,7 @@ impl Display for Token {
             Token::Divide       => write!(f, "/"),
             Token::Dot          => write!(f, "."),
             Token::BAnd         => write!(f, "&"),
+            Token::BOr          => write!(f, "|"),
             Token::Lt           => write!(f, "<"),
             Token::Gt           => write!(f, ">"),
             Token::Bang         => write!(f, "!"),
@@ -305,6 +308,7 @@ impl Token {
             '/' => { Some(Token::Divide) }
             '.' => { Some(Token::Dot) }
             '&' => { Some(Token::BAnd) }
+            '|' => { Some(Token::BOr) }
             '<' => { Some(Token::Lt) }
             '>' => { Some(Token::Gt) }
             '!' => { Some(Token::Bang) }

@@ -9,15 +9,18 @@ import std::process::{run};
 import llvm;
 import std::option::{Option};
 import std::path::{Path};
+import sema;
 
 pub enum CompileError {
   TargetTripleInvalid => TargetTriple,
   CompilationFailure => String,
+  LinkingFailure => String,
 
   pub func message(&self) -> String {
     match self {
       CompileError::TargetTripleInvalid(triple) => "Couldn't build Target from Triple " + triple.arch
       CompileError::CompilationFailure(message) => "An error occured while compiling: " + message
+      CompileError::LinkingFailure(message) => "An error occured while linking: " + message
     }
   }
 }
@@ -25,7 +28,7 @@ pub enum CompileError {
 pub class Program {
   pub context: CodegenContext;
 
-  pub func build(&self, graph: &ModuleGraph) -> Result<Program, Vector<CompileError>> {
+  pub func build(&self, graph: &ModuleGraph) -> Result<Path, Vector<CompileError>> {
     self.context.build_entry();
 
     mut errors = Vector<CompileError>();
@@ -33,6 +36,11 @@ pub class Program {
     for module in graph.modules { 
        let stmts = Parser::from_source(module.source).parse();
        asts.push(stmts);
+    }
+
+    mut sema = Sema();
+    for module in asts {
+      sema.check(module);
     }
 
     for module in asts {
@@ -68,8 +76,13 @@ pub class Program {
         return Err(errors);
       }
 
-      self.link(object, Path("build/main"));
-      return self;
+      match self.link(object, Path("build/main")) {
+        Ok(exec) => return exec
+        Err(e) => {
+          errors.push(CompileError::LinkingFailure(e));
+          return Err(errors);
+        }
+      }
     }
 
     errors.push(CompileError::TargetTripleInvalid(triple));

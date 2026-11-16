@@ -1,1 +1,2 @@
-print(128 + 20 * 2);
+let x = 20;
+print(x);

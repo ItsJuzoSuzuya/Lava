@@ -717,6 +717,21 @@ impl Parser {
     ///
     /// Panics if the next token can't start a pattern.
     fn parse_pattern(&mut self) -> (Pattern, Span) {
+        let (first, span) = self.parse_single_pattern();
+        if !matches!(self.peek().0, Token::BOr) {
+            return (first, span);
+        }
+        // `Op::Add | Op::Sub`, any of them
+        let mut alternatives = vec![first];
+        while matches!(self.peek().0, Token::BOr) {
+            self.consume();
+            alternatives.push(self.parse_single_pattern().0);
+        }
+        (Pattern::Or(alternatives), span)
+    }
+
+    /// Parses one pattern of a `|`, see [`Parser::parse_pattern`].
+    fn parse_single_pattern(&mut self) -> (Pattern, Span) {
         let (tok, span) = self.next_token();
 
         match tok {

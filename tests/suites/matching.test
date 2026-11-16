@@ -515,3 +515,78 @@ func f(x: (Kind, bool)) -> int32 {
 print(f((Kind::A, false)));
 --- error
 has to handle every case
+
+=== a | pattern matches any of its alternatives
+import std::option::{Option};
+enum Op { Add, Sub, Mul, Lt, Eq; }
+func kind(op: Op) -> String {
+  match op {
+    Op::Add | Op::Sub | Op::Mul => "arithmetic",
+    Op::Lt | Op::Eq => "comparison",
+  }
+}
+func small(n: int32) -> bool {
+  match n {
+    1 | 2 | 3 => true,
+    _ => false,
+  }
+}
+func word(s: String) -> int32 {
+  match s {
+    "a" | "b" => 1,
+    _ => 2,
+  }
+}
+func opt(o: Option<int32>) -> int32 {
+  match o {
+    Some(1 | 2) => 10,
+    Some(_) => 20,
+    None => 30,
+  }
+}
+print(kind(Op::Sub));
+print(kind(Op::Eq));
+print(small(2));
+print(small(7));
+print(word("b"));
+print(opt(Some(2)));
+print(opt(Some(5)));
+if Op::Mul is Op::Add | Op::Mul { print("is"); }
+--- output
+arithmetic
+comparison
+true
+false
+1
+10
+20
+is
+
+=== a | pattern counts every alternative for exhaustiveness
+enum Op { Add, Sub, Mul; }
+func k(op: Op) -> int32 {
+  match op {
+    Op::Add | Op::Sub => 1,
+  }
+}
+print(k(Op::Add));
+--- error
+has to handle every case
+
+=== a | pattern can't bind names
+import std::option::{Option};
+let o: Option<int32> = Some(1);
+match o { Some(x) | None => print(1) }
+--- error
+can't bind names
+
+=== an assignment can't be the value of a match arm
+import std::option::{Option};
+mut x = 0;
+let o: Option<int32> = Some(1);
+let y = match o {
+  Some(v) => x = v,
+  None => 0,
+};
+--- error
+an assignment gives no value

@@ -6,7 +6,7 @@ import codegen;
 import codegen_ctx;
 import llvm;
 import type;
-import std::math::{min};
+import std::math::{min, exp};
 import std::result::{Result};
 import token;
 import operators;
@@ -22,9 +22,10 @@ pub class Expression {
         let int = val ? 1 : 0;
         return ctx.context.bool_type().const_int(int as uint64, false);
       },
+
       ExprKind::IntLiteral(val) => {
         return ctx.context.i32_type().const_int(val as uint64, false);
-      }
+      },
 
       ExprKind::BinaryExpr(lhs, op, rhs) => {
         let l = lhs.codegen(ctx) ?? return None;
@@ -41,6 +42,14 @@ pub class Expression {
           BinaryOp::GtEq  => ctx.builder.build_icmp(CompareOp::SGE.to_int(), l, r, "lt"),
           BinaryOp::Eq    => ctx.builder.build_icmp(CompareOp::EQ.to_int(), l, r, "eq"),
           BinaryOp::NotEq => ctx.builder.build_icmp(CompareOp::NEQ.to_int(), l, r, "eq"),
+        };
+      }
+
+      ExprKind::UnaryExpr(op, expr) => {
+        let val = expr.codegen(ctx) ?? return None;
+        return match op {
+          UnaryOp::Negation => ctx.builder.build_neg(val, "neg"),
+          UnaryOp::Bang => ctx.builder.build_not(val, "not")
         };
       }
 
@@ -64,6 +73,10 @@ pub class Expression {
 
         ctx.builder.position_at_end(merge_bb);
         return None;
+      },
+
+      ExprKind::Identifier(name) => {
+        return ctx.load_variable(name) ?? return None;
       },
 
       ExprKind::Error => return None,
@@ -101,7 +114,7 @@ pub enum ExprKind {
       rhs: Unique<Expression>,
   },
   UnaryExpr => {
-    op: Token,
+    op: UnaryOp,
     expr: Unique<Expression>
   }
 
@@ -110,6 +123,9 @@ pub enum ExprKind {
     if_then: Unique<Block>, 
     if_else: Option<Unique<Block>>
   }
+
+  Identifier => String,
+
   Error => String, 
 }
 

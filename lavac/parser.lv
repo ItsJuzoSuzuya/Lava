@@ -117,6 +117,8 @@ pub class Parser {
   pub func parse_stmt(mut &self) -> Statement {
     let token = self.next_token();
     let stmt = match token.kind {
+      TokenKind::Let => self.parse_let(),
+
       TokenKind::Print => self.parse_print(),
       _ => {
         let expr = self.parse_expr();
@@ -125,6 +127,22 @@ pub class Parser {
     };
 
     return stmt;
+  }
+
+  pub func parse_let(mut &self) -> Statement {
+    let var = self.next_token().as_string();
+    mut type: Option<Type> = None;
+    if self.peek().kind == TokenKind::Colon {
+      self.consume();
+      type == Some(Type::Named(self.next_token().as_string()))
+    }
+
+    self.expect(TokenKind::Assign);
+    let val = self.parse_expr();
+    let span = val.span;
+    self.expect(TokenKind::Semicolon);
+
+    return Statement(StmtKind::Let(var, type, val), span);
   }
 
   pub func parse_expr(mut &self) -> Expression {
@@ -139,6 +157,7 @@ pub class Parser {
       TokenKind::False => Expression(ExprKind::Boolean(false), token.span, Type::Boolean),
 
       TokenKind::IntLiteral(val) => Expression(ExprKind::IntLiteral(val), token.span, Type::Int32),
+      TokenKind::Identifier(name) => Expression(ExprKind::Identifier(name), token.span, Type::Void),
       _ => Expression(ExprKind::Error(token.kind.to_string() + " can't be used as an expression!"), token.span, Type::Void)
     };
     
@@ -149,7 +168,14 @@ pub class Parser {
       return self.parse_primary();
 
     if level == Precidence::Unary {
-      
+      if !level.has(self.peek().kind) 
+        return self.parse_level(Precidence::Primary);
+
+      let op = UnaryOp::from_token(self.next_token().kind);
+      let expr = self.parse_level(Precidence::Unary);
+      let ty = expr.ty;
+      let span = expr.span;
+      return Expression(ExprKind::UnaryExpr(op, unique(expr)), span, ty);
     }
 
     mut lhs = self.parse_level(level.next());

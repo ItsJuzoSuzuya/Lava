@@ -1,6 +1,7 @@
 import std::option;
 import std::path::{Path};
 import std::option::{Option};
+import std::hashmap::{HashMap};
 extern link "LLVM";
 
 pub extern type LLVMContextRef;
@@ -88,6 +89,18 @@ pub extern func LLVMCreateBuilderInContext(context: LLVMContextRef) -> Builder;
 pub extern func LLVMDisposeBuilder(builder: LLVMBuilderRef);
 pub extern func LLVMPositionBuilderAtEnd(builder: Builder, block: BasicBlock);
 pub extern type Builder: LLVMBuilderRef {
+  pub func build_alloca(&self, llvm_type: LLVMTypeRef, name: String) -> LLVMValueRef {
+    return LLVMBuildAlloca(self, llvm_type, name);
+  }
+
+  pub func build_store(&self, value: LLVMValueRef, address: LLVMValueRef) -> LLVMValueRef {
+    return LLVMBuildStore(self, value, address);
+  }
+
+  pub func build_load(&self, llvm_type: LLVMTypeRef, address: LLVMValueRef, name: String) -> LLVMValueRef {
+    return LLVMBuildLoad2(self, llvm_type, address, name);
+  }
+
   pub func position_at_end(&self, block: BasicBlock) {
     LLVMPositionBuilderAtEnd(self, block);
   }
@@ -147,6 +160,14 @@ pub extern type Builder: LLVMBuilderRef {
   pub func build_eq(&self, lhs: LLVMValueRef, rhs: LLVMValueRef, name: String) -> LLVMValueRef {
     return LLVMBuildSRem(self, lhs, rhs, name);
   }
+
+  pub func build_neg(&self, value: LLVMValueRef, name: String) -> LLVMValueRef {
+    return LLVMBuildNeg(self, value, name);
+  }
+
+  pub func build_not(&self, value: LLVMValueRef, name: String) -> LLVMValueRef {
+    return LLVMBuildNot(self, value, name);
+  }
 }
 
 pub extern type LLVMTypeRef;
@@ -173,6 +194,12 @@ pub extern type Function: LLVMValueRef {
   pub func get_type(&self) -> FunctionType {
     return LLVMGlobalGetValueType(self);
   }
+}
+
+pub class Variable {
+  pub address: LLVMValueRef;
+  pub llvm_type: LLVMTypeRef;
+  pub ty: Type;
 }
 
 pub extern type LLVMBasicBlockRef;
