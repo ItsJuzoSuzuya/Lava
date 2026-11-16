@@ -126,7 +126,7 @@ pub enum ExprKind {
 
   Identifier => String,
 
-  Error => String, 
+  Error,
 }
 
 pub class Block {

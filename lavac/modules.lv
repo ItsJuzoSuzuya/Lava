@@ -45,21 +45,18 @@ pub class Module {
 /// the modules importing them.
 pub class ModuleGraph {
   pub modules: Vector<Module> = Vector();
-  pub module_errors: Vector<Vector<ParseError>> = Vector();
+  pub module_errors: Vector<ParseError> = Vector();
 
   overlay: HashMap<Path,String> = HashMap();
 
   Constructor(root_path: Path) {
     mut modules = Vector<Module>();
-    mut module_errors = Vector<Vector<ParseError>>();
+    mut module_errors = Vector<ParseError>();
     let source = match fs::read(root_path) {
       Ok(txt) => txt
       Err(err) => panic("couldnt read root path: " + err)
     };
-    let imports = Parser::from_source(source).parse_imports();
-    match imports {
-      Ok(imps) => self.modules.push(Module(imps, root_path, source))
-      Err(err) => self.module_errors.push(err)
-    }
+    let imports = Parser::from_source(source, &module_errors).parse_imports();
+    self.modules.push(Module(imports, root_path, source));
   }
 }

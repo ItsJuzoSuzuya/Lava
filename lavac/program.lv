@@ -12,15 +12,20 @@ import std::path::{Path};
 import sema;
 
 pub enum CompileError {
+  Parse => String,
+  Semantic => String,
   TargetTripleInvalid => TargetTriple,
   CompilationFailure => String,
   LinkingFailure => String,
 
   pub func message(&self) -> String {
     match self {
+      CompileError::Parse(message) => "[Parser Error]: " + message
+      CompileError::Semantic(message) => "[Semantic Error]: " + message
       CompileError::TargetTripleInvalid(triple) => "Couldn't build Target from Triple " + triple.arch
       CompileError::CompilationFailure(message) => "An error occured while compiling: " + message
       CompileError::LinkingFailure(message) => "An error occured while linking: " + message
+
     }
   }
 }
@@ -29,19 +34,36 @@ pub class Program {
   pub context: CodegenContext;
 
   pub func build(&self, graph: &ModuleGraph) -> Result<Path, Vector<CompileError>> {
+    mut errors = Vector<CompileError>();
+
     self.context.build_entry();
 
-    mut errors = Vector<CompileError>();
+    mut parse_errs = Vector<ParseError>();
     mut asts = Vector<Vector<Statement>>();
     for module in graph.modules { 
-       let stmts = Parser::from_source(module.source).parse();
+       let stmts = Parser::from_source(module.source, &parse_errs).parse();
        asts.push(stmts);
     }
 
-    mut sema = Sema();
+    if !parse_errs.is_empty() {
+      for err in parse_errs {
+        errors.push(CompileError::Parse(err.message()));
+      }
+    }
+
+    mut sema_errs = Vector<SemanticError>();
+    mut sema = Sema(&sema_errs);
     for module in asts {
       sema.check(module);
     }
+
+    if !sema_errs.is_empty() 
+      for err in sema_errs {
+        errors.push(CompileError::Semantic(err.message()));
+      }
+
+    if !errors.is_empty() 
+     return Err(errors);
 
     for module in asts {
       for stmt in module {

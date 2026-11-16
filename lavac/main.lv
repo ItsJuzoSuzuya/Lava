@@ -2,7 +2,7 @@ import std::env::{args};
 import std::fs::{read, write, create_dir_all};
 import std::path::{Path};
 import std::process;
-import std::process::{ExitCode};
+import std::process::{ExitCode, exit};
 import std::option::{Option};
 import std::result::{Result};
 import std::vector::{Vector};
@@ -83,6 +83,8 @@ func run_file(file: Path) {
 
 func print_errors(errors: &Vector<CompileError>) {
   for err in errors {
-    panic("[Compile Error] " + err.message());
+    print("[Compile Error] " + err.message());
   }
+
+  exit(ExitCode::Failed);
 }

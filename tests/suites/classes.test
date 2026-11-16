@@ -916,3 +916,27 @@ print(G(1, 2).items[0]);
 --- output
 1
 2
+
+=== a constructor has to give every field without a default a value
+class S {
+  pub n: int32;
+  Constructor();
+}
+let s = S();
+--- error
+the field 'n' gets no value in `Constructor()`
+
+=== a field assigned in the constructor's body has a value
+class S {
+  pub n: int32;
+  Constructor(start: int32) {
+    if start > 0 {
+      self.n = start;
+    } else {
+      self.n = 1;
+    }
+  }
+}
+print(S(5).n);
+--- output
+5

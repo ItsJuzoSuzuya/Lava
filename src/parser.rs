@@ -1683,6 +1683,11 @@ impl Parser {
             Token::LParen => {
                 self.consume(); // '('
                 let mut items = Vec::new();
+                // `()`, the tuple of no values
+                if matches!(self.peek().0, Token::RParen) {
+                    self.consume();
+                    return Some(Type::Tuple(items));
+                }
                 loop {
                     items.push(self.try_parse_type()?);
                     match self.next_token().0 {
@@ -2282,6 +2287,11 @@ impl Parser {
             }
             // Parentheses group, like `(a + b) * c`, with commas they make a tuple like `(a, b)`
             Token::LParen => {
+                // `()`, the tuple of no values, like in `Ok(())`
+                if matches!(self.peek().0, Token::RParen) {
+                    self.consume();
+                    return self.parse_postfix(Expr::new(ExprKind::Tuple(Vec::new()), span));
+                }
                 let prev_brace = self.allow_brace_init;
                 self.allow_brace_init = true;
                 let inner = self.next_expression();

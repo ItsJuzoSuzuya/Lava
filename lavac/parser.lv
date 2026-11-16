@@ -11,18 +11,23 @@ import std::math::{exp};
 import type;
 import precidece;
 import operators;
+import program;
 
 pub enum ParseError {
-  UnexpectedEOF => &Path,
-  UnexpectedToken => (TokenKind, TokenKind),
+  ExpectedExpression => Token,
   InvalidBinaryOperation => TokenKind,
   Lex => LexError
+  UnexpectedEOF => &Path,
+  UnexpectedToken => (TokenKind, TokenKind),
+
 
   pub func message(&self) -> String {
     match self {
-      ParseError::UnexpectedEOF(context) => "[Parse Error] Unexpected end of file in " + context.to_string()
-      ParseError::UnexpectedToken(kind, _) => "[Parse Error] Unexpected token: " + kind.to_string()
-      ParseError::InvalidBinaryOperation(kind) => "[Parse Error] Provided an invalid token as operator for binary expression: " + kind.to_string()
+      ParseError::ExpectedExpression(token) => "Expected an expression but got '" + token.as_string() + "'"
+      ParseError::InvalidBinaryOperation(kind) => "Provided an invalid token as operator for binary expression: " + kind.to_string()
+      ParseError::UnexpectedEOF(context) => "Unexpected end of file in " + context.to_string()
+      ParseError::UnexpectedToken(kind, _) => "Unexpected token: " + kind.to_string()
+
       ParseError::Lex(err) => "[Lex Error] Lexing failed: " + err.message()
     }
   }
@@ -30,14 +35,14 @@ pub enum ParseError {
 
 pub class Parser {
   lexer: Lexer;
-  errors: Vector<ParseError> = Vector();
+  errors: &Vector<ParseError>;
   recovering: bool = false;
 
-  pub func from_source(source: String) -> Parser {
-    return Parser(Lexer(source));
+  pub func from_source(source: String, errors: &Vector<ParseError>) -> Parser {
+    return Parser(Lexer(source), errors);
   }
 
-  pub func parse_imports(mut &self) -> Result<Vector<Import>, Vector<ParseError>> {
+  pub func parse_imports(mut &self) -> Vector<Import> {
     mut imports = Vector<Import>();
     while !self.peek().is_eof() {
       let token = self.next_token();
@@ -49,8 +54,6 @@ pub class Parser {
         imports.push(imp);
       }
     }
-
-    if !self.errors.is_empty() return Err(self.errors.clone());
 
     return imports;
   }
@@ -122,7 +125,7 @@ pub class Parser {
       TokenKind::Print => self.parse_print(),
       _ => {
         let expr = self.parse_expr();
-        Statement(StmtKind::Expression(self.parse_expr()), token.span)
+        Statement(StmtKind::Expression(expr), token.span)
       }
     };
 
@@ -134,7 +137,7 @@ pub class Parser {
     mut type: Option<Type> = None;
     if self.peek().kind == TokenKind::Colon {
       self.consume();
-      type == Some(Type::Named(self.next_token().as_string()))
+      type = self.parse_type();
     }
 
     self.expect(TokenKind::Assign);
@@ -157,10 +160,13 @@ pub class Parser {
       TokenKind::False => Expression(ExprKind::Boolean(false), token.span, Type::Boolean),
 
       TokenKind::IntLiteral(val) => Expression(ExprKind::IntLiteral(val), token.span, Type::Int32),
+
       TokenKind::Identifier(name) => Expression(ExprKind::Identifier(name), token.span, Type::Void),
-      _ => Expression(ExprKind::Error(token.kind.to_string() + " can't be used as an expression!"), token.span, Type::Void)
+      _ => {
+        self.error(ParseError::ExpectedExpression(token));
+        Expression(ExprKind::Error, token.span, Type::Error)
+      }
     };
-    
   }
 
   pub func parse_level(mut &self, level: Precidence = Precidence::Comparision) -> Expression {
@@ -187,6 +193,19 @@ pub class Parser {
     }
 
     return lhs;
+  }
+
+  func parse_type(mut &self) -> Option<Type> {
+    match self.next_token().kind {
+      TokenKind::Int32Ty => Type::Int32
+      TokenKind::BoolTy => Type::Boolean
+      TokenKind::Identifier(name) => Type::Named(name),
+      kind => {
+        self.error(ParseError::UnexpectedToken(TokenKind::Int32Ty, kind));
+        None
+      }
+    }
+
   }
 
   func parse_if(mut &self) -> Expression {

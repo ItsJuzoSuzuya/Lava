@@ -5605,6 +5605,27 @@ impl Sema {
                     }
                 }
 
+                // A field without a default gets its value from each constructor, else it's
+                // left as random memory, like a reference pointing anywhere
+                let is_ctor = |fn_name: &str| fn_name == name.as_str()
+                    || fn_name.strip_prefix(name.as_str()).is_some_and(|rest| rest.starts_with('#'));
+                for method in methods.iter() {
+                    let DeclarationKind::Function { name: fn_name, params, body, .. } = &method.kind else { continue };
+                    if !is_ctor(fn_name) {
+                        continue;
+                    }
+                    let body = body.as_deref().unwrap_or(&[]);
+                    if let Some(field) = fields.iter().find(|f| f.value.is_none() && !assigns_field(body, &f.name)) {
+                        let taken: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+                        diagnostic::throw(
+                            format!("the field '{}' gets no value in `Constructor({})`. Give it a default, like `{}: {} = {};` with a parameter `{}`, or assign `self.{} = ...` in the constructor",
+                                field.name, taken.join(", "), field.name, written_type(&crate::analysis::show_type(&field.ty)), field.name, field.name, field.name),
+                            Some(method.span.clone()),
+                            &self.source,
+                        );
+                    }
+                }
+
                 // An instance of a generic class checks its methods once they're called
                 if let Some(lazy) = self.lazy_instance.take() {
                     self.register_lazy_methods(methods, lazy);
@@ -5676,6 +5697,15 @@ impl Sema {
                             let StmtKind::Expression(expr) = std::mem::replace(&mut last.kind, StmtKind::Break) else { unreachable!() };
                             last.kind = StmtKind::Return(expr);
                         }
+                    }
+                }
+                // A function giving a `Result<(), E>` gives `Ok(())` when it reaches its end
+                let gives_unit_result = self.result_types(&ret).is_some_and(|(ok, _)| ok == Type::Tuple(Vec::new()));
+                if let (Some(stmts), true) = (body.as_mut(), gives_unit_result) {
+                    if !returns_always(stmts) {
+                        let span = stmts.last().map(|stmt| stmt.span.clone()).unwrap_or_else(|| decl.span.clone());
+                        let unit = Expr::new(ExprKind::Tuple(Vec::new()), span.clone());
+                        stmts.push(Stmt::new(StmtKind::Return(unit), span, Type::Unknown));
                     }
                 }
                 if let Some(stmts) = body {
@@ -6123,6 +6153,29 @@ fn place_name(expr: &Expr) -> String {
         ExprKind::Index { object, .. } => format!("{}[..]", place_name(object)),
         _ => "value".to_string(),
     }
+}
+
+/// Whether `body`, a constructor's, assigns the field `field` somewhere, like
+/// `self.errors = errors;`, also inside an `if`, `match` or loop.
+fn assigns_field(body: &[Stmt], field: &str) -> bool {
+    fn in_block(block: &Block, field: &str) -> bool {
+        assigns_field(&block.stmts, field) || block.value.as_deref().is_some_and(|value| in_expr(value, field))
+    }
+    fn in_expr(expr: &Expr, field: &str) -> bool {
+        match &expr.kind {
+            ExprKind::Assignment { lhs, .. } => matches!(&lhs.kind,
+                ExprKind::FieldAccess { object, field: assigned } if assigned == field
+                    && matches!(&object.kind, ExprKind::Identifier(name) if name == "self")),
+            ExprKind::If { then_block, else_block, .. } => in_block(then_block, field) || else_block.as_ref().is_some_and(|b| in_block(b, field)),
+            ExprKind::Match { arms, .. } => arms.iter().any(|arm| in_block(&arm.block, field)),
+            _ => false,
+        }
+    }
+    body.iter().any(|stmt| match &stmt.kind {
+        StmtKind::Expression(expr) => in_expr(expr, field),
+        StmtKind::While { body, .. } => assigns_field(body, field),
+        _ => false,
+    })
 }
 
 /// Whether the reference `expr` points into a value that's freed when its

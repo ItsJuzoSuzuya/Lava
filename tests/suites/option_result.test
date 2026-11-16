@@ -514,3 +514,38 @@ print(o ?? "unset");
 positive
 none
 set
+
+=== () is a value and a type, like in Result<(), E>
+import std::result::{Result};
+import std::option::{Option};
+import std::vector::{Vector};
+func check(n: int32) -> Result<(), String> {
+  if n < 0 return Err("negative");
+  return Ok(());
+}
+match check(5) {
+  Ok(()) => print("ok"),
+  Err(e) => print(e),
+}
+print(check(-1) is Err(_));
+let o: Option<()> = Some(());
+print(o is Some(_));
+mut v = Vector<()>();
+v.push(());
+print(v.len());
+--- output
+ok
+true
+true
+1
+
+=== a function giving a Result of () gives Ok(()) at its end
+import std::result::{Result};
+func check(n: int32) -> Result<(), String> {
+  if n < 0 return Err("negative");
+}
+print(check(1) is Ok(()));
+print(check(-1) is Err(_));
+--- output
+true
+true

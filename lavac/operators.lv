@@ -1,6 +1,7 @@
 import token;
 import type;
 import std::option::{Option};
+import std::string::{Print};
 
 pub enum BinaryOp {
   Add, Sub, Mul, Div, Rem,
@@ -38,6 +39,25 @@ pub enum BinaryOp {
       // equality: any two values of the same type give a bool
       BinaryOp::Eq | BinaryOp::NotEq =>
         lhs == rhs ? Some(Type::Boolean) : None,
+    }
+  }
+}
+
+impl Print for BinaryOp {
+  pub func to_string(&self) -> String {
+    match self {
+      BinaryOp::Add => "+"
+      BinaryOp::Sub => "-"
+      BinaryOp::Mul => "*"
+      BinaryOp::Div => "/"
+      BinaryOp::Rem => "%"
+      BinaryOp::Eq  => "=="
+      BinaryOp::NotEq => "!="
+      BinaryOp::Lt => "<"
+      BinaryOp::LtEq => "<="
+      BinaryOp::Gt => ">"
+      BinaryOp::GtEq => ">="
+      
     }
   }
 }

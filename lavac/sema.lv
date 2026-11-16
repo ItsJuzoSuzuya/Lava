@@ -28,13 +28,20 @@ pub enum SemanticError {
     name: String,
     span: Span
   }
+  
+  pub func message(&self) -> String {
+    match self {
+      SemanticError::TypeValueMissmatch(_, type, val_ty) => "Defined type '" + type.to_string() + "' didn't match the values type '" + val_ty.to_string() + "'"
+      SemanticError::InvalidOperands(op, lhs, rhs, _) => "The '" + op.to_string() + "' operation can't be used on '" + lhs.to_string() + "' and '" + rhs.to_string() + "'"
+      SemanticError::UnknownVariable(name, _) => "'" + name + "' is an undefined variable"
+    }
+  } 
 }
 
 pub class Sema {
-  variables: HashMap<String, Type> = HashMap();
-  pub errors: Vector<SemanticError> = Vector();
+  pub errors: &Vector<SemanticError>;
 
-  Constructor();
+  variables: HashMap<String, Type> = HashMap();
 
   pub func check(mut &self, mut ast: &Vector<Statement>) {
     for stmt in ast {
@@ -46,7 +53,7 @@ pub class Sema {
     match stmt.kind {
       StmtKind::Let(name, ty, value) => {
         let value_ty = self.check_expr(value);
-        if ty is Some(t) && t != value_ty {
+        if ty is Some(t) && t != value_ty && t != Type::Error && value_ty != Type::Error {
           self.errors.push(SemanticError::TypeValueMissmatch(name, t, value_ty));
         }
         self.variables.set(name, ty ?? value_ty);
