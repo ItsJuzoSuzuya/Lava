@@ -15,9 +15,14 @@ pub class Statement {
 impl Codegen for Statement {
   pub func codegen(self, mut ctx: &CodegenContext) -> Option<LLVMValueRef> {
     match self.kind {
-      StmtKind::Let(name, _, expr) => {
+      StmtKind::Assignment(var, val) => {
+        let v = val.codegen(ctx) ?? return None;
+        ctx.store_variable(var, v);
+        return None;
+      }
+      StmtKind::Instantiation(name, _, expr, is_mut) => {
         let value = expr.codegen(ctx) ?? return None;
-        ctx.declare_variable(name, value, expr.ty.to_llvm(ctx));
+        ctx.declare_variable(name, value, expr.ty.to_llvm(ctx), is_mut);
         return None;
       }
 
@@ -38,9 +43,16 @@ impl Codegen for Statement {
 }
 
 pub enum StmtKind {
-  Let => { 
+  Instantiation => { 
     name: String,
     ty: Option<type::Type>,
+    value: Expression,
+    is_mut: bool
+  }
+
+  /// `x = value;`, a new value for an existing variable
+  Assignment => {
+    name: String,
     value: Expression
   }
 

@@ -1,8 +1,4 @@
 let x: int32 = 300;
+x = 200;
+
 print(x);
-
-print(y);
-let z: bool = 200;
-print(z);
-
-let a; bool = true;

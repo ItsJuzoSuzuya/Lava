@@ -1,22 +1,28 @@
 import llvm;
 import std::option::{Option};
 import std::hashmap::{HashMap};
+import expression;
 pub class CodegenContext {
   pub context: &Context;
   pub builder: Builder = context.new_builder();
   pub module: Module = context.create_module("mod");
   pub variables: HashMap<String, Variable> = HashMap();
 
-  pub func declare_variable(mut &self, name: String, value: LLVMValueRef, ty: Type) {
+  pub func declare_variable(mut &self, name: String, value: LLVMValueRef, ty: Type, is_mut: bool) {
     let llvm_type = LLVMTypeOf(value);
     let address = self.builder.build_alloca(llvm_type, name);
     self.builder.build_store(value, address);
-    self.variables.set(name, Variable(address, llvm_type, ty));
+    self.variables.set(name, Variable(address, llvm_type, ty, is_mut));
   }
 
   pub func load_variable(&self, name: String) -> Option<LLVMValueRef> {
     let variable = self.variables.get(name) ?? return None;
     return self.builder.build_load(variable.llvm_type, variable.address, name.clone());
+  }
+
+  pub func store_variable(&self, var: String, val: LLVMValueRef) {
+    if self.variables.get(var) is Some(v) 
+      self.builder.build_store(val, v.address);
   }
 
   // Registers the X86 backend, before a target can be looked up or code written.

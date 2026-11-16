@@ -18,7 +18,10 @@ pub enum ParseError {
   InvalidBinaryOperation => TokenKind,
   Lex => LexError
   UnexpectedEOF => &Path,
-  UnexpectedToken => (TokenKind, TokenKind),
+  UnexpectedToken => {
+    got: TokenKind, 
+    expected: TokenKind
+  }
 
 
   pub func message(&self) -> String {
@@ -26,7 +29,7 @@ pub enum ParseError {
       ParseError::ExpectedExpression(token) => "Expected an expression but got '" + token.as_string() + "'"
       ParseError::InvalidBinaryOperation(kind) => "Provided an invalid token as operator for binary expression: " + kind.to_string()
       ParseError::UnexpectedEOF(context) => "Unexpected end of file in " + context.to_string()
-      ParseError::UnexpectedToken(kind, _) => "Unexpected token: " + kind.to_string()
+      ParseError::UnexpectedToken(got, expected) => "Unexpected token: '" + got.to_string() + "', expected: '"  + expected.to_string() + "'"
 
       ParseError::Lex(err) => "[Lex Error] Lexing failed: " + err.message()
     }
@@ -66,6 +69,136 @@ pub class Parser {
     }
 
     return stmts;
+  }
+
+  pub func parse_stmt(mut &self) -> Statement {
+    let token = self.peek();
+    match token.kind {
+      TokenKind::Let => { self.consume(); return self.parse_variable(false); }
+      TokenKind::Mut => { self.consume(); return self.parse_variable(true); }
+      TokenKind::Print => { self.consume(); return self.parse_print(); }
+      _ => ()
+    };
+
+    let expr = self.parse_expr();
+    if self.peek().kind == TokenKind::Assign && expr.kind is ExprKind::Identifier(name) {
+      self.consume(); // consume '='
+      let value = self.parse_expr();
+      self.expect(TokenKind::Semicolon);
+      return Statement(StmtKind::Assignment(name, value), token.span);
+    }
+    return Statement(StmtKind::Expression(expr), token.span);
+  }
+
+  pub func parse_variable(mut &self, is_mut: bool) -> Statement {
+    let var = self.next_token().as_string();
+    mut type: Option<Type> = None;
+    if self.peek().kind == TokenKind::Colon {
+      self.consume();
+      type = self.parse_type();
+    }
+
+    self.expect(TokenKind::Assign);
+    let val = self.parse_expr();
+    let span = val.span;
+    self.expect(TokenKind::Semicolon);
+
+    return Statement(StmtKind::Instantiation(var, type, val, is_mut), span);
+  }
+
+  func parse_print(mut &self) -> Statement {
+    self.expect(TokenKind::LParen);
+    let expr = self.parse_expr();
+    let span = expr.span;
+    self.expect(TokenKind::RParen);
+    self.expect(TokenKind::Semicolon);
+    return Statement(StmtKind::Print(expr), span);
+  } 
+
+  pub func parse_expr(mut &self) -> Expression {
+    return self.parse_level();
+  }
+
+  pub func parse_level(mut &self, level: Precidence = Precidence::Comparision) -> Expression {
+    if level == Precidence::Primary 
+      return self.parse_primary();
+
+    if level == Precidence::Unary {
+      if !level.has(self.peek().kind) 
+        return self.parse_level(Precidence::Primary);
+
+      let op = UnaryOp::from_token(self.next_token().kind);
+      let expr = self.parse_level(Precidence::Unary);
+      let ty = expr.ty;
+      let span = expr.span;
+      return Expression(ExprKind::UnaryExpr(op, unique(expr)), span, ty);
+    }
+
+    mut lhs = self.parse_level(level.next());
+    while level.has(self.peek().kind) {
+      let op = self.next_token();
+      let rhs = self.parse_level(level.next());
+      let ty = lhs.ty;
+      lhs = Expression(ExprKind::BinaryExpr(unique(lhs), BinaryOp::from_token(op.kind), unique(rhs)), op.span, ty);
+    }
+
+    return lhs;
+  }
+
+  func parse_primary(mut &self) -> Expression {
+    let token = self.next_token();
+    match token.kind {
+      TokenKind::If => self.parse_if(),
+      TokenKind::True => Expression(ExprKind::Boolean(true), token.span, Type::Boolean),
+      TokenKind::False => Expression(ExprKind::Boolean(false), token.span, Type::Boolean),
+
+      TokenKind::IntLiteral(val) => Expression(ExprKind::IntLiteral(val), token.span, Type::Int32),
+
+      TokenKind::Identifier(name) => Expression(ExprKind::Identifier(name), token.span, Type::Named(name))
+      _ => {
+        self.error(ParseError::ExpectedExpression(token));
+        Expression(ExprKind::Error, token.span, Type::Error)
+      }
+    };
+  }
+
+  func parse_if(mut &self) -> Expression {
+    let condition = self.parse_expr();
+    self.expect(TokenKind::LBrace);
+    let body = self.parse_block();
+    let span = condition.span;
+    let kind = ExprKind::If(unique(condition), unique(body), None);
+    return Expression(kind, span, Type::Void);
+  }
+
+  func parse_type(mut &self) -> Option<Type> {
+    match self.next_token().kind {
+      TokenKind::Int32Ty => Type::Int32
+      TokenKind::BoolTy => Type::Boolean
+      TokenKind::Identifier(name) => Type::Named(name),
+      kind => {
+        self.error(ParseError::UnexpectedToken(TokenKind::Int32Ty, kind));
+        None
+      }
+    }
+
+  }
+
+  // Parses a { } block. Doesnt consume the {.
+  func parse_block(mut &self) -> Block {
+    mut stmts: Vector<Statement> = Vector();
+    while !self.peek().is_eof() && self.peek().kind != TokenKind::RBrace {
+      let stmt = self.parse_stmt();
+      if stmt.kind is StmtKind::Value(expr) {
+        self.expect(TokenKind::RBrace);
+        return Block(stmts, expr);
+      } else {
+        stmts.push(stmt);
+      }
+    }
+
+    self.expect(TokenKind::RBrace);
+    return Block(stmts, None);
   }
 
   // The next token. Whatever the lexer can't read is recorded and skipped, the
@@ -116,130 +249,4 @@ pub class Parser {
 
     self.recovering = true;
   }
-
-  pub func parse_stmt(mut &self) -> Statement {
-    let token = self.next_token();
-    let stmt = match token.kind {
-      TokenKind::Let => self.parse_let(),
-
-      TokenKind::Print => self.parse_print(),
-      _ => {
-        let expr = self.parse_expr();
-        Statement(StmtKind::Expression(expr), token.span)
-      }
-    };
-
-    return stmt;
-  }
-
-  pub func parse_let(mut &self) -> Statement {
-    let var = self.next_token().as_string();
-    mut type: Option<Type> = None;
-    if self.peek().kind == TokenKind::Colon {
-      self.consume();
-      type = self.parse_type();
-    }
-
-    self.expect(TokenKind::Assign);
-    let val = self.parse_expr();
-    let span = val.span;
-    self.expect(TokenKind::Semicolon);
-
-    return Statement(StmtKind::Let(var, type, val), span);
-  }
-
-  pub func parse_expr(mut &self) -> Expression {
-    return self.parse_level();
-  }
-
-  func parse_primary(mut &self) -> Expression {
-    let token = self.next_token();
-    match token.kind {
-      TokenKind::If => self.parse_if(),
-      TokenKind::True => Expression(ExprKind::Boolean(true), token.span, Type::Boolean),
-      TokenKind::False => Expression(ExprKind::Boolean(false), token.span, Type::Boolean),
-
-      TokenKind::IntLiteral(val) => Expression(ExprKind::IntLiteral(val), token.span, Type::Int32),
-
-      TokenKind::Identifier(name) => Expression(ExprKind::Identifier(name), token.span, Type::Void),
-      _ => {
-        self.error(ParseError::ExpectedExpression(token));
-        Expression(ExprKind::Error, token.span, Type::Error)
-      }
-    };
-  }
-
-  pub func parse_level(mut &self, level: Precidence = Precidence::Comparision) -> Expression {
-    if level == Precidence::Primary 
-      return self.parse_primary();
-
-    if level == Precidence::Unary {
-      if !level.has(self.peek().kind) 
-        return self.parse_level(Precidence::Primary);
-
-      let op = UnaryOp::from_token(self.next_token().kind);
-      let expr = self.parse_level(Precidence::Unary);
-      let ty = expr.ty;
-      let span = expr.span;
-      return Expression(ExprKind::UnaryExpr(op, unique(expr)), span, ty);
-    }
-
-    mut lhs = self.parse_level(level.next());
-    while level.has(self.peek().kind) {
-      let op = self.next_token();
-      let rhs = self.parse_level(level.next());
-      let ty = lhs.ty;
-      lhs = Expression(ExprKind::BinaryExpr(unique(lhs), BinaryOp::from_token(op.kind), unique(rhs)), op.span, ty);
-    }
-
-    return lhs;
-  }
-
-  func parse_type(mut &self) -> Option<Type> {
-    match self.next_token().kind {
-      TokenKind::Int32Ty => Type::Int32
-      TokenKind::BoolTy => Type::Boolean
-      TokenKind::Identifier(name) => Type::Named(name),
-      kind => {
-        self.error(ParseError::UnexpectedToken(TokenKind::Int32Ty, kind));
-        None
-      }
-    }
-
-  }
-
-  func parse_if(mut &self) -> Expression {
-    let condition = self.parse_expr();
-    self.expect(TokenKind::LBrace);
-    let body = self.parse_block();
-    let span = condition.span;
-    let kind = ExprKind::If(unique(condition), unique(body), None);
-    return Expression(kind, span, Type::Void);
-  }
-
-  // Parses a { } block. Doesnt consume the {.
-  func parse_block(mut &self) -> Block {
-    mut stmts: Vector<Statement> = Vector();
-    while !self.peek().is_eof() && self.peek().kind != TokenKind::RBrace {
-      let stmt = self.parse_stmt();
-      if stmt.kind is StmtKind::Value(expr) {
-        self.expect(TokenKind::RBrace);
-        return Block(stmts, expr);
-      } else {
-        stmts.push(stmt);
-      }
-    }
-
-    self.expect(TokenKind::RBrace);
-    return Block(stmts, None);
-  }
-
-  func parse_print(mut &self) -> Statement {
-    self.expect(TokenKind::LParen);
-    let expr = self.parse_expr();
-    let span = expr.span;
-    self.expect(TokenKind::RParen);
-    self.expect(TokenKind::Semicolon);
-    return Statement(StmtKind::Print(expr), span);
-  } 
 }

@@ -200,6 +200,7 @@ pub class Variable {
   pub address: LLVMValueRef;
   pub llvm_type: LLVMTypeRef;
   pub ty: Type;
+  pub is_mut: bool;
 }
 
 pub extern type LLVMBasicBlockRef;

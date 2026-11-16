@@ -22,7 +22,6 @@ pub class Expression {
         let int = val ? 1 : 0;
         return ctx.context.bool_type().const_int(int as uint64, false);
       },
-
       ExprKind::IntLiteral(val) => {
         return ctx.context.i32_type().const_int(val as uint64, false);
       },
@@ -44,7 +43,6 @@ pub class Expression {
           BinaryOp::NotEq => ctx.builder.build_icmp(CompareOp::NEQ.to_int(), l, r, "eq"),
         };
       }
-
       ExprKind::UnaryExpr(op, expr) => {
         let val = expr.codegen(ctx) ?? return None;
         return match op {

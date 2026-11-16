@@ -10,38 +10,10 @@ import std::math::{exp};
 import operators;
 import span;
 
-pub enum SemanticError {
-  TypeValueMissmatch => {
-    var: String,
-    type: Type,
-    val_type: Type,
-  }
-
-  InvalidOperands => {
-    op: BinaryOp,
-    lhs: Type,
-    rhs: Type,
-    span: Span
-  }
-
-  UnknownVariable => {
-    name: String,
-    span: Span
-  }
-  
-  pub func message(&self) -> String {
-    match self {
-      SemanticError::TypeValueMissmatch(_, type, val_ty) => "Defined type '" + type.to_string() + "' didn't match the values type '" + val_ty.to_string() + "'"
-      SemanticError::InvalidOperands(op, lhs, rhs, _) => "The '" + op.to_string() + "' operation can't be used on '" + lhs.to_string() + "' and '" + rhs.to_string() + "'"
-      SemanticError::UnknownVariable(name, _) => "'" + name + "' is an undefined variable"
-    }
-  } 
-}
-
 pub class Sema {
   pub errors: &Vector<SemanticError>;
 
-  variables: HashMap<String, Type> = HashMap();
+  variables: HashMap<String, SemaVariable> = HashMap();
 
   pub func check(mut &self, mut ast: &Vector<Statement>) {
     for stmt in ast {
@@ -51,12 +23,18 @@ pub class Sema {
 
   func check_stmt(mut &self, mut stmt: &Statement) {
     match stmt.kind {
-      StmtKind::Let(name, ty, value) => {
+      StmtKind::Assignment(var, val) => {
+        if self.variables.get(var) is Some(v) && !v.is_mut 
+          self.errors.push(SemanticError::ReassignToUnmutableVariable(var));
+      } 
+
+      StmtKind::Instantiation(name, ty, value, is_mut) => {
         let value_ty = self.check_expr(value);
-        if ty is Some(t) && t != value_ty && t != Type::Error && value_ty != Type::Error {
+        if ty is Some(t) && t != value_ty && t != Type::Error && value_ty != Type::Error 
           self.errors.push(SemanticError::TypeValueMissmatch(name, t, value_ty));
-        }
-        self.variables.set(name, ty ?? value_ty);
+
+        let var = SemaVariable(ty ?? value_ty, is_mut);
+        self.variables.set(name, var);
       } 
 
       StmtKind::Print(value) => {
@@ -70,7 +48,7 @@ pub class Sema {
       ExprKind::Boolean => Type::Boolean,
       ExprKind::IntLiteral => Type::Int32,
       ExprKind::Identifier(name) => match self.variables.get(name) {
-        Some(ty) => ty,
+        Some(var) => var.ty,
         None => {
           self.errors.push(SemanticError::UnknownVariable(name, expr.span));
           Type::Error
@@ -97,3 +75,35 @@ pub class Sema {
   }
 }
 
+pub enum SemanticError {
+  TypeValueMissmatch => {
+    var: String,
+    type: Type,
+    val_type: Type,
+  },
+  InvalidOperands => {
+    op: BinaryOp,
+    lhs: Type,
+    rhs: Type,
+    span: Span
+  },
+  UnknownVariable => {
+    name: String,
+    span: Span
+  },
+  ReassignToUnmutableVariable => String
+  
+  pub func message(&self) -> String {
+    match self {
+      SemanticError::TypeValueMissmatch(_, type, val_ty) => "Defined type '" + type.to_string() + "' didn't match the values type '" + val_ty.to_string() + "'"
+      SemanticError::InvalidOperands(op, lhs, rhs, _) => "The '" + op.to_string() + "' operation can't be used on '" + lhs.to_string() + "' and '" + rhs.to_string() + "'"
+      SemanticError::UnknownVariable(name, _) => "'" + name + "' is an undefined variable"
+      SemanticError::ReassignToUnmutableVariable(var) => "Tried reassigning a value to the unmutable Variable '" + var + "'"
+    }
+  } 
+}
+
+pub class SemaVariable {
+  pub ty: Type;
+  pub is_mut: bool;
+}

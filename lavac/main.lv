@@ -83,7 +83,7 @@ func run_file(file: Path) {
 
 func print_errors(errors: &Vector<CompileError>) {
   for err in errors {
-    print("[Compile Error] " + err.message());
+    print(err.message());
   }
 
   exit(ExitCode::Failed);
