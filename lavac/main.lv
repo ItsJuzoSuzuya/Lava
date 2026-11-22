@@ -1,5 +1,5 @@
 import std::env::{args};
-import std::fs::{read, write, create_dir_all};
+import std::fs::{write, create_dir_all};
 import std::path::{Path};
 import std::process;
 import std::process::{ExitCode, exit};
@@ -10,6 +10,8 @@ import llvm;
 import modules;
 import program;
 import codegen_ctx;
+import diagnostic;
+import std::hashmap::{HashMap};
 
 func main() -> int32 {
   CodegenContext::initialize_native_target();
@@ -53,7 +55,7 @@ func build_command(args: &Vector<String>) -> Result<ExitCode, String> {
     Ok(ExitCode::Success)
 }
 
-func build(main: Path, output: Option<Path>) -> Result<Path,Vector<CompileError>> {
+func build(main: Path, output: Option<Path>) -> Result<Path, (Vector<Diagnostic>, HashMap<Path, String>)> {
   let dir = main.parent();
   let name = main.file_stem();
   let build_dir = dir.join("build");
@@ -66,9 +68,9 @@ func build(main: Path, output: Option<Path>) -> Result<Path,Vector<CompileError>
   let context = Context();
 
   let program = Program(CodegenContext(&context));
-  mut graph = ModuleGraph(main);
-  if program.build(graph) is Err(err)
-    return Err(err);
+  let graph = ModuleGraph(main);
+  if program.build(graph) is Err(errs)
+    return Err(errs, graph.sources);
 
   return executable;
 }
@@ -77,13 +79,30 @@ func run_file(file: Path) {
   let build = build(file, None);
   match build {
     Ok(executable) => process::run(executable.to_string())
-    Err(errors) => print_errors(errors)
+    Err(errors, sources) => print_errors(errors, sources)
   };
 }
 
-func print_errors(errors: &Vector<CompileError>) {
-  for err in errors {
-    print(err.message());
+func print_errors(diagnostics: &Vector<Diagnostic>, sources: &HashMap<Path, String>) {
+  for diagnostic in diagnostics {
+    match diagnostic.location {
+      Some(location) => {
+        let desc = location.to_string() + ": " + diagnostic.error.message();
+        print(desc);
+
+        if sources.get(location.file) is Some(source) {
+          let lines = source.split('\n');
+          let line_text = lines.at(location.span.line - 1) ?? "";
+          let number = location.span.line.to_string();
+          print("  " + number + " | " + line_text);
+          print("  " + " ".repeat(number.len()) + " | " + " ".repeat(location.span.col - 1) + "^".repeat(location.span.len));
+        } else   
+          panic("internal error: no source for '" + location.file.to_string() + "', but an error points into it");
+      }
+      None => {
+        print("error: " + diagnostic.error.message());
+      }
+    }
   }
 
   exit(ExitCode::Failed);

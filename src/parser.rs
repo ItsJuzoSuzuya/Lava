@@ -736,6 +736,12 @@ impl Parser {
 
         match tok {
             Token::Identifier(name) if name == "_" => (Pattern::Wildcard, span),
+            // `mut errs`, a binding that can be changed
+            Token::Mut => {
+                let (name, name_span) = self.expect(Token::Identifier("name".to_string()), "after `mut` in a pattern");
+                let binding = Pattern::name(&self.written(&name.to_string()), name_span);
+                (Pattern::Mut(Box::new(binding)), span)
+            }
             Token::Identifier(name) => {
                 if matches!(self.peek().0, Token::ColonColon) {
                     // `Kind::Round`, or with the enum's module `shapes::Kind::Round`:

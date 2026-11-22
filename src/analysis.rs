@@ -1356,6 +1356,8 @@ impl<'a> Walker<'a> {
                     self.pattern(alternative, from, scope_end);
                 }
             }
+            // Only left in templates, sema leaves the plain name
+            Pattern::Mut(inner) => self.pattern(inner, from, scope_end),
         }
     }
 

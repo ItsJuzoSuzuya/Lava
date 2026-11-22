@@ -1,5 +1,7 @@
+import std::string::{Print};
 pub class Span {
-    pub line: uint32;
-    pub col: uint32;
-    pub len: uint32;
+  pub line: uint32;
+  pub col: uint32;
+  pub len: uint32;
 }
+

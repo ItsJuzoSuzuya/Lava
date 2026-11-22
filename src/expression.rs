@@ -58,6 +58,9 @@ pub enum Pattern {
     /// `Op::Add | Op::Sub`: matches if any of the alternatives does. The
     /// alternatives can't bind names.
     Or(Vec<Pattern>),
+    /// `mut errs`, a name whose value can be changed, like in `Err(mut errs)`.
+    /// Sema checks the matched value may be changed and leaves the plain name.
+    Mut(Box<Pattern>),
     /// `{ lhs, op: o, .. }`, the payload of a variant with named fields, like
     /// `ExprKind::Binary { lhs, .. }`. Sema turns it into the tuple pattern of
     /// the payload, in the order the fields are declared.
@@ -97,6 +100,7 @@ impl Pattern {
             Pattern::Tuple(items) => items.iter().all(Pattern::always_matches),
             Pattern::Fields { fields, .. } => fields.iter().all(|(_, p, _)| p.always_matches()),
             Pattern::Or(alternatives) => alternatives.iter().any(Pattern::always_matches),
+            Pattern::Mut(inner) => inner.always_matches(),
             Pattern::EnumVariant { .. } | Pattern::List { .. } => false,
         }
     }
@@ -117,6 +121,7 @@ impl Pattern {
             Pattern::Tuple(items) => items.iter().flat_map(Pattern::names).collect(),
             Pattern::Fields { fields, .. } => fields.iter().flat_map(|(_, p, _)| p.names()).collect(),
             Pattern::Or(alternatives) => alternatives.iter().flat_map(Pattern::names).collect(),
+            Pattern::Mut(inner) => inner.names(),
         }
     }
 }
@@ -152,6 +157,7 @@ impl Display for Pattern {
                 let items: Vec<String> = alternatives.iter().map(|p| p.to_string()).collect();
                 write!(f, "{}", items.join(" | "))
             }
+            Pattern::Mut(inner) => write!(f, "mut {}", inner),
             Pattern::Fields { fields, rest } => {
                 let mut items: Vec<String> = fields.iter().map(|(name, pattern, _)| match pattern {
                     Pattern::Literal(Expr { kind: ExprKind::Identifier(bound), .. }) if bound == name => name.clone(),

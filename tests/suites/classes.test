@@ -315,19 +315,25 @@ b.v = 5;
 --- error
 Tried reassigning a value to the unmutable Variable 'b'
 
-=== private field can't be read from outside
-class Box {
+=== private field can't be read from another module
+import boxes;
+let b = Box { v: 1 };
+print(b.v);
+--- file boxes.lv
+pub class Box {
   v: int32 = v;
 
   Constructor(v: int32);
 }
-let b = Box { v: 1 };
-print(b.v);
 --- error
 Tried accessing a private field 'v'
 
-=== private method can't be called from outside
-class Box {
+=== private method can't be called from another module
+import boxes;
+let b = Box { v: 1 };
+print(b.hidden());
+--- file boxes.lv
+pub class Box {
   v: int32 = v;
 
   Constructor(v: int32);
@@ -336,8 +342,6 @@ class Box {
     return self.v;
   }
 }
-let b = Box { v: 1 };
-print(b.hidden());
 --- error
 Tried calling a private function 'hidden'
 
@@ -692,19 +696,21 @@ print(l.light.tag);
 --- output
 1
 
-=== private field of a field is an error
-class Inner {
+=== private field of a field is an error in another module
+import nested;
+let o = Outer { inner: Inner { v: 7 } };
+print(o.inner.v);
+--- file nested.lv
+pub class Inner {
   v: int32 = v;
 
   Constructor(v: int32);
 }
-class Outer {
+pub class Outer {
   pub inner: Inner = inner;
 
   Constructor(inner: Inner);
 }
-let o = Outer { inner: Inner { v: 7 } };
-print(o.inner.v);
 --- error
 Tried accessing a private field 'v'
 
@@ -940,3 +946,20 @@ class S {
 print(S(5).n);
 --- output
 5
+
+=== a private field and method are visible in the whole module
+class Bag {
+  items: int32 = 3;
+  Constructor();
+  func secret(&self) -> int32 { return 7; }
+}
+class Peek {
+  pub n: int32;
+  pub func look(&self, b: &Bag) -> int32 {
+    return b.items + b.secret() + self.n;
+  }
+}
+let b = Bag();
+print(Peek(0).look(&b));
+--- output
+10

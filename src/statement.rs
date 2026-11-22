@@ -416,7 +416,7 @@ pub fn codegen_match<'ctx>(
                     Pattern::Literal(expr) if matches!(expr.kind, ExprKind::Identifier(_)) => {
                         wildcard_bb.get_or_insert(bb);
                     }
-                    Pattern::Literal(_) | Pattern::List { .. } | Pattern::Tuple(_) | Pattern::Fields { .. } | Pattern::Or(_) => {
+                    Pattern::Literal(_) | Pattern::List { .. } | Pattern::Tuple(_) | Pattern::Fields { .. } | Pattern::Or(_) | Pattern::Mut(_) => {
                         panic!("this pattern can't match an enum, sema rejects it");
                     }
                 }
@@ -502,7 +502,7 @@ pub fn codegen_match<'ctx>(
                     Pattern::Wildcard => {
                         wildcard_bb.get_or_insert(bb);
                     }
-                    Pattern::EnumVariant { .. } | Pattern::List { .. } | Pattern::Tuple(_) | Pattern::Fields { .. } | Pattern::Or(_) => {
+                    Pattern::EnumVariant { .. } | Pattern::List { .. } | Pattern::Tuple(_) | Pattern::Fields { .. } | Pattern::Or(_) | Pattern::Mut(_) => {
                         panic!("this pattern can't match a number or bool, sema rejects it");
                     }
                 }
@@ -753,6 +753,7 @@ fn pattern_test<'ctx>(ctx: &mut CodegenContext<'ctx>, pattern: &Pattern, place: 
             all
         }
         Pattern::Fields { .. } => unreachable!("sema turns field patterns into tuple patterns"),
+        Pattern::Mut(_) => unreachable!("sema turns `mut name` into the plain name"),
         // Any of them
         Pattern::Or(alternatives) => {
             let mut any = ctx.context.bool_type().const_zero();

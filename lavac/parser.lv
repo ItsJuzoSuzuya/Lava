@@ -12,29 +12,8 @@ import type;
 import precidece;
 import operators;
 import program;
-
-pub enum ParseError {
-  ExpectedExpression => Token,
-  InvalidBinaryOperation => TokenKind,
-  Lex => LexError
-  UnexpectedEOF => &Path,
-  UnexpectedToken => {
-    got: TokenKind, 
-    expected: TokenKind
-  }
-
-
-  pub func message(&self) -> String {
-    match self {
-      ParseError::ExpectedExpression(token) => "Expected an expression but got '" + token.as_string() + "'"
-      ParseError::InvalidBinaryOperation(kind) => "Provided an invalid token as operator for binary expression: " + kind.to_string()
-      ParseError::UnexpectedEOF(context) => "Unexpected end of file in " + context.to_string()
-      ParseError::UnexpectedToken(got, expected) => "Unexpected token: '" + got.to_string() + "', expected: '"  + expected.to_string() + "'"
-
-      ParseError::Lex(err) => "[Lex Error] Lexing failed: " + err.message()
-    }
-  }
-}
+import span;
+import diagnostic;
 
 pub class Parser {
   lexer: Lexer;
@@ -154,7 +133,7 @@ pub class Parser {
 
       TokenKind::IntLiteral(val) => Expression(ExprKind::IntLiteral(val), token.span, Type::Int32),
 
-      TokenKind::Identifier(name) => Expression(ExprKind::Identifier(name), token.span, Type::Named(name))
+      TokenKind::Identifier(name) => Expression(ExprKind::Identifier(name), token.span, Type::Void)
       _ => {
         self.error(ParseError::ExpectedExpression(token));
         Expression(ExprKind::Error, token.span, Type::Error)
@@ -172,12 +151,13 @@ pub class Parser {
   }
 
   func parse_type(mut &self) -> Option<Type> {
-    match self.next_token().kind {
+    let token = self.next_token();
+    match token.kind {
       TokenKind::Int32Ty => Type::Int32
       TokenKind::BoolTy => Type::Boolean
       TokenKind::Identifier(name) => Type::Named(name),
       kind => {
-        self.error(ParseError::UnexpectedToken(TokenKind::Int32Ty, kind));
+        self.error(ParseError::UnexpectedToken(token, kind));
         None
       }
     }
@@ -237,7 +217,7 @@ pub class Parser {
     let got = self.peek();
 
     if got.kind != expected_token 
-      return self.error(ParseError::UnexpectedToken(expected_token, got.kind));
+      return self.error(ParseError::UnexpectedToken(Token(expected_token, got.span), got.kind));
 
     self.next_token();
     self.recovering = false;
@@ -250,3 +230,4 @@ pub class Parser {
     self.recovering = true;
   }
 }
+

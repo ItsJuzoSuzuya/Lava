@@ -99,6 +99,13 @@ pub class Vector<T> {
     return item;
   }
 
+  // iterates through the elements and moves its value  
+  pub func drain(mut &self) -> DrainIter<T> {
+    let count = self.length;
+    self.length = 0;
+    return DrainIter(self, count);
+  }
+
   pub func clear(mut &self) {
     self.length = 0;
   }
@@ -148,7 +155,11 @@ impl<T> Iterable<T> for Vector<T> {
   }
 
   func contains(&self, value: &T) -> bool {
-    return VectorIter(self).contains(value);
+    for item in self {
+      if item == value
+        return true;
+    }
+    return false;
   }
 }
 
@@ -160,21 +171,31 @@ pub class VectorIter<T> {
   Constructor(vector: &Vector<T>);
 }
 
-impl<T> Iterator<T> for VectorIter<T> {
+impl<T> Iterator<&T> for VectorIter<T> {
   func next(mut &self) -> Option<&T> {
     if self.position >= self.vector.len() {
       return None;
     }
     self.position = self.position + 1;
-    return Some(self.vector.get(self.position - 1));
+    return self.vector.get(self.position - 1);
   }
+}
 
-  func contains(mut &self, value: &T) -> bool {
-    for item in self {
-      if item == value 
-        return true;
-    }
+// Moves the elements out of a `Vector`, see its `drain`.
+pub class DrainIter<T> {
+  vector: &Vector<T> = vector;
+  count: uint64 = count;
+  position: uint64 = 0;
 
-    return false;
+  Constructor(vector: &Vector<T>, count: uint64);
+}
+
+impl<T> Iterator<T> for DrainIter<T> {
+  func next(mut &self) -> Option<T> {
+    if self.position >= self.count 
+      return None;
+
+    self.position += 1;
+    return self.vector.data.take(self.position - 1);
   }
 }

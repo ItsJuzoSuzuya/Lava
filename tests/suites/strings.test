@@ -294,3 +294,14 @@ print(w.longer(2));
 --- output
 true
 true
+
+=== repeat puts the text after itself count times
+print("ab".repeat(3));
+print("[" + " ".repeat(4) + "]");
+print("[" + "x".repeat(0) + "]");
+print("[" + "".repeat(5) + "]");
+--- output
+ababab
+[    ]
+[]
+[]

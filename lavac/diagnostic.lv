@@ -1,0 +1,139 @@
+import std::path::{Path};
+import std::string;
+import llvm;
+import span;
+import std::option::{Option};
+import token;
+import lexer;
+import operators;
+import std::string::{Print};
+
+pub class Diagnostic {
+  pub error: CompileError;
+  pub location: Option<Location>;
+}
+
+pub class Location {
+  pub file: Path;
+  pub span: Span;
+}
+
+impl Print for Location {
+  pub func to_string(&self) -> String {
+    let span = self.span;
+    return self.file.to_string() + ":" + span.line.to_string() + ":" + span.col.to_string();
+  }
+}
+
+pub enum CompileError {
+  Parse => ParseError,
+  Semantic => SemanticError,
+  TargetTripleInvalid => TargetTriple,
+  CompilationFailure => String,
+  LinkingFailure => String,
+
+  pub func message(&self) -> String {
+    match self {
+      CompileError::Parse(err) => err.message()
+      CompileError::Semantic(err) => err.message()
+      CompileError::TargetTripleInvalid(triple) => "Couldn't build Target from Triple " + triple.arch
+      CompileError::CompilationFailure(message) => "An error occured while compiling: " + message
+      CompileError::LinkingFailure(message) => "An error occured while linking: " + message
+    }
+  }
+}
+
+pub enum ParseError {
+  ExpectedExpression => Token,
+  InvalidBinaryOperation => Token,
+  Lex => LexError
+  UnexpectedEOF => Token,
+  UnexpectedToken => {
+    got: Token, 
+    expected: TokenKind
+  }
+
+  pub func message(&self) -> String {
+    match self {
+      ParseError::ExpectedExpression(token) => "Expected an expression but got '" + token.as_string() + "'"
+      ParseError::InvalidBinaryOperation(token) => "Provided an invalid token as operator for binary expression: " + token.kind.to_string()
+      ParseError::Lex(err) => "Lexing failed: " + err.message()
+      ParseError::UnexpectedEOF(_) => "Unexpected end of file" 
+      ParseError::UnexpectedToken(got, expected) => "Unexpected token: '" + got.kind.to_string() + "', expected: '"  + expected.to_string() + "'"
+    }
+  }
+
+  pub func span(&self) -> Span {
+    match self {
+      ParseError::ExpectedExpression(token) => token.span
+      ParseError::InvalidBinaryOperation(token) => token.span
+      ParseError::Lex(err) => err.span()
+      ParseError::UnexpectedEOF(token) => token.span
+      ParseError::UnexpectedToken(got, _) => got.span
+    }
+  }
+}
+
+pub enum SemanticError {
+  TypeValueMismatch => {
+    var: String,
+    type: type::Type,
+    val_type: type::Type,
+    span: Span
+  },
+  InvalidOperands => {
+    op: BinaryOp,
+    lhs: type::Type,
+    rhs: type::Type,
+    span: Span
+  },
+  UnknownVariable => {
+    name: String,
+    span: Span
+  },
+  ReassignToImmutableVariable => {
+    name: String,
+    span: Span
+  }
+  
+  pub func message(&self) -> String {
+    match self {
+      SemanticError::TypeValueMismatch(_, type, val_ty, _) => "Defined type '" + type.to_string() + "' didn't match the values type '" + val_ty.to_string() + "'"
+      SemanticError::InvalidOperands(op, lhs, rhs, _) => "The '" + op.to_string() + "' operation can't be used on '" + lhs.to_string() + "' and '" + rhs.to_string() + "'"
+      SemanticError::UnknownVariable(name, _) => "'" + name + "' is an undefined variable"
+      SemanticError::ReassignToImmutableVariable(var, _) => "'" + var + "' can't be changed, declare it with `mut`"
+    }
+  } 
+
+  pub func span(&self) -> Span {
+    match self {
+      SemanticError::TypeValueMismatch(_,_,_,span) => span
+      SemanticError::InvalidOperands(_, _, _, span) => span
+      SemanticError::UnknownVariable(_, span) => span
+      SemanticError::ReassignToImmutableVariable(_, span) => span
+    }
+  }
+}
+
+pub enum LexError {
+  TokenNotImplemented => Token,
+  FloatLiteralToBig => Token,
+  IntLiteralToBig => Token 
+
+  pub func message(&self) -> String {
+    match self {
+      LexError::TokenNotImplemented(token) => "Token is not implemented in the Lexer: " + token.kind.to_string()
+      LexError::FloatLiteralToBig(f) => "Float literal was too big: " + f.kind.to_string()
+      LexError::IntLiteralToBig(f) => "Int literal was too big: " + f.kind.to_string()
+    }
+  }
+
+  pub func span(&self) -> Span {
+    match self {
+      LexError::TokenNotImplemented(token) => token.span
+      LexError::FloatLiteralToBig(f) => f.span
+      LexError::IntLiteralToBig(f) => f.span
+    }
+  }
+} 
+

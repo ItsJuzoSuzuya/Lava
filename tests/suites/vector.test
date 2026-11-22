@@ -560,3 +560,26 @@ print(sizes(L::Three) is Some(v) ? v.len() : 0 as uint64);
 --- output
 2
 0
+
+=== drain moves the elements out and leaves the vector empty
+import std::vector::{Vector};
+enum E { A => String; }
+enum C { Parse => E; }
+mut errs = Vector<E>();
+errs.push(E::A("x"));
+errs.push(E::A("y"));
+mut all = Vector<C>();
+for e in errs.drain() {
+  all.push(C::Parse(e));
+}
+print(all.len());
+print(errs.len());
+let b = "y";
+mut names = Vector<String>();
+names.push("x");
+names.push("y");
+print(names.contains(&b));
+--- output
+2
+0
+true

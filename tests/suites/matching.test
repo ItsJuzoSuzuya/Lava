@@ -590,3 +590,34 @@ let y = match o {
 };
 --- error
 an assignment gives no value
+
+=== a mut binding can be changed and changes the matched value
+import std::option::{Option};
+import std::vector::{Vector};
+import std::result::{Result};
+func errors() -> Result<int32, Vector<int32>> {
+  mut v = Vector<int32>();
+  v.push(1);
+  v.push(2);
+  return Err(v);
+}
+if errors() is Err(mut errs) {
+  for e in errs.drain() { print(e); }
+}
+mut o: Option<int32> = Some(1);
+match o {
+  Some(mut n) => { n += 5; },
+  None => print(0),
+}
+print(o is Some(6));
+--- output
+1
+2
+true
+
+=== a mut binding needs a changeable value
+import std::option::{Option};
+let o: Option<int32> = Some(1);
+match o { Some(mut n) => print(n), None => print(0) }
+--- error
+can't be `mut`, 'o' isn't

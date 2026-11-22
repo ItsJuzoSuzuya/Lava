@@ -4,7 +4,7 @@ use crate::{declaration::{Declaration, DeclarationKind, Extern, ExternItem, Type
 
 enum SemanticError {
     AmbiguousMethod { method: String, class: String, traits: Vec<String>, span: Span },
-    AssignOnUnmutable { var: String, span: Span },
+    AssignOnImmutable { var: String, span: Span },
     AssignToSelf { span: Span },
     BuiltinRedeclared { name: String, span: Span },
     CannotInferTypeParam { param: String, function: String, span: Span },
@@ -67,7 +67,7 @@ impl SemanticError {
         let (line, col, msg) = match self {
             SemanticError::AmbiguousMethod { method, class, traits, span } =>
                 (span.line, span.col, format!("method '{}' of '{}' is ambiguous, it comes from the traits '{}'", method, class, traits.join("', '"))),
-            SemanticError::AssignOnUnmutable{ var, span } =>
+            SemanticError::AssignOnImmutable{ var, span } =>
                 (span.line, span.col, format!("Tried reassigning a value to the unmutable Variable '{}'", var)),
             SemanticError::AssignToSelf { span } =>
                 (span.line, span.col, "can't assign to 'self' of a class, assign its fields instead".to_string()),
@@ -313,6 +313,10 @@ pub struct Sema {
     /// The field names of the variants with named fields, by enum (or generic
     /// enum template) and variant, like `Binary` of `ExprKind`.
     variant_fields: HashMap<String, HashMap<String, Vec<String>>>,
+    /// The module declaring each class and enum, or generic template. Private
+    /// fields and methods are visible in the whole module, like to the
+    /// iterator class next to a collection.
+    type_modules: HashMap<String, String>,
     /// Methods of every trait, by trait name. An instance of a generic trait is
     /// named like `Iterator<int32>`.
     traits: HashMap<String, Vec<Declaration>>,
@@ -488,7 +492,7 @@ impl Sema {
     /// Codegen defines the same functions in `CodegenContext::define_builtins`.
     pub fn new() -> Self {
         let mut sema = Self {
-            scope: HashMap::new(), functions: HashMap::new(), classes: HashMap::new(), enums: HashMap::new(), variant_fields: HashMap::new(),
+            scope: HashMap::new(), functions: HashMap::new(), classes: HashMap::new(), enums: HashMap::new(), variant_fields: HashMap::new(), type_modules: HashMap::new(),
             traits: HashMap::new(), impls: HashMap::new(), current_class: None, current_trait: None,
             generic_traits: HashMap::new(), trait_substs: HashMap::new(), generic_impls: Vec::new(), applied_impls: HashSet::new(), buffer_types: Vec::new(), constructors: HashMap::new(),
             type_instance_decls: Vec::new(), lazy_methods: HashMap::new(), used_functions: HashMap::new(), used_methods: Vec::new(), lazy_instance: None,
@@ -916,6 +920,14 @@ impl Sema {
             None => self.option_value_type(ty)?,
         };
         self.std_vector_element(&inner).map(|_| inner)
+    }
+
+    /// Whether the private items of the class or enum `name` are visible here:
+    /// in the module declaring it, or its generic template like `Vector`'s
+    /// for `Vector<int32>`.
+    fn sees_private_of(&self, name: &str) -> bool {
+        let template = self.type_instances.get(name).map(|(template, _)| template.as_str()).unwrap_or(name);
+        self.type_modules.get(template).is_some_and(|module| *module == self.module)
     }
 
     /// The element type `T` if `ty` is a `Vector<T>` of std::vector.
@@ -1487,6 +1499,9 @@ impl Sema {
                         self.variant_fields.insert(name.clone(), field_names.iter().cloned().collect());
                     }
                 }
+                if let DeclarationKind::Class { name, .. } | DeclarationKind::Enum { name, .. } = &decl.kind {
+                    self.type_modules.insert(name.clone(), self.module.clone());
+                }
                 match &decl.kind {
                     DeclarationKind::Class { name, type_params, .. } | DeclarationKind::Enum { name, type_params, .. }
                         if !type_params.is_empty() =>
@@ -1843,6 +1858,19 @@ impl Sema {
         if self.enums.contains_key(instance) { Type::Enum(instance.to_string()) } else { Type::Class(instance.to_string()) }
     }
 
+    /// How deeply `ty` nests other types, counting the type arguments of
+    /// generic instances, so `Buffer<&Vector<int32>>` is 3 deep.
+    fn type_depth(&self, ty: &Type) -> usize {
+        let deepest = |args: &[Type]| args.iter().map(|arg| self.type_depth(arg)).max().unwrap_or(0);
+        match ty {
+            Type::Ref(inner) | Type::Unique(inner) | Type::Shared(inner) | Type::Buffer(inner)
+            | Type::Array(inner, _) | Type::Slice(inner) | Type::Opaque(inner) => 1 + self.type_depth(inner),
+            Type::Generic { args, .. } | Type::Tuple(args) => 1 + deepest(args),
+            Type::Class(name) | Type::Enum(name) => self.type_instances.get(name).map_or(0, |(_, args)| 1 + deepest(args)),
+            _ => 0,
+        }
+    }
+
     /// Applies every generic impl of the template of `instance` to it.
     fn apply_generic_impls(&mut self, instance: &str) {
         let Some((template, _)) = self.type_instances.get(instance).cloned() else { return };
@@ -1894,6 +1922,18 @@ impl Sema {
     fn apply_generic_impl(&mut self, index: usize, instance_ty: &Type) {
         if !self.applied_impls.insert((index, instance_ty.to_string())) {
             return;
+        }
+        // A method using a deeper instance of the impl's own target, like an
+        // `iter` of `Buffer<T>` giving a `BufferIter<&T>` that holds a
+        // `Buffer<&T>`, needs that instance's impl, and so on without end
+        if self.type_depth(instance_ty) > MAX_TYPE_DEPTH {
+            let generic = &self.generic_impls[index];
+            diagnostic::throw(
+                format!("this impl never stops instantiating: each instance needs a deeper one, like '{}'. A method probably uses its own type wrapped again, like a `BufferIter<&T>` holding a `Buffer<&T>`",
+                    instance_ty.class_name().unwrap_or_else(|| instance_ty.to_string())),
+                Some(generic.decl.span.clone()),
+                &generic.source,
+            )
         }
         let generic = self.generic_impls[index].clone();
         let mut decl = generic.decl.clone();
@@ -3619,6 +3659,29 @@ impl Sema {
             Pattern::Fields { .. } => diagnostic::throw(
                 "named fields like `{ lhs, .. }` only follow a variant, like `ExprKind::Binary { lhs, .. }`",
                 Some(span.clone()), &self.source),
+            Pattern::Mut(inner) => {
+                let name = match inner.as_ref() {
+                    Pattern::Literal(Expr { kind: ExprKind::Identifier(name), .. }) => name.clone(),
+                    _ => diagnostic::throw("`mut` goes before a name, like `Err(mut errs)`", Some(span.clone()), &self.source),
+                };
+                // The binding is the matched value itself, it can only change if that may
+                match self.pattern_owner.clone() {
+                    Owner::Borrowed => diagnostic::throw(
+                        format!("'{}' can't be `mut`, the matched value is only borrowed", name),
+                        Some(span.clone()), &self.source),
+                    Owner::Variable(root) if !self.scope.get(&root).is_some_and(|(_, mutable)| *mutable) => diagnostic::throw(
+                        format!("'{}' can't be `mut`, '{}' isn't. Declare it with `mut`", name, root),
+                        Some(span.clone()), &self.source),
+                    _ => {}
+                }
+                self.check_pattern(inner, ty, span);
+                if let Some(binding) = self.scope.get_mut(&name) {
+                    binding.1 = true;
+                }
+                // From here on it's an ordinary name, codegen doesn't need to know
+                let plain = std::mem::replace(inner.as_mut(), Pattern::Wildcard);
+                *pattern = plain;
+            }
             Pattern::Or(alternatives) => {
                 // Which alternative matched isn't known, so a name couldn't say what it holds
                 if let Some(name) = alternatives.iter().flat_map(Pattern::names).next() {
@@ -3721,6 +3784,7 @@ impl Sema {
             Pattern::Fields { .. } => false,
             // `true | false` together match every bool
             Pattern::Or(alternatives) => self.patterns_cover(ty, &alternatives.iter().collect::<Vec<_>>()),
+            Pattern::Mut(inner) => self.irrefutable(inner, ty),
         }
     }
 
@@ -4216,7 +4280,8 @@ impl Sema {
                     None => false,
                 };
 
-                if matches!(visibility, Visibility::Private) && !inside_self {
+                // A private field is visible in its class's whole module
+                if matches!(visibility, Visibility::Private) && !inside_self && !self.sees_private_of(&class_name) {
                     SemanticError::PrivateFieldAccess{ field_name, span  }.throw(&self.source);
                 }
 
@@ -4235,7 +4300,7 @@ impl Sema {
                             span: span.clone(),
                         }.throw(&self.source));
                     if !mutable {
-                        SemanticError::AssignOnUnmutable {
+                        SemanticError::AssignOnImmutable {
                             var: name.clone(),
                             span: span.clone(),
                         }.throw(&self.source)
@@ -4250,7 +4315,7 @@ impl Sema {
                             span: span.clone(),
                         }.throw(&self.source));
                     if !mutable {
-                        SemanticError::AssignOnUnmutable {
+                        SemanticError::AssignOnImmutable {
                             var: name.to_string(),
                             span: span.clone(),
                         }.throw(&self.source)
@@ -4711,9 +4776,9 @@ impl Sema {
                         .throw(&self.source);
                 }
 
-                // Private methods can only be called from inside their own class.
+                // Private methods can only be called from their class's module
                 if let Some(cls) = recv_class {
-                    if matches!(visibility, Visibility::Private) && self.current_class.as_ref() != Some(&cls) {
+                    if matches!(visibility, Visibility::Private) && self.current_class.as_ref() != Some(&cls) && !self.sees_private_of(&cls) {
                         SemanticError::PrivateFunctionCall { func_name: name.clone(), parent: cls, span: span.clone() }
                             .throw(&self.source);
                     }
@@ -6139,6 +6204,11 @@ const PRINT_TRAIT: &str = "string::Print";
 /// The trait `Default` of `std::default`, which a class with a constructor
 /// taking no arguments has without an impl, see [`Sema::implements`].
 const DEFAULT_TRAIT: &str = "default::Default";
+
+/// How deeply a type may nest, see [`Sema::type_depth`]. Generic impls applied
+/// to deeper instances are taken as instantiating forever, which would
+/// otherwise overflow the stack and kill the language server.
+const MAX_TYPE_DEPTH: usize = 32;
 
 /// The variable a moved path like `p.left` belongs to, `p`.
 fn path_root(path: &str) -> &str {

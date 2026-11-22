@@ -11,20 +11,19 @@
 
 import std::option::{Option};
 
-// Gives values one after the other.
-pub trait Iterator<T> {
+// Gives values one after the other. `Item` is what each one is: `&T` for an
+// iterator only looking at a collection's values, `T` for one moving them out
+// like `Vector.drain()`.
+pub trait Iterator<Item> {
   // The next value, `None` once there are no more.
-  func next(mut &self) -> Option<&T>;
-
-  // Checks for a values existence
-  func contains(mut &self, value: &T) -> bool;
+  func next(mut &self) -> Option<Item>;
 }
 
 // Has values to go through, like a collection.
 pub trait Iterable<T> {
   // An iterator over the values, starting at the first one. Each impl
   // returns its own iterator class.
-  func iter(&self) -> impl Iterator<T>;
+  func iter(&self) -> impl Iterator<&T>;
 
   // Checks for a values existence
   func contains(&self, value: &T) -> bool;
@@ -37,7 +36,11 @@ impl<T> Iterable<T> for Buffer<T> {
   }
 
   func contains(&self, value: &T) -> bool {
-    return BufferIter(self).contains(value);
+    for item in self {
+      if item == value
+        return true;
+    }
+    return false;
   }
 }
 
@@ -49,22 +52,13 @@ pub class BufferIter<T> {
   Constructor(buffer: &Buffer<T>);
 }
 
-impl<T> Iterator<T> for BufferIter<T> {
+impl<T> Iterator<&T> for BufferIter<T> {
   func next(mut &self) -> Option<&T> {
-    if self.position >= self.buffer.capacity() {
+    if self.position >= self.buffer.capacity()
       return None;
-    }
+
     self.position = self.position + 1;
     return Some(self.buffer.get(self.position - 1));
-  }
-
-  func contains(mut &self, value: &T) -> bool {
-    for item in self {
-      if item == value
-        return true;
-    }
-
-    return false;
   }
 }
 

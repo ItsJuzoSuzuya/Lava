@@ -9,7 +9,7 @@ import std::math::{exp};
 
 pub class Statement {
   pub kind: StmtKind;
-  span: Span;
+  pub span: Span;
 }
 
 impl Codegen for Statement {

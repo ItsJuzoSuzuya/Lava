@@ -595,8 +595,12 @@ print(b.get());
 --- output
 6
 
-=== private generic method can't be called from outside
-class Box {
+=== private generic method can't be called from another module
+import boxes;
+let b = Box { v: 1 };
+print(b.pick(2));
+--- file boxes.lv
+pub class Box {
   v: int32 = v;
 
   Constructor(v: int32);
@@ -605,8 +609,6 @@ class Box {
     return x;
   }
 }
-let b = Box { v: 1 };
-print(b.pick(2));
 --- error
 Tried calling a private function 'pick'
 

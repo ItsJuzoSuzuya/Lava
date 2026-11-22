@@ -321,15 +321,17 @@ print(b.or("none"));
 5
 none
 
-=== private enum method is an error outside
-enum Light {
+=== private enum method is an error in another module
+import lights;
+print(Light::Red.secret());
+--- file lights.lv
+pub enum Light {
   Red;
 
   func secret(&self) -> int32 {
     return 1;
   }
 }
-print(Light::Red.secret());
 --- error
 Tried calling a private function 'secret'
 

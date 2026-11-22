@@ -1,3 +1,4 @@
+import std::option::{Option};
 pub class Vector<T> {
   data: Buffer<T> = Buffer<T>(4);
   length: uint64 = 0;
@@ -54,6 +55,12 @@ pub class Vector<T> {
     }
     self.length = self.length - 1;
     return item;
+  }
+
+  pub func drain(mut &self) -> DrainIter<T> {
+    let count = self.length;
+    self.length = 0;
+    return DrainIter(self, count);
   }
 
   pub func clear(mut &self) {

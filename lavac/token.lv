@@ -88,6 +88,8 @@ pub enum TokenKind {
   IntLiteral => int64,
   StringLiteral => String,
 
+  Err => String,
+
   EOF
 
   /// Turns a whole word into a [`Token`].
@@ -226,6 +228,8 @@ pub enum TokenKind {
       TokenKind::Identifier(name)      => name.clone(),
       TokenKind::IntLiteral(value)     => int_to_string(value),
       TokenKind::StringLiteral(text)   => "\"" + text + "\"",
+
+      TokenKind::Err(token) => token
 
       TokenKind::EOF => "end of file",
     };

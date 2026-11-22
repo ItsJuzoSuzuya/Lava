@@ -3,20 +3,7 @@ import std::string::{is_whitespace, is_alpha, is_alphanumeric, is_digit};
 import span;
 import std::result::{Result};
 import std::option::{Option};
-
-pub enum LexError {
-  TokenNotImplemented => String,
-  FloatLiteralToBig => String,
-  IntLiteralToBig => String
-
-  pub func message(&self) -> String {
-    match self {
-      LexError::TokenNotImplemented(token) => "Token is not implemented in the Lexer: " + token
-      LexError::FloatLiteralToBig(f) => "Float literal was to big: " + f
-      LexError::IntLiteralToBig(f) => "Int literal was to big: " + f
-    }
-  }
-} 
+import diagnostic;
 
 /// Turns source code into [`Token`]s, one at a time.
 ///
@@ -74,7 +61,7 @@ pub class Lexer {
         let span = Span(line, col, number.len() as uint32);
         match number.try_as<float64>() {
           Some(f64) => return Ok(Token(TokenKind::FloatLiteral(f64), span))
-          None => return Err(LexError::FloatLiteralToBig(number))
+          None => return Err(LexError::FloatLiteralToBig(Token(TokenKind::Err(number), span)))
         }
       }
       
@@ -83,13 +70,14 @@ pub class Lexer {
       let span = Span(line, col, number.len() as uint32);
       match number.try_as<int64>() {
         Some(i64) => return Token(TokenKind::IntLiteral(i64), span)
-        None => return Err(LexError::IntLiteralToBig(number))
+        None => return Err(LexError::IntLiteralToBig(Token(TokenKind::Err(number), span)))
       }
     }
     
     self.advance();
     let token = self.source.slice(start_point, self.position);
-    return Err(LexError::TokenNotImplemented(token));
+    let span = Span(line, col, token.len() as uint32);
+    return Err(LexError::TokenNotImplemented(Token(TokenKind::Err(token), span)));
   }
 
   pub func peek(mut &self) -> Result<Token, LexError> {
@@ -148,7 +136,7 @@ pub class Lexer {
         self.col = col;
         match number.try_as<float64>() {
           Some(f64) => return Ok(Token(TokenKind::FloatLiteral(f64), span))
-          None => return Err(LexError::FloatLiteralToBig(number))
+          None => return Err(LexError::FloatLiteralToBig(Token(TokenKind::Err(number), span)))
         }
       }
       
@@ -161,16 +149,17 @@ pub class Lexer {
       self.col = col;
       match number.try_as<int64>() {
         Some(i64) => return Ok(Token(TokenKind::IntLiteral(i64), span))
-        None => return Err(LexError::IntLiteralToBig(number))
+        None => return Err(LexError::IntLiteralToBig(Token(TokenKind::Err(number), span)))
       }
     }
 
     let token = self.source.slice(start_point, self.position);
+    let span = Span(line, col, token.len() as uint32);
     self.position = start_point;
     self.line = line;
     self.col = col;
 
-    return Err(LexError::TokenNotImplemented(token));
+    return Err(LexError::TokenNotImplemented(Token(TokenKind::Err(token), span)));
   }
 
   /// Skip whitespaces and comments
@@ -231,12 +220,13 @@ pub class Lexer {
       if self.current() == '\n' {
         self.position += 1;
         self.line += 1;
-        self.col = 0;
+        self.col = 1;
       } else {
         self.position += 1;
         self.col += 1;
       }
-      i +=1 ;
+
+      i +=1;
     }
   }
 
@@ -252,3 +242,4 @@ pub class Lexer {
     self.position >= self.source.len()
   }
 }
+

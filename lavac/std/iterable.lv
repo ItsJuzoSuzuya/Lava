@@ -15,9 +15,6 @@ import std::option::{Option};
 pub trait Iterator<T> {
   // The next value, `None` once there are no more.
   func next(mut &self) -> Option<&T>;
-
-  // Checks for a values existence
-  func contains(mut &self, value: &T) -> bool;
 }
 
 // Has values to go through, like a collection.

@@ -9,6 +9,7 @@ import lexer;
 import program;
 import parser;
 import std::fs;
+import diagnostic;
 
 /// A module imported by another one, like `import math;` or
 /// `import std::fs::{read};` at `span`.
@@ -47,10 +48,9 @@ pub class ModuleGraph {
   pub modules: Vector<Module> = Vector();
   pub module_errors: Vector<ParseError> = Vector();
 
-  overlay: HashMap<Path,String> = HashMap();
+  pub sources: HashMap<Path, String> = HashMap();
 
   Constructor(root_path: Path) {
-    mut modules = Vector<Module>();
     mut module_errors = Vector<ParseError>();
     let source = match fs::read(root_path) {
       Ok(txt) => txt
@@ -58,5 +58,6 @@ pub class ModuleGraph {
     };
     let imports = Parser::from_source(source, &module_errors).parse_imports();
     self.modules.push(Module(imports, root_path, source));
+    self.sources.set(root_path, source);
   }
 }

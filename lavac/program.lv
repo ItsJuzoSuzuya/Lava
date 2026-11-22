@@ -10,60 +10,42 @@ import llvm;
 import std::option::{Option};
 import std::path::{Path};
 import sema;
-
-pub enum CompileError {
-  Parse => String,
-  Semantic => String,
-  TargetTripleInvalid => TargetTriple,
-  CompilationFailure => String,
-  LinkingFailure => String,
-
-  pub func message(&self) -> String {
-    match self {
-      CompileError::Parse(message) => "[Parser Error]: " + message
-      CompileError::Semantic(message) => "[Semantic Error]: " + message
-      CompileError::TargetTripleInvalid(triple) => "Couldn't build Target from Triple " + triple.arch
-      CompileError::CompilationFailure(message) => "An error occured while compiling: " + message
-      CompileError::LinkingFailure(message) => "An error occured while linking: " + message
-
-    }
-  }
-}
+import span;
+import diagnostic;
 
 pub class Program {
   pub context: CodegenContext;
 
-  pub func build(&self, graph: &ModuleGraph) -> Result<Path, Vector<CompileError>> {
-    mut errors = Vector<CompileError>();
-
+  pub func build(&self, graph: &ModuleGraph) -> Result<Path, Vector<Diagnostic>> {
     self.context.build_entry();
 
-    mut parse_errs = Vector<ParseError>();
     mut asts = Vector<Vector<Statement>>();
+    mut diagnostics = Vector<Diagnostic>();
     for module in graph.modules { 
-       let stmts = Parser::from_source(module.source, &parse_errs).parse();
-       asts.push(stmts);
-    }
-
-    if !parse_errs.is_empty() {
-      for err in parse_errs {
-        errors.push(CompileError::Parse(err.message()));
+      mut parse_errs = Vector<ParseError>();
+      let stmts = Parser::from_source(module.source, &parse_errs).parse();
+      for err in parse_errs.drain() {
+        let location = Location(module.path.clone(), err.span());
+        diagnostics.push(Diagnostic(CompileError::Parse(err), location));
       }
+      asts.push(stmts);
     }
 
     mut sema_errs = Vector<SemanticError>();
     mut sema = Sema(&sema_errs);
-    for module in asts {
-      sema.check(module);
+
+    mut i: uint64 = 0;
+    while i < asts.len() {
+      sema.check(asts[i]);
+      for err in sema_errs.drain() {
+        let location = Location(graph.modules[i].path, err.span());
+        diagnostics.push(Diagnostic(CompileError::Semantic(err), location));
+      }
+      i += 1;
     }
 
-    if !sema_errs.is_empty() 
-      for err in sema_errs {
-        errors.push(CompileError::Semantic(err.message()));
-      }
-
-    if !errors.is_empty() 
-     return Err(errors);
+    if !diagnostics.is_empty() 
+      return Err(diagnostics);
 
     for module in asts {
       for stmt in module {
@@ -78,8 +60,8 @@ pub class Program {
 
     mut verify_error: Option<String> = None;
     if self.context.module.verify(&verify_error) != 0 && verify_error is Some(err) {
-      errors.push(CompileError::CompilationFailure(err));
-      return Err(errors);
+      diagnostics.push(Diagnostic(CompileError::CompilationFailure(err), None));
+      return Err(diagnostics);
     }
 
     let triple = TargetTriple();
@@ -94,21 +76,21 @@ pub class Program {
       let object = Path("build/main.o");
       let err = machine.compile(self.context.module, object);
       if err is Some(e) {
-        errors.push(CompileError::CompilationFailure(e));
-        return Err(errors);
+        diagnostics.push(Diagnostic(CompileError::CompilationFailure(e), None));
+        return Err(diagnostics);
       }
 
       match self.link(object, Path("build/main")) {
         Ok(exec) => return exec
         Err(e) => {
-          errors.push(CompileError::LinkingFailure(e));
-          return Err(errors);
+          diagnostics.push(Diagnostic(CompileError::LinkingFailure(e), None));
+          return Err(diagnostics);
         }
       }
     }
 
-    errors.push(CompileError::TargetTripleInvalid(triple));
-    return Err(errors);
+    diagnostics.push(Diagnostic(CompileError::TargetTripleInvalid(triple), None));
+    return Err(diagnostics);
   }
 
   // Links the object file `object` into the executable `executable`

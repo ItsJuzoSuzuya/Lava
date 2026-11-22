@@ -128,6 +128,22 @@ impl String {
     return parts;
   }
 
+  // The text `count` times after each other, like `"ab".repeat(3)` for
+  // `"ababab"`, or `" ".repeat(4)` for four spaces.
+  pub func repeat(&self, count: uint64) -> String {
+    let length = self.len() * count;
+    if length == 0 {
+      return "";
+    }
+    mut bytes = Buffer<char>(length);
+    mut i: uint64 = 0;
+    while i < length {
+      bytes.set(i, self.char_at(i % self.len()));
+      i = i + 1;
+    }
+    return String(bytes, length);
+  }
+
   // The decimal number in the text, like `-42`, if it is one.
   pub func parse_int(&self) -> Option<int64> {
     if self.len() == 0 {
