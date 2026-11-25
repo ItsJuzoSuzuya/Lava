@@ -43,6 +43,21 @@ pub enum CompileError {
   }
 }
 
+pub enum CodegenError {
+  MissingValue => {
+    ty: String,
+    span: Span
+  },
+  UndefinedVariable => String
+
+  pub func message(&self) -> String {
+    match self {
+      CodegenError::MissingValue(ty, _) => "internal error: an expression of type " + ty + " gave no value",
+      CodegenError::UndefinedVariable(name) => "Use of undefined variable: " + name,
+    }
+  }
+}
+
 pub enum ParseError {
   ExpectedExpression => Token,
   InvalidBinaryOperation => Token,
@@ -75,42 +90,65 @@ pub enum ParseError {
 }
 
 pub enum SemanticError {
-  TypeValueMismatch => {
-    var: String,
-    type: type::Type,
-    val_type: type::Type,
+  ArrayElementMismatch => {
+    expected: type::Type,
+    got: type::Type,
     span: Span
   },
+  ConstantExpected => {
+    context: String,
+    span: Span,
+  },
+  EmptyArrayUndefined => Span,
   InvalidOperands => {
     op: BinaryOp,
     lhs: type::Type,
     rhs: type::Type,
     span: Span
   },
-  UnknownVariable => {
-    name: String,
+  NotImplementedYet => {
+    feature: String,
     span: Span
   },
   ReassignToImmutableVariable => {
     name: String,
     span: Span
-  }
+  },
+  TypeValueMismatch => {
+    var: String,
+    type: type::Type,
+    val_type: type::Type,
+    span: Span
+  },
+  UnknownVariable => {
+    name: String,
+    span: Span
+  },
   
   pub func message(&self) -> String {
     match self {
-      SemanticError::TypeValueMismatch(_, type, val_ty, _) => "Defined type '" + type.to_string() + "' didn't match the values type '" + val_ty.to_string() + "'"
+      SemanticError::ArrayElementMismatch(expected, got, _) => "array element is '" + expected.to_string() + "', but the first element made it '" + got.to_string() + "'"
+      SemanticError::EmptyArrayUndefined(_) => "empty arrays have no defined use case"
+      SemanticError::ConstantExpected(context, _) => context + " must be constant"
       SemanticError::InvalidOperands(op, lhs, rhs, _) => "The '" + op.to_string() + "' operation can't be used on '" + lhs.to_string() + "' and '" + rhs.to_string() + "'"
-      SemanticError::UnknownVariable(name, _) => "'" + name + "' is an undefined variable"
+      SemanticError::NotImplementedYet(feature, _) => feature + " not implemented yet"
       SemanticError::ReassignToImmutableVariable(var, _) => "'" + var + "' can't be changed, declare it with `mut`"
+      SemanticError::TypeValueMismatch(_, type, val_ty, _) => "Defined type '" + type.to_string() + "' didn't match the values type '" + val_ty.to_string() + "'"
+      SemanticError::UnknownVariable(name, _) => "'" + name + "' is an undefined variable"
     }
   } 
 
   pub func span(&self) -> Span {
     match self {
-      SemanticError::TypeValueMismatch(_,_,_,span) => span
+      SemanticError::ArrayElementMismatch(_,_,span) => span
+      SemanticError::EmptyArrayUndefined(span) => span
+      SemanticError::ConstantExpected(_, span) => span
       SemanticError::InvalidOperands(_, _, _, span) => span
-      SemanticError::UnknownVariable(_, span) => span
+      SemanticError::NotImplementedYet(_, span) => span
       SemanticError::ReassignToImmutableVariable(_, span) => span
+      SemanticError::TypeValueMismatch(_,_,_,span) => span
+      SemanticError::UnknownVariable(_, span) => span
+
     }
   }
 }

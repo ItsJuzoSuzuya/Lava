@@ -1,4 +1,5 @@
-let x: int32 = 300;
-x = 200;
-
+mut x: int32[2] = [300, 200];
 print(x);
+
+let y = true;
+print(y);

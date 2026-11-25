@@ -10,6 +10,7 @@ import std::math::{exp};
 import operators;
 import span;
 import diagnostic;
+import std::option::{Option};
 
 pub class Sema {
   pub errors: &Vector<SemanticError>;
@@ -35,15 +36,18 @@ pub class Sema {
               self.errors.push(SemanticError::TypeValueMismatch(var, lhs.ty, rhs_ty, stmt.span));
           }
         }
-
       } 
 
       StmtKind::Instantiation(name, ty, value, is_mut) => {
         let value_ty = self.check_expr(value);
-        if ty is Some(t) && t != value_ty && t != Type::Error && value_ty != Type::Error 
-          self.errors.push(SemanticError::TypeValueMismatch(name, t, value_ty, value.span));
+        let def_ty = match ty {
+          Some(t) => Some(self.resolve(t)) 
+          None => None
+        };
+        if def_ty is Some(ty) && ty != value_ty && ty != Type::Error && value_ty != Type::Error 
+          self.errors.push(SemanticError::TypeValueMismatch(name, ty, value_ty, value.span));
 
-        let var = SemaVariable(ty ?? value_ty, is_mut);
+        let var = SemaVariable(def_ty ?? value_ty, is_mut);
         self.variables.set(name, var);
       } 
 
@@ -55,6 +59,23 @@ pub class Sema {
 
   func check_expr(mut &self, mut expr: &Expression) -> Type {
     let ty = match expr.kind {
+      ExprKind::Array(values) => {
+        match values.is_empty() {
+          true => {
+            self.errors.push(SemanticError::EmptyArrayUndefined(expr.span));
+            Type::Error
+          }
+          false => {
+            let elem_ty = self.check_expr(values[0]);
+            for value in values {
+              let ty = self.check_expr(value);
+              if elem_ty != ty && elem_ty != Type::Error && ty != Type::Error
+                self.errors.push(SemanticError::ArrayElementMismatch(elem_ty, ty, value.span));
+            }
+            Type::Array(shared(elem_ty), values.len() as uint32)
+          }
+        }
+      }
       ExprKind::Boolean => Type::Boolean,
       ExprKind::IntLiteral => Type::Int32,
       ExprKind::Identifier(name) => match self.variables.get(name) {
@@ -82,6 +103,45 @@ pub class Sema {
 
     expr.ty = ty;
     return ty;
+  }
+
+  func resolve(mut &self, ann: &TypeAnnotation) -> Type {
+    match ann {
+      TypeAnnotation::Array(elem, length) => {
+        let elem_ty = self.resolve(elem);
+        match self.eval_const(length) {
+          Some(n) => return Type::Array(shared(elem_ty), n as uint32)
+          None => {
+            self.errors.push(SemanticError::ConstantExpected("array length", length.span));
+            return Type::Error;
+          }
+        }
+      }
+      TypeAnnotation::Boolean => Type::Boolean
+      TypeAnnotation::Int32 => Type::Int32
+      TypeAnnotation::Named(def) => Type::Class(def)
+
+    }
+  }
+
+  func eval_const(mut &self, expr: &Expression) -> Option<int64> {
+    match expr.kind {
+      ExprKind::IntLiteral(n) => n
+      ExprKind::BinaryExpr(lhs, op, rhs) => {
+        let l = self.eval_const(lhs) ?? return None;
+        let r = self.eval_const(rhs) ?? return None;
+        match op {
+          BinaryOp::Add => l + r
+          BinaryOp::Sub => l - r
+          BinaryOp::Mul => l * r
+          _ => {
+            self.errors.push(SemanticError::NotImplementedYet("Constant floats", expr.span));
+            return None;
+          }
+        }
+      }
+      _ => return None
+    }
   }
 }
 

@@ -58,6 +58,13 @@ pub class Vector<T> {
     Some(self.data.get(index))
   }
 
+  pub func find(&self, element: T) -> Option<&T> {
+    for item in self {
+      if item == element  
+        return item;
+    }
+  }
+
   // The last element, stops the program if there's none.
   pub func last(&self) -> &T {
     if self.length == 0 {

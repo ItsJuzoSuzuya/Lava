@@ -2,36 +2,49 @@ import std::option::{Option};
 import llvm;
 import codegen_ctx;
 import std::string::{Print};
-pub enum Type {
+import expression;
+
+pub enum TypeAnnotation {
+  Array => { element: Unique<TypeAnnotation>, length: Expression }
   Boolean,
+  Int32,
+  Named => String,
+}
+
+pub enum Type {
+  Array => {
+    type: Shared<Type>,
+    length: uint32
+  },
+  Boolean,
+  Class => String,
+  Error,
   Int32,
   Void,
 
-  /// written in Code like let x: Named = ...;
-  Named => String,
-
-  // looked up Named Type
-  Class => String,
-
-  Error 
-
   pub func formatter(&self) -> Option<String> {
     match self {
-      Type::Boolean => "%s\n"
-      Type::Int32 => "%d\n"
+      Type::Array(elem, length) => {
+        let one = elem.formatter() ?? return None;
+        mut format = "[";
+        format += (one + ", ").repeat(length-1);
+        format += one + "]";
+        return format;
+      }
+      Type::Boolean => "%s"
+      Type::Int32 => "%d"
       _ => return None
     }
   }
 
   pub func to_llvm(&self, ctx: &CodegenContext) -> llvm::Type {
     match self {
+      Type::Array(type, length) => ctx.context.array_type(type.to_llvm(ctx), length),
       Type::Boolean => ctx.context.bool_type(),   // i1
-      Type::Int32 => ctx.context.i32_type(),  
-      Type::Void => ctx.context.void_type(),
-
-      Type::Named(name) => panic("type '" + name + "' wasn't looked up before codegen"),
       Type::Class(name) => panic("classes aren't supported in codegen yet: " + name),
       Type::Error => panic("No llvm type for 'Type::Error'")
+      Type::Int32 => ctx.context.i32_type(),
+      Type::Void => ctx.context.void_type(),
     }
   }
 }
@@ -39,13 +52,12 @@ pub enum Type {
 impl Print for Type {
   pub func to_string(&self) -> String {
     match self {
-      Type::Void => "void"
+      Type::Array(type, length) => type.to_string() + "[" + length.to_string() + "]"
       Type::Boolean => "bool"
-      Type::Int32 => "int32"
-
-      Type::Named(name) => name
       Type::Class(name) => name
       Type::Error => "Error"
+      Type::Int32 => "int32"
+      Type::Void => "void"
     }
   }
 }

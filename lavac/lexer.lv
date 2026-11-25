@@ -192,6 +192,8 @@ pub class Lexer {
     if double is Some(kind) return Some(kind, 2 as uint32);
 
     let single = match self.current() {
+      '[' => TokenKind::LBracket,
+      ']' => TokenKind::RBracket,
       '{' => TokenKind::LBrace,
       '}' => TokenKind::RBrace,
       '(' => TokenKind::LParen,

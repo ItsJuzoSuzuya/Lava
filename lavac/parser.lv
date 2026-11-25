@@ -69,9 +69,9 @@ pub class Parser {
     return Statement(StmtKind::Expression(expr), token.span);
   }
 
-  pub func parse_variable(mut &self, is_mut: bool) -> Statement {
+  func parse_variable(mut &self, is_mut: bool) -> Statement {
     let var = self.next_token().as_string();
-    mut type: Option<Type> = None;
+    mut type: Option<TypeAnnotation> = None;
     if self.peek().kind == TokenKind::Colon {
       self.consume();
       type = self.parse_type();
@@ -108,8 +108,8 @@ pub class Parser {
 
       let op = UnaryOp::from_token(self.next_token().kind);
       let expr = self.parse_level(Precidence::Unary);
-      let ty = expr.ty;
-      let span = expr.span;
+      let ty = expr.ty.clone();
+      let span = expr.span.clone();
       return Expression(ExprKind::UnaryExpr(op, unique(expr)), span, ty);
     }
 
@@ -117,8 +117,10 @@ pub class Parser {
     while level.has(self.peek().kind) {
       let op = self.next_token();
       let rhs = self.parse_level(level.next());
-      let ty = lhs.ty;
-      lhs = Expression(ExprKind::BinaryExpr(unique(lhs), BinaryOp::from_token(op.kind), unique(rhs)), op.span, ty);
+      let ty = lhs.ty.clone();
+      let lhs_span = lhs.span;
+      let rhs_span = rhs.span;
+      lhs = Expression(ExprKind::BinaryExpr(unique(lhs), BinaryOp::from_token(op.kind), unique(rhs)), lhs_span.to(rhs_span), ty);
     }
 
     return lhs;
@@ -134,6 +136,7 @@ pub class Parser {
       TokenKind::IntLiteral(val) => Expression(ExprKind::IntLiteral(val), token.span, Type::Int32),
 
       TokenKind::Identifier(name) => Expression(ExprKind::Identifier(name), token.span, Type::Void)
+      TokenKind::LBracket => self.parse_array(token.span)
       _ => {
         self.error(ParseError::ExpectedExpression(token));
         Expression(ExprKind::Error, token.span, Type::Error)
@@ -150,18 +153,39 @@ pub class Parser {
     return Expression(kind, span, Type::Void);
   }
 
-  func parse_type(mut &self) -> Option<Type> {
+  func parse_array(mut &self, start: Span) -> Expression {
+    mut values = Vector<Expression>();
+    while self.peek().kind != TokenKind::RBracket && !self.peek().is_eof() {
+      values.push(self.parse_expr());
+      if self.peek().kind != TokenKind::RBracket 
+        self.expect(TokenKind::Comma);
+    }
+    let end = self.next_token(); // the ']'
+    let span = start.to(end.span);
+
+    return Expression(ExprKind::Array(values), span, Type::Void);
+  }
+
+  func parse_type(mut &self) -> Option<TypeAnnotation> {
     let token = self.next_token();
-    match token.kind {
-      TokenKind::Int32Ty => Type::Int32
-      TokenKind::BoolTy => Type::Boolean
-      TokenKind::Identifier(name) => Type::Named(name),
+    let type = match token.kind {
+      TokenKind::Int32Ty => TypeAnnotation::Int32
+      TokenKind::BoolTy => TypeAnnotation::Boolean
+      TokenKind::Identifier(name) => TypeAnnotation::Named(name),
       kind => {
         self.error(ParseError::UnexpectedToken(token, kind));
-        None
+        return None;
       }
+    };
+    
+    if self.peek().kind == TokenKind::LBracket {
+      self.consume();
+      let count = self.parse_expr();
+      self.expect(TokenKind::RBracket);
+      return TypeAnnotation::Array(unique(type), count);
     }
 
+    return type;
   }
 
   // Parses a { } block. Doesnt consume the {.
@@ -217,7 +241,7 @@ pub class Parser {
     let got = self.peek();
 
     if got.kind != expected_token 
-      return self.error(ParseError::UnexpectedToken(Token(expected_token, got.span), got.kind));
+      return self.error(ParseError::UnexpectedToken(got, expected_token));
 
     self.next_token();
     self.recovering = false;

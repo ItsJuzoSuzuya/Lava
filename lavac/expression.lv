@@ -10,6 +10,8 @@ import std::math::{min, exp};
 import std::result::{Result};
 import token;
 import operators;
+import std::string::{Print};
+import diagnostic;
 
 pub class Expression {
   pub kind: ExprKind;
@@ -18,6 +20,13 @@ pub class Expression {
 
   pub func codegen_value(&self, ctx: &CodegenContext) -> Option<LLVMValueRef> {
     match self.kind {
+      ExprKind::Array(values) => {
+        mut llvm_values = Vector<LLVMValueRef>();
+        for val in values {
+          llvm_values.push(val.codegen(ctx) ?? return None);
+        }
+        return ctx.builder.build_array(self.ty.to_llvm(ctx), llvm_values);
+      }
       ExprKind::Boolean(val) => {
         let int = val ? 1 : 0;
         return ctx.context.bool_type().const_int(int as uint64, false);
@@ -82,16 +91,23 @@ pub class Expression {
     return None;
   }
 
-  pub func llvm_string(&self, ctx: &CodegenContext) -> Result<LLVMValueRef, CodegenError> {
-    match self.ty {
+  pub func print_args(&self, ctx: &CodegenContext, value: LLVMValueRef, ty: &type::Type, mut args: &Vector<LLVMValueRef>) {
+    match ty {
+      Type::Array(elem, length) => {
+        mut i: uint32 = 0;
+        while i < length {
+          let item = ctx.builder.extract_value(value, i, "item");
+          self.print_args(ctx, item, elem, args);
+          i += 1;
+        }
+      }
       Type::Boolean => {
-        let v = self.codegen(ctx) ?? return Err(CodegenError::MissingValue(self.ty, self.span));
         let yes = ctx.builder.build_const_str_ptr("true", "true");
         let no = ctx.builder.build_const_str_ptr("false", "false");
-        return LLVMBuildSelect(ctx.builder, v, yes, no, "bool_text");
+        args.push(LLVMBuildSelect(ctx.builder, value, yes, no, "bool_text"));
       },
-      Type::Int32 => self.codegen(ctx) ?? return Err(CodegenError::MissingValue(self.ty, self.span))
-      _ => return Err(CodegenError::MissingValue(self.ty, self.span))
+      Type::Int32 => args.push(value)
+      _ => panic("internal error: can't print '" + self.ty.to_string() + "', sema should have caught it")
     }
   }
 }
@@ -103,6 +119,7 @@ impl Codegen for Expression {
 }
 
 pub enum ExprKind {
+  Array => Vector<Expression>,
   Boolean => bool,
   IntLiteral => int64,
 
@@ -125,6 +142,34 @@ pub enum ExprKind {
   Identifier => String,
 
   Error,
+}
+
+impl Print for ExprKind {
+  pub func to_string(&self) -> String {
+    match self {
+      ExprKind::Array(values) => {
+        mut string: String = "[";
+        for val in values {
+          string += val.kind.to_string();
+          if val != values[values.len() - 1] 
+            string += ", ";
+        }
+        string += "]";
+        return string;
+      }
+      ExprKind::Boolean => "boolean"
+      ExprKind::IntLiteral => "int literal"
+
+      ExprKind::BinaryExpr(lhs, op, rhs) => lhs.kind.to_string() + " " + op.to_string() + " " + rhs.kind.to_string()
+      ExprKind::UnaryExpr(op, expr) => op.to_string() + expr.kind.to_string()
+
+      ExprKind::If(condition, if_then, if_else) => ""
+
+      ExprKind::Identifier(id) => id
+
+      ExprKind::Error => "ERROR"
+    }
+  }
 }
 
 pub class Block {

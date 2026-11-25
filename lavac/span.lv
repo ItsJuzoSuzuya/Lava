@@ -1,7 +1,18 @@
-import std::string::{Print};
 pub class Span {
-  pub line: uint32;
-  pub col: uint32;
-  pub len: uint32;
+  pub line: uint32 = line;
+  pub col: uint32 = col;
+  pub len: uint32 = len;
+  pub end_line: uint32 = line;
+  pub end_col: uint32 = col + len;
+
+
+  Constructor(line: uint32, col: uint32, len: uint32);
+
+  pub func to(&self, end: &Span) -> Span {
+    mut span = Span (self.line, self.col, 0);
+    span.end_line = end.end_line;
+    span.end_col = end.end_col;
+    return span;
+  }
 }
 

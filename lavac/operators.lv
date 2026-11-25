@@ -74,3 +74,12 @@ pub enum UnaryOp {
     }
   }
 }
+
+impl Print for UnaryOp {
+  pub func to_string(&self) -> String {
+    match self {
+      UnaryOp::Negation => "-"
+      UnaryOp::Bang => "!"
+    }
+  }
+}

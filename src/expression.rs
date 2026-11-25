@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::fm::Display;
 use std::ops::Neg;
 
 use inkwell::AddressSpace;

@@ -2,6 +2,7 @@ import std::option;
 import std::path::{Path};
 import std::option::{Option};
 import std::hashmap::{HashMap};
+import std::vector::{Vector};
 extern link "LLVM";
 
 pub extern type LLVMContextRef;
@@ -37,6 +38,10 @@ pub class Context {
 
   pub func bool_type(&self) -> IntType {
     return IntType::new(self.ref, 1);
+  }
+
+  pub func array_type(&self, ty: Type, len: uint64) -> ArrayType {
+    return ArrayType::new(ty, len);
   }
 }
 
@@ -88,6 +93,7 @@ pub extern type LLVMBuilderRef;
 pub extern func LLVMCreateBuilderInContext(context: LLVMContextRef) -> Builder;
 pub extern func LLVMDisposeBuilder(builder: LLVMBuilderRef);
 pub extern func LLVMPositionBuilderAtEnd(builder: Builder, block: BasicBlock);
+pub extern func LLVMGetUndef(ty: LLVMTypeRef) -> LLVMValueRef;
 pub extern type Builder: LLVMBuilderRef {
   pub func build_alloca(&self, llvm_type: LLVMTypeRef, name: String) -> LLVMValueRef {
     return LLVMBuildAlloca(self, llvm_type, name);
@@ -168,12 +174,31 @@ pub extern type Builder: LLVMBuilderRef {
   pub func build_not(&self, value: LLVMValueRef, name: String) -> LLVMValueRef {
     return LLVMBuildNot(self, value, name);
   }
+
+  pub func build_array(&self, ty: Type, mut values: Vector<LLVMValueRef>) -> LLVMValueRef {
+    mut array = LLVMGetUndef(ty);
+    mut i: uint32 = 0;
+    for val in values.drain() {
+      array = LLVMBuildInsertValue(self, array, val, i, "array");
+      i += 1;
+    }
+    return array;
+  }
+
+  pub func extract_value(&self, value: LLVMValueRef, index: uint32, name: String) -> LLVMValueRef {
+    return LLVMBuildExtractValue(self, value, index, name);
+  }
 }
 
 pub extern type LLVMTypeRef;
 pub extern type Type: LLVMTypeRef;
 pub extern type FunctionType: Type;
 pub extern type PointerType: Type;
+pub extern type ArrayType: Type {
+  pub func new(element: Type, length: uint64) -> ArrayType {
+    return LLVMArrayType2(element, length);
+  }
+}
 pub extern type IntType: Type {
   // An integer type of `size` bits, like 32 for `i32`
   pub func new(context: LLVMContextRef, size: uint32) -> IntType {
@@ -423,7 +448,7 @@ pub extern func LLVMIntTypeInContext(context: LLVMContextRef, bits: uint32) -> I
 pub extern func LLVMFloatTypeInContext(context: LLVMContextRef) -> LLVMTypeRef;
 pub extern func LLVMDoubleTypeInContext(context: LLVMContextRef) -> LLVMTypeRef;
 pub extern func LLVMPointerTypeInContext(context: LLVMContextRef, address_space: uint32) -> PointerType;
-pub extern func LLVMArrayType2(element: LLVMTypeRef, count: uint64) -> LLVMTypeRef;
+pub extern func LLVMArrayType2(element: LLVMTypeRef, count: uint64) -> ArrayType;
 pub extern func LLVMFunctionType(ret: LLVMTypeRef, params: &[LLVMTypeRef], count: uint32, variadic: int32) -> FunctionType;
 pub extern func LLVMStructTypeInContext(context: LLVMContextRef, elements: &[LLVMTypeRef], count: uint32, packed: int32) -> LLVMTypeRef;
 pub extern func LLVMStructCreateNamed(context: LLVMContextRef, name: String) -> LLVMTypeRef;

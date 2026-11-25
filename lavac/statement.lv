@@ -6,6 +6,7 @@ import codegen_ctx;
 import llvm;
 import std::option::{Option};
 import std::math::{exp};
+import std::vector::{Vector};
 
 pub class Statement {
   pub kind: StmtKind;
@@ -25,13 +26,14 @@ impl Codegen for Statement {
         ctx.declare_variable(name, value, expr.ty.to_llvm(ctx), is_mut);
         return None;
       }
-
       StmtKind::Print(expr) => {
         ctx.load_print_fn();
-        let f = expr.llvm_string(ctx) ?? return None;
-        let format = ctx.builder.build_const_str_ptr(expr.ty.formatter() ?? return None, "format");
+        let value = expr.codegen(ctx) ?? return None;
+        mut args = Vector<LLVMValueRef>();
+        args.push(ctx.builder.build_const_str_ptr((expr.ty.formatter() ?? return None) + "\n", "format"));
+        expr.print_args(ctx, value, expr.ty, &args);
 
-        return ctx.call_fn("printf", &[format, f]);
+        return ctx.call_fn("printf", &args);
       }
       StmtKind::Return(expr) => return ctx.builder.build_return(expr.codegen(ctx)),
       StmtKind::Value(expr) => return expr.codegen(ctx),
@@ -45,7 +47,7 @@ impl Codegen for Statement {
 pub enum StmtKind {
   Instantiation => { 
     name: String,
-    ty: Option<type::Type>,
+    ty: Option<TypeAnnotation>,
     value: Expression,
     is_mut: bool
   }
@@ -61,3 +63,4 @@ pub enum StmtKind {
   Expression => Expression,
   Value => Expression
 }
+

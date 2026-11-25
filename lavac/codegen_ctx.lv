@@ -2,13 +2,14 @@ import llvm;
 import std::option::{Option};
 import std::hashmap::{HashMap};
 import expression;
+
 pub class CodegenContext {
   pub context: &Context;
   pub builder: Builder = context.new_builder();
   pub module: Module = context.create_module("mod");
   pub variables: HashMap<String, Variable> = HashMap();
 
-  pub func declare_variable(mut &self, name: String, value: LLVMValueRef, ty: Type, is_mut: bool) {
+  pub func declare_variable(mut &self, name: String, value: LLVMValueRef, ty: llvm::Type, is_mut: bool) {
     let llvm_type = LLVMTypeOf(value);
     let address = self.builder.build_alloca(llvm_type, name);
     self.builder.build_store(value, address);
